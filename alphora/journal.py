@@ -16,8 +16,21 @@ _EVENT_ID = re.compile(r"[0-9a-f]{64}\Z")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 _SESSION = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 _TYPES = {"ENTRY_PROPOSAL", "EXIT_PROPOSAL", "REJECTION", "RESEARCH_NOTE"}
-_SENSITIVE_KEYS = {"password", "secret", "api_key", "apikey", "token",
-                   "authorization", "credential", "access_key", "private_key"}
+# Normalize punctuation and case to reject common aliases (e.g. API-Key,
+# alpacaApiKey, client_secret). This is a best-effort key filter, not a DLP gate.
+_SENSITIVE_KEYS = {"password", "passwd", "passphrase", "secret", "apikey",
+                   "token", "authorization", "authheader", "credential",
+                   "accesskey", "privatekey", "clientsecret", "accesstoken",
+                   "refreshtoken", "bearertoken"}
+
+
+def _sensitive_key(key: str) -> bool:
+    normalized = "".join(c for c in key.casefold() if c.isascii() and c.isalnum())
+    return (normalized in _SENSITIVE_KEYS or
+            normalized.endswith(("apikey", "secret", "token", "password",
+                                 "passphrase", "privatekey", "credential",
+                                 "accesskey")) or
+            normalized.startswith("authorization"))
 _GENESIS = "0" * 64
 _MAX_PAYLOAD_BYTES = 16_384
 
@@ -47,7 +60,7 @@ class Receipt:
 def _no_float_or_secret(value):
     if isinstance(value, dict):
         for key, item in value.items():
-            if not isinstance(key, str) or key.casefold() in _SENSITIVE_KEYS:
+            if not isinstance(key, str) or _sensitive_key(key):
                 raise ValueError("INVALID_OR_SENSITIVE_PAYLOAD")
             _no_float_or_secret(item)
     elif isinstance(value, list):
