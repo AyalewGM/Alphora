@@ -71,6 +71,28 @@ class JournalTests(unittest.TestCase):
         with self.assertRaises(JournalIntegrityError):
             self.journal.replay()
 
+    def test_deleted_final_row_is_detected_before_replay_or_append(self):
+        self.journal.record(self.event)
+        second = replace(self.event, event_id="b" * 64)
+        self.journal.record(second)
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("DELETE FROM evidence WHERE sequence=2")
+        with self.assertRaises(JournalIntegrityError):
+            PaperJournal(self.path).replay()
+        with self.assertRaises(JournalIntegrityError):
+            PaperJournal(self.path).record(
+                replace(self.event, event_id="c" * 64)
+            )
+
+    def test_deleted_entire_journal_is_not_a_valid_empty_chain(self):
+        self.journal.record(self.event)
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("DELETE FROM evidence")
+        with self.assertRaises(JournalIntegrityError):
+            PaperJournal(self.path).replay()
+        with self.assertRaises(JournalIntegrityError):
+            PaperJournal(self.path).record(self.event)
+
     def test_fail_closed_inputs(self):
         invalid = (
             replace(self.event, mode="live"),
