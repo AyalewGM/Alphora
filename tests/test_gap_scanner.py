@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal as D
 from zoneinfo import ZoneInfo
 
-from alphora.research.gap_scanner import GapCandidate, screen_one, scan
+from alphora.research.gap_scanner import GapCandidate, ScannerPolicy, screen_one, scan
 
 ET = ZoneInfo("America/New_York")
 
@@ -15,6 +15,8 @@ def fixture(**changes):
         session="PREMARKET", listing="NASDAQ", security_type="COMMON",
         feed="SIP", source="synthetic-fixture",
         previous_close=D("10"), previous_close_at=datetime(2026, 10, 30, 16, tzinfo=ET),
+        previous_session_date=date(2026, 10, 30),
+        previous_session_close_at=datetime(2026, 10, 30, 16, tzinfo=ET),
         reference_price=D("10.60"), reference_price_at=datetime(2026, 11, 2, 8, 29, tzinfo=ET),
         history_through=date(2026, 10, 30), adv20=1_500_000,
         avg_daily_dollar_volume20=D("25000000"),
@@ -120,6 +122,51 @@ class ScannerTests(unittest.TestCase):
         ])
         self.assertEqual([x.symbol for x in results], ["AAAA", "BBBB", "CCCC"])
         self.assertEqual(results[-1].classification, "EXCLUDED")
+
+
+    def test_strict_boolean_attestations(self):
+        for value in ('false','no',1):
+            result=screen_one(fixture(calendar_verified=value,
+                                      corporate_actions_verified=value))
+            self.assertEqual(result.classification,'EXCLUDED')
+            self.assertIn('UNVERIFIED_TRADING_CALENDAR',result.reasons)
+            self.assertIn('UNVERIFIED_PRICE_ADJUSTMENTS',result.reasons)
+
+    def test_stale_history_and_nonregular_previous_close(self):
+        old=datetime(2026,10,1,16,tzinfo=ET)
+        result=screen_one(fixture(previous_close_at=old,history_through=date(2026,10,1)))
+        self.assertIn('PREVIOUS_CLOSE_NOT_REGULAR_SESSION',result.reasons)
+        self.assertIn('STALE_OR_MISALIGNED_HISTORY',result.reasons)
+        after=datetime(2026,10,30,19,45,tzinfo=ET)
+        result=screen_one(fixture(previous_close_at=after))
+        self.assertIn('PREVIOUS_CLOSE_NOT_REGULAR_SESSION',result.reasons)
+        self.assertEqual(result.classification,'EXCLUDED')
+
+    def test_wrong_calendar_previous_session_date_fails(self):
+        result=screen_one(fixture(previous_session_date=date(2026,10,29)))
+        self.assertIn('UNVERIFIED_PREVIOUS_SESSION',result.reasons)
+        self.assertIn('STALE_OR_MISALIGNED_HISTORY',result.reasons)
+
+    def test_previously_published_catalyst_requires_caution(self):
+        old=datetime(2026,8,1,8,30,tzinfo=ET)
+        result=screen_one(fixture(credible_catalyst_at=old))
+        self.assertEqual(result.classification,'CAUTION')
+        self.assertIn('NO_TIMELY_CATALYST',result.reasons)
+        at_close=datetime(2026,10,30,16,tzinfo=ET)
+        self.assertIn('NO_TIMELY_CATALYST',screen_one(fixture(credible_catalyst_at=at_close)).reasons)
+
+    def test_scanner_policy_validation_rejects_unsafe_settings(self):
+        for kwargs in ({'min_rvol':D(-1)}, {'max_quote_age_seconds':10**9},
+                       {'max_quote_age_seconds':True}, {'min_adv20':False}):
+            with self.assertRaisesRegex(ValueError,'INVALID_SCANNER_POLICY'):
+                ScannerPolicy(**kwargs)
+
+    def test_malformed_symbols_do_not_crash_batch_sorting(self):
+        items=[fixture(symbol=None,avg_daily_dollar_volume20=D(1)),
+               fixture(symbol='AAAA',avg_daily_dollar_volume20=D(1))]
+        self.assertEqual(len(scan(items)),2)
+        self.assertTrue(all(x.classification=='EXCLUDED' for x in scan(items)))
+
 
 
 if __name__ == "__main__":
