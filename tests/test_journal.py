@@ -114,6 +114,18 @@ class JournalTests(unittest.TestCase):
                     self.journal.record(item)
         self.assertEqual(self.journal.replay(), ())
 
+    def test_secret_field_aliases_are_rejected_without_persistence(self):
+        # Dummy markers only; real credentials must never be passed to journal.
+        aliases = ("API-Key", "apiKey", "broker_api_key", "client_secret",
+                   "refreshToken", "AuthorizationHeader", "PRIVATE-KEY",
+                   "myPassword", "auth_header", "passwd", "bearer-token")
+        for field in aliases:
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "INVALID_OR_SENSITIVE_PAYLOAD"):
+                    self.journal.record(replace(self.event,
+                        payload={"source": {"metadata": [{field: "dummy-do-not-store"}]}}))
+        self.assertEqual(self.journal.replay(), ())
+
     def test_timezone_equivalence_is_same_event(self):
         first = self.journal.record(self.event)
         zone = timezone(timedelta(hours=-5))
