@@ -5,7 +5,11 @@ in local SQLite, with immutable event IDs, serialized transactions, exact
 Decimal-as-string payloads, restart replay, and a tamper-evident hash chain.
 Use `PaperEvidence` with an explicit `mode="paper"`, an externally chosen
 64-character lowercase hexadecimal idempotency ID, a timezone-aware timestamp,
-and a redacted payload containing **no credentials**. `record()` returns a
+and a redacted payload containing **no credentials**. Common credential-key
+aliases (case, punctuation, camelCase, nested fields and broker-specific
+prefixes) are rejected before persistence, but this is **not a complete DLP
+scanner**: secrets hidden in benign-looking fields or free-text values may
+still pass. Callers must redact at the source and never pass real credentials. `record()` returns a
 receipt with `CREATED` or `DUPLICATE`, not authorization to trade. A reused ID
 with a different payload raises `INTENT_KEY_CONFLICT`.
 
