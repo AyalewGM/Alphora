@@ -33,7 +33,9 @@ class TestRisk(unittest.TestCase):
                          "DAILY_LOSS_HALT")
 
     def test_below_daily_loss_boundary(self):
-        self.assertTrue(self.decide(account=replace(self.account, day_pnl=D("-1999"))).permitted)
+        account=replace(self.account, equity=D("98001"), cash=D("98001"), day_pnl=D("-1999"))
+        proposal=replace(self.buy, quantity=D("19"))
+        self.assertTrue(self.decide(account=account, proposal=proposal).permitted)
 
     def test_persistent_halt(self):
         self.assertEqual(self.decide(account=replace(self.account, halted=True)).reason,
@@ -69,6 +71,16 @@ class TestRisk(unittest.TestCase):
     def test_cash_only(self):
         self.assertEqual(self.decide(account=replace(self.account, cash=D("-1"))).reason,
                          "INVALID_ACCOUNT_STATE")
+
+    def test_inconsistent_cash_and_pnl_fail_closed(self):
+        a=replace(self.account,equity=D("99500"),cash=D("99500"),day_pnl=D(0))
+        self.assertEqual(self.decide(account=a).reason,"INCONSISTENT_ACCOUNT_STATE")
+        a=replace(self.account,cash=D("100001"))
+        self.assertEqual(self.decide(account=a).reason,"INCONSISTENT_ACCOUNT_STATE")
+
+    def test_equity_drift_enforces_daily_halt(self):
+        a=replace(self.account,equity=D("95000"),cash=D("95000"),day_pnl=D(0))
+        self.assertEqual(self.decide(account=a).reason,"DAILY_LOSS_HALT")
 
 
 if __name__ == "__main__":
