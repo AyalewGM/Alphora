@@ -75,8 +75,15 @@ def validate_buy(
         c.isupper() or c.isdigit() or c in ".-" for c in proposal.symbol
     ):
         return Decision(False, "INVALID_SYMBOL")
-    if account.halted or account.day_pnl <= -(account.session_open_equity * DAILY_LOSS_FRACTION):
+    # Do not let an inconsistent reported P&L bypass the daily loss halt.
+    observed_day_pnl = account.equity - account.session_open_equity
+    loss_limit = -(account.session_open_equity * DAILY_LOSS_FRACTION)
+    if account.halted or account.day_pnl <= loss_limit or observed_day_pnl <= loss_limit:
         return Decision(False, "DAILY_LOSS_HALT")
+    # Cash-only, no deposits/withdrawals in this paper snapshot.
+    if (account.cash > account.equity or
+            abs(observed_day_pnl - account.day_pnl) > Decimal("0.01")):
+        return Decision(False, "INCONSISTENT_ACCOUNT_STATE")
     notional = proposal.price * proposal.quantity
     planned_risk = (proposal.price - proposal.stop_price) * proposal.quantity
     if planned_risk > account.equity * RISK_FRACTION:
