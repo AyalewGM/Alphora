@@ -128,6 +128,19 @@ class PaperJournal:
         rows = connection.execute(
             "SELECT sequence,event_id,canonical,previous_hash,record_hash "
             "FROM evidence ORDER BY sequence").fetchall()
+        # AUTOINCREMENT preserves the highest issued sequence after ordinary
+        # DELETEs. Detect accidental truncation of the tail before an empty
+        # or shortened journal can silently start a fresh hash chain.
+        # This is not an external trust anchor: a privileged actor can also
+        # rewrite sqlite_sequence or replace the entire database.
+        checkpoint = connection.execute(
+            "SELECT seq FROM sqlite_sequence WHERE name='evidence'"
+        ).fetchone()
+        issued_sequence = checkpoint[0] if checkpoint else 0
+        retained_sequence = rows[-1][0] if rows else 0
+        if (type(issued_sequence) is not int
+                or issued_sequence != retained_sequence):
+            raise JournalIntegrityError("JOURNAL_INTEGRITY_FAILURE")
         previous = _GENESIS
         for expected_sequence, (sequence, event_id, canonical, prev, digest) in enumerate(rows, 1):
             try:
