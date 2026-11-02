@@ -1,27 +1,63 @@
 # Offline paper decision proposals — Issue #8
 
-`alphora.decision` adds **pure, deterministic proposal helpers** only. It does not connect to Alpaca, fetch market data, reserve funds, submit an order, cancel an order or mutate the account. The absence of an execution adapter is an intentional safety boundary.
+The alphora.decision module emits deterministic **paper-only proposals**. No
+broker, market-data vendor or network access; no credentials, orders, capital
+reservations, deployment or real-money pathways are implemented.
 
-## Entry sizing
+## Entry contract
 
-`propose_entry()` requires a reconciled paper account, scanner `WATCHLIST` classification, `VERIFIED` catalyst, fresh point-in-time observation and a valid protective stop below the proposed entry. All monetary inputs use `Decimal`.
+A valid entry requires:
+- reconciled cash-only long-only PaperAccount: equity movement since session
+  open must match day_pnl within $0.01 and cash may not exceed equity;
+- both reported and equity-derived daily losses below the 2% shutdown limit;
+- WATCHLIST scanner status and VERIFIED catalyst from independent source checks;
+- symbol-bound ask, confirmed regular session and timestamped quote age <=120s;
+- positive ask, protective stop below ask, adequate unreserved cash and
+  verified same-instrument exposure including pending purchases.
 
-For long-only whole shares it uses the floor of:
+The candidate's indicative reference price is not used for sizing. Position
+quantity is the floor of the minimum of 0.5% current equity divided by
+ask-to-stop risk, remaining 10% instrument allocation divided by ask, and
+unreserved cash divided by ask. The risk guard independently rechecks the
+proposal. Price improvement or worsening at actual fill is not guaranteed.
 
-- 0.5% of *current* equity / planned per-share loss,
-- (10% of current equity − existing instrument notional − same-instrument pending buy notional) / proposed entry price,
-- (available simulated cash − cash reserved for pending buys) / proposed entry price.
+An entry intent key derives from session, ticker, timestamp, ask, stop and
+quantity. Repeated identical inputs give the same key, but new quotes can
+produce new keys. **Only a future persistent OMS may atomically reserve cash,
+check uniqueness, reconcile fills and cancel stale intents.** These
+read-only proposals must never be directly sent to a broker.
 
-It then calls the existing paper-only `validate_buy()` guard. The current `validate_buy` policy prohibits new buys at or beyond the daily 2% loss threshold. The $100,000 initial virtual equity and daily rebalance policy remain unchanged. These proposals are not orders; **the future durable OMS must atomically reserve/revalidate** cash/exposure and persist an idempotent intent just before any authorized paper submission. A concurrent proposal can otherwise reuse the same cash. Real fill prices and commissions may differ from proposed prices. This is not a portfolio optimizer or broker reconciliation engine.
+## Exit contract
 
-## Exit proposals
+A valid sell proposal uses a symbol-bound, fresh, regular-session bid, actual
+reconciled average fill basis, positive caller-provided position reconciliation
+version and whole filled shares. A configured gross take-profit percentage is
+measured against average fill price; a protective stop is checked first.
+Break-even and raised stops remain valid. Pending exited shares are excluded.
 
-`propose_exit()` compares the **bid** against a configurable percentage above the *reconciled average fill price*, and uses a separately recorded fixed protective stop. An adverse stop trigger takes priority. The function requires a verified regular session, a timestamped non-stale bid/ask, whole-share filled position and no outstanding exit quantity; it returns a stable sell-intent key, never places or guarantees an order. Gaps can produce losses larger than the stop distance; spreads, liquidity and slippage can prevent a profitable fill. Take-profit is **gross**, not net after transaction costs or taxes. Split adjustments, tax lots, price limits, halts and partial-exit lifecycle must be handled in the future OMS.
+A protective stop can still propose a sell for the remaining unencumbered
+shares when another exit is pending. When there is nothing unencumbered, or a
+take-profit event overlaps pending exits, the system returns
+BLOCKED_REQUIRES_RECONCILIATION, which must be surfaced as an OMS alert rather
+than silently treated as a regular HOLD.
 
-Daily rebalance applies to strategy allocation decisions, **not** to protective monitoring. The example percentage is configurable in research and should not be interpreted as a backtested optimal profit target.
+Exit intent keys include position ID, symbol, reconciliation version, reason
+and unencumbered quantity. Thus a partially filled/cancelled target cannot
+accidentally suppress a later stop with the same idempotency key.
 
-## Validation / remaining gates
+## Limitations and mandatory future gates
 
-Tests cover risk, instrument and cash reservations, halt behavior, unknown catalysts, freshness, stop precedence, take-profit threshold, pending exits, idempotency keys and corrupt positions. Still needed: point-in-time full-market data, catalyst provenance, validated broker/account snapshots, atomic reservation, persistent paper-only OMS, restart reconciliation, approval workflow, commission/slippage-aware simulation, splits/dividends, market-calendar enforcement, independent financial review and shadow replay.
+The trigger is not a guaranteed fill, stop, or net profit. Spread, slippage,
+market gaps, commissions, corporate actions, halts, half-days, concurrency,
+partial fills and broker-side state need independently validated accounting
+and resilient paper-only OMS behavior before any connectivity. Daily strategy
+rebalance does not prevent more frequent protective monitoring.
 
-No live trading endpoint or credential is implemented or authorized. Do not deploy, place paper orders, or connect any broker without separate authorization.
+Unit tests cover independent reviewer findings H1/H2 and M1-M4, including
+partial-fill-then-stop, inconsistent cash/equity/P&L, quote identity,
+pending exits, ask-based sizing and break-even stops. A strict quote-freshness
+ceiling is enforced. **Independent exact-head review is still mandatory.**
+
+Paper-order submission and even paper brokerage connectivity remain disabled
+until explicit separate owner authorization. Real-money trading remains
+strictly prohibited.
