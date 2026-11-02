@@ -1,4 +1,4 @@
-name: Python risk tests
+name: Python paper-only tests
 on:
   push:
     branches: [main, "feat/**"]
@@ -11,5 +11,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Run deterministic tests
+      - name: Install project
+        run: python -m pip install -e ".[test]"
+      - name: Run tests
         run: python -m unittest discover -s tests -v
