@@ -118,12 +118,23 @@ class JournalTests(unittest.TestCase):
         # Dummy markers only; real credentials must never be passed to journal.
         aliases = ("API-Key", "apiKey", "broker_api_key", "client_secret",
                    "refreshToken", "AuthorizationHeader", "PRIVATE-KEY",
-                   "myPassword", "auth_header", "passwd", "bearer-token")
+                   "myPassword", "auth_header", "passwd", "bearer-token",
+                   "APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "secret_key",
+                   "api_key_id", "key_id", "private_key_pem",
+                   "session_cookie", "broker.session_key")
         for field in aliases:
             with self.subTest(field=field):
                 with self.assertRaisesRegex(ValueError, "INVALID_OR_SENSITIVE_PAYLOAD"):
                     self.journal.record(replace(self.event,
                         payload={"source": {"metadata": [{field: "dummy-do-not-store"}]}}))
+        self.assertEqual(self.journal.replay(), ())
+
+    def test_extreme_nesting_fails_closed(self):
+        payload = {"safe": "value"}
+        for _ in range(40):
+            payload = {"outer": [payload]}
+        with self.assertRaisesRegex(ValueError, "INVALID_PAPER_EVIDENCE"):
+            self.journal.record(replace(self.event, payload=payload))
         self.assertEqual(self.journal.replay(), ())
 
     def test_timezone_equivalence_is_same_event(self):
