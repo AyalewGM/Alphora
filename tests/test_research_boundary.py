@@ -17,4 +17,4 @@ class ResearchBoundaryTests(unittest.TestCase):
     def test_documented_no_live_execution(self):
         text=(ROOT/"docs/LEAN_EVALUATION.md").read_text()
         self.assertIn("paper-api.alpaca.markets", text)
-        self.assertIn("NOT a production LEAN implementation", text)
+        self.assertIn("not a production LEAN implementation", text)
