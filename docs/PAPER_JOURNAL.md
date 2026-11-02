@@ -18,10 +18,13 @@ revalidate account state and enforce 0.5% trade risk, 10% per-instrument
 allocation, 2% session-loss shutdown, and cash/pending-order limits at the
 reservation point. Paper-broker connectivity requires separate owner approval.
 
-The local hash chain detects routine corruption and unsophisticated database
-changes. It **does not authenticate origin or prevent a privileged actor from
-rewriting the full chain or deleting the tail**. Before any operational use,
-require separately anchored audit receipts, backup/restore validation,
-permissions, reconciliation and concurrent crash testing.
+The local hash chain detects routine corruption; the SQLite AUTOINCREMENT
+sequence additionally detects ordinary deletion of the last row or even every
+evidence row. It **does not authenticate origin or prevent a privileged actor
+from rewriting the full chain, altering sqlite_sequence, replacing the entire
+database, or restoring an older valid snapshot**. These safeguards are not an
+external trust anchor. Before any operational use, require separately anchored
+audit receipts, backup/restore validation, permissions, reconciliation and
+concurrent crash testing.
 
 Test: `python -m unittest discover -s tests -v`.
