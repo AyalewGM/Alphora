@@ -1,0 +1,75 @@
+import unittest
+from dataclasses import replace
+from decimal import Decimal as D
+from alphora.risk import PaperAccount, BuyProposal, validate_buy, INITIAL_EQUITY, REBALANCE_FREQUENCY
+
+
+class TestRisk(unittest.TestCase):
+    def setUp(self):
+        self.account = PaperAccount(D("100000"), D("100000"), D("100000"), D("0"), "2026-11-02")
+        self.buy = BuyProposal("SPY", D("20"), D("500"), D("475"))
+
+    def decide(self, account=None, proposal=None, **kwargs):
+        return validate_buy(account or self.account, proposal or self.buy,
+                            expected_session_id="2026-11-02", **kwargs)
+
+    def test_config(self):
+        self.assertEqual(INITIAL_EQUITY, D("100000"))
+        self.assertEqual(REBALANCE_FREQUENCY, "daily")
+
+    def test_boundary_500_risk_and_10000_allocation(self):
+        self.assertTrue(self.decide().permitted)
+
+    def test_risk_exceeds_500(self):
+        self.assertEqual(self.decide(proposal=replace(self.buy, stop_price=D("474"))).reason,
+                         "TRADE_RISK_EXCEEDED")
+
+    def test_allocation_exceeds_10000(self):
+        self.assertEqual(self.decide(proposal=replace(self.buy, existing_instrument_value=D("1"))).reason,
+                         "INSTRUMENT_ALLOCATION_EXCEEDED")
+
+    def test_daily_loss_boundary_2000(self):
+        self.assertEqual(self.decide(account=replace(self.account, day_pnl=D("-2000"))).reason,
+                         "DAILY_LOSS_HALT")
+
+    def test_below_daily_loss_boundary(self):
+        self.assertTrue(self.decide(account=replace(self.account, day_pnl=D("-1999"))).permitted)
+
+    def test_persistent_halt(self):
+        self.assertEqual(self.decide(account=replace(self.account, halted=True)).reason,
+                         "DAILY_LOSS_HALT")
+
+    def test_bad_session(self):
+        self.assertEqual(validate_buy(self.account, self.buy, expected_session_id="wrong").reason,
+                         "SESSION_MISMATCH")
+
+    def test_live_mode_rejected(self):
+        self.assertEqual(self.decide(mode="live").reason, "REAL_TRADING_DISABLED")
+
+    def test_insufficient_cash(self):
+        self.assertEqual(self.decide(account=replace(self.account, cash=D("9999"))).reason,
+                         "INSUFFICIENT_CASH")
+
+    def test_invalid_stop(self):
+        self.assertEqual(self.decide(proposal=replace(self.buy, stop_price=D("501"))).reason,
+                         "INVALID_STOP")
+
+    def test_negative_qty(self):
+        self.assertEqual(self.decide(proposal=replace(self.buy, quantity=D("-1"))).reason,
+                         "INVALID_ACCOUNT_OR_ORDER")
+
+    def test_nan_fails_closed(self):
+        self.assertEqual(self.decide(proposal=replace(self.buy, price=D("NaN"))).reason,
+                         "INVALID_ACCOUNT_OR_ORDER")
+
+    def test_bad_symbol(self):
+        self.assertEqual(self.decide(proposal=replace(self.buy, symbol="SPY;DROP")).reason,
+                         "INVALID_SYMBOL")
+
+    def test_cash_only(self):
+        self.assertEqual(self.decide(account=replace(self.account, cash=D("-1"))).reason,
+                         "INVALID_ACCOUNT_STATE")
+
+
+if __name__ == "__main__":
+    unittest.main()
