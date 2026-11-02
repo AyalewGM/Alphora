@@ -26,6 +26,20 @@ class ScannerPolicy:
     small_float_shares: int = 10_000_000
     extreme_gap_pct: D = D("25")
 
+    def __post_init__(self):
+        for name in ("min_price","min_gap_pct","min_avg_daily_dollar_volume",
+                     "min_rvol","max_spread_pct","extreme_gap_pct"):
+            value=getattr(self,name)
+            if not isinstance(value,D) or not value.is_finite() or value <= 0:
+                raise ValueError("INVALID_SCANNER_POLICY")
+        for name in ("min_adv20","min_premarket_volume","small_float_shares"):
+            value=getattr(self,name)
+            if type(value) is not int or value <= 0:
+                raise ValueError("INVALID_SCANNER_POLICY")
+        if (type(self.max_quote_age_seconds) is not int
+                or not 0 <= self.max_quote_age_seconds <= 120):
+            raise ValueError("INVALID_SCANNER_POLICY")
+
 
 @dataclass(frozen=True)
 class GapCandidate:
@@ -38,6 +52,8 @@ class GapCandidate:
     source: str                     # Vendor/provenance identifier, never a secret
     previous_close: D
     previous_close_at: datetime
+    previous_session_date: date       # verified immediately preceding trading session
+    previous_session_close_at: datetime  # verified exchange regular close, e.g. 13:00 half-day
     reference_price: D              # Latest premarket price OR regular-session opening price
     reference_price_at: datetime
     history_through: date           # Date of last completed historical session
@@ -101,9 +117,9 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
         _append_once(excluded, "MISSING_MARKET_PROVENANCE")
     elif candidate.feed != "SIP":
         _append_once(caution, "NON_CONSOLIDATED_FEED")
-    if not candidate.calendar_verified:
+    if candidate.calendar_verified is not True:
         _append_once(excluded, "UNVERIFIED_TRADING_CALENDAR")
-    if not candidate.corporate_actions_verified:
+    if candidate.corporate_actions_verified is not True:
         _append_once(excluded, "UNVERIFIED_PRICE_ADJUSTMENTS")
 
     if not (_positive(candidate.previous_close) and _positive(candidate.reference_price)):
@@ -118,7 +134,9 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
             _append_once(caution, "EXTREME_GAP_REVIEW")
 
     if (not _timestamp(candidate.as_of) or not _timestamp(candidate.reference_price_at)
-            or not _timestamp(candidate.previous_close_at)):
+            or not _timestamp(candidate.previous_close_at)
+            or not _timestamp(candidate.previous_session_close_at)
+            or type(candidate.previous_session_date) is not date):
         _append_once(excluded, "INVALID_EVENT_TIMESTAMP")
     else:
         now = candidate.as_of.astimezone(EASTERN)
@@ -135,8 +153,20 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
             if not (time(9, 30) <= now.time() < time(16, 0)
                     and time(9, 30) <= ref.time() < time(9, 31)):
                 _append_once(excluded, "INVALID_OPEN_PRICE_TIME")
+        # Dates come from an independently verified exchange calendar.
+        # Require the previous close to equal the expected *regular-session*
+        # closing timestamp; never treat an after-hours print as "close".
+        expected_close = candidate.previous_session_close_at.astimezone(EASTERN)
+        if (candidate.previous_session_date >= now.date()
+                or expected_close.date() != candidate.previous_session_date
+                or not time(13, 0) <= expected_close.time() <= time(16, 0)):
+            _append_once(excluded, "UNVERIFIED_PREVIOUS_SESSION")
+        if candidate.previous_close_at != candidate.previous_session_close_at:
+            _append_once(excluded, "PREVIOUS_CLOSE_NOT_REGULAR_SESSION")
         if type(candidate.history_through) is not date or candidate.history_through >= now.date():
             _append_once(excluded, "HISTORY_LOOKAHEAD")
+        elif candidate.history_through != candidate.previous_session_date:
+            _append_once(excluded, "STALE_OR_MISALIGNED_HISTORY")
 
     if type(candidate.adv20) is not int or candidate.adv20 < policy.min_adv20:
         _append_once(excluded, "LOW_OR_INVALID_ADV20")
@@ -177,6 +207,9 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
         _timestamp(candidate.as_of) and candidate.credible_catalyst_at > candidate.as_of
     ):
         _append_once(excluded, "FUTURE_OR_INVALID_CATALYST")
+    elif (_timestamp(candidate.previous_close_at)
+          and candidate.credible_catalyst_at <= candidate.previous_close_at):
+        _append_once(caution, "NO_TIMELY_CATALYST")
     if candidate.promotion_signal is True:
         _append_once(excluded, "PROMOTIONAL_ACTIVITY_FLAG")
     elif candidate.promotion_signal is not False:
@@ -209,6 +242,6 @@ def scan(candidates: list[GapCandidate], policy: ScannerPolicy = ScannerPolicy()
         -item[1].avg_daily_dollar_volume20
             if _positive(item[1].avg_daily_dollar_volume20) else D(0),
         -(item[0].rvol or D(0)),
-        item[0].symbol,
+        str(item[0].symbol),
     ))
     return [result for result, _ in results]
