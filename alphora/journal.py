@@ -102,7 +102,8 @@ class PaperJournal:
 
     def __init__(self, path: str | Path):
         self.path = str(path)
-        if self.path == ":memory:":
+        if (not self.path.strip() or self.path == ":memory:" or
+                self.path.startswith("file:")):
             raise ValueError("DURABLE_PATH_REQUIRED")
         connection = self._connect()
         try:
