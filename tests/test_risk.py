@@ -72,6 +72,34 @@ class TestRisk(unittest.TestCase):
         self.assertEqual(self.decide(account=replace(self.account, cash=D("-1"))).reason,
                          "INVALID_ACCOUNT_STATE")
 
+    def test_direct_risk_guard_rejects_fractional_shares(self):
+        # Proposals must remain whole-share even if callers bypass propose_entry.
+        for qty in (D("0.5"), D("1.5"), D("19.999")):
+            with self.subTest(quantity=qty):
+                proposal = replace(self.buy, quantity=qty)
+                self.assertEqual(self.decide(proposal=proposal).reason,
+                                 "INVALID_ACCOUNT_OR_ORDER")
+        self.assertTrue(self.decide().permitted)
+
+    def test_direct_risk_guard_rejects_nonstring_symbol(self):
+        for symbol in (123, True, None):
+            with self.subTest(symbol=symbol):
+                proposal = replace(self.buy, symbol=symbol)
+                self.assertEqual(self.decide(proposal=proposal).reason,
+                                 "INVALID_SYMBOL")
+
+    def test_direct_risk_guard_rejects_nonstring_session_ids(self):
+        numeric_session = replace(self.account, session_id=20261102)
+        self.assertEqual(
+            validate_buy(numeric_session, self.buy, expected_session_id=20261102).reason,
+            "SESSION_MISMATCH",
+        )
+        empty_session = replace(self.account, session_id="")
+        self.assertEqual(
+            validate_buy(empty_session, self.buy, expected_session_id="").reason,
+            "SESSION_MISMATCH",
+        )
+
     def test_inconsistent_cash_and_pnl_fail_closed(self):
         a=replace(self.account,equity=D("99500"),cash=D("99500"),day_pnl=D(0))
         self.assertEqual(self.decide(account=a).reason,"INCONSISTENT_ACCOUNT_STATE")
