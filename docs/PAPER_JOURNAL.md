@@ -9,6 +9,11 @@ and a redacted payload containing **no credentials**. `record()` returns a
 receipt with `CREATED` or `DUPLICATE`, not authorization to trade. A reused ID
 with a different payload raises `INTENT_KEY_CONFLICT`.
 
+The journal requires an explicit disk-backed SQLite filesystem path. Blank paths,
+SQLite `:memory:` and `file:` URI filenames are rejected, because SQLite can
+silently create transient databases for those forms. The caller remains
+responsible for durable storage, backup validation and file permissions.
+
 **This is not an OMS or a funds reservation service.** It makes no decisions,
 reserves no cash, simulates no fills, submits no orders, and has no network,
 Alpaca or brokerage dependencies. It is intentionally independent of the
