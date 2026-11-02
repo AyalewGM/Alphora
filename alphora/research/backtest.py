@@ -19,7 +19,8 @@ def validate(bars):
     for i,b in enumerate(bars):
         p=(b.open,b.high,b.low,b.close)
         if (not all(isinstance(x,D) and x.is_finite() and x>0 for x in p)
-            or not isinstance(b.volume,int) or b.volume<0
+            or type(b.day) is not date
+            or type(b.volume) is not int or b.volume<0
             or b.low>min(b.open,b.close,b.high) or b.high<max(b.open,b.close,b.low)
             or (i and b.day<=bars[i-1].day)):
             raise ValueError("INVALID_BARS")
