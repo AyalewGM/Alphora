@@ -26,11 +26,13 @@ _SENSITIVE_KEYS = {"password", "passwd", "passphrase", "secret", "apikey",
 
 def _sensitive_key(key: str) -> bool:
     normalized = "".join(c for c in key.casefold() if c.isascii() and c.isalnum())
-    return (normalized in _SENSITIVE_KEYS or
-            normalized.endswith(("apikey", "secret", "token", "password",
-                                 "passphrase", "privatekey", "credential",
-                                 "accesskey")) or
-            normalized.startswith("authorization"))
+    # Fail closed on broker key aliases, including APCA_API_KEY_ID.
+    # A key-name heuristic is not content scanning or secret prevention.
+    sensitive_parts = ("secret", "password", "passphrase", "token", "apikey",
+                       "privatekey", "accesskey", "credential", "cookie",
+                       "sessionkey", "keyid", "authorization")
+    return (normalized.startswith("apca") or normalized in _SENSITIVE_KEYS
+            or any(part in normalized for part in sensitive_parts))
 _GENESIS = "0" * 64
 _MAX_PAYLOAD_BYTES = 16_384
 
@@ -57,15 +59,17 @@ class Receipt:
     record_hash: str
 
 
-def _no_float_or_secret(value):
+def _no_float_or_secret(value, depth=0):
+    if depth > 32:
+        raise ValueError("INVALID_PAPER_EVIDENCE")
     if isinstance(value, dict):
         for key, item in value.items():
             if not isinstance(key, str) or _sensitive_key(key):
                 raise ValueError("INVALID_OR_SENSITIVE_PAYLOAD")
-            _no_float_or_secret(item)
+            _no_float_or_secret(item, depth + 1)
     elif isinstance(value, list):
         for item in value:
-            _no_float_or_secret(item)
+            _no_float_or_secret(item, depth + 1)
     elif value is not None and type(value) not in (str, int, bool):
         # Financial amounts must be exact decimal *strings*, not binary floats.
         raise ValueError("INVALID_OR_SENSITIVE_PAYLOAD")
