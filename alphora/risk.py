@@ -54,10 +54,16 @@ def validate_buy(
     """
     if mode != "paper":
         return Decision(False, "REAL_TRADING_DISABLED")
-    if not account.session_id or account.session_id != expected_session_id:
+    if (not isinstance(expected_session_id, str) or not expected_session_id
+            or not isinstance(account.session_id, str) or not account.session_id
+            or account.session_id != expected_session_id):
         return Decision(False, "SESSION_MISMATCH")
     if not all(_positive_finite(v) for v in
                (account.equity, account.session_open_equity, proposal.quantity, proposal.price)):
+        return Decision(False, "INVALID_ACCOUNT_OR_ORDER")
+    # Direct callers of the final risk guard must not bypass the whole-share
+    # contract of the offline decision engine with fractional order proposals.
+    if proposal.quantity != proposal.quantity.to_integral_value():
         return Decision(False, "INVALID_ACCOUNT_OR_ORDER")
     if (not isinstance(account.cash, Decimal) or not account.cash.is_finite()
             or account.cash < 0 or not isinstance(account.day_pnl, Decimal)
@@ -71,9 +77,10 @@ def validate_buy(
             not proposal.existing_instrument_value.is_finite()
             or proposal.existing_instrument_value < 0):
         return Decision(False, "INVALID_EXISTING_POSITION")
-    if not proposal.symbol or not proposal.symbol.isascii() or not all(
-        c.isupper() or c.isdigit() or c in ".-" for c in proposal.symbol
-    ):
+    if (not isinstance(proposal.symbol, str) or not proposal.symbol
+            or not proposal.symbol.isascii() or not all(
+                c.isupper() or c.isdigit() or c in ".-" for c in proposal.symbol
+            )):
         return Decision(False, "INVALID_SYMBOL")
     # Do not let an inconsistent reported P&L bypass the daily loss halt.
     observed_day_pnl = account.equity - account.session_open_equity
