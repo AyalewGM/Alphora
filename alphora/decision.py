@@ -10,7 +10,9 @@ from hashlib import sha256
 import re
 
 from .risk import (BuyProposal, PaperAccount, RISK_FRACTION,
-                   MAX_INSTRUMENT_FRACTION, validate_buy)
+                   MAX_INSTRUMENT_FRACTION, DAILY_LOSS_FRACTION, validate_buy)
+
+MAX_QUOTE_AGE_SECONDS = 120
 
 
 def _positive(value):
@@ -44,6 +46,9 @@ class EntryCandidate:
     observed_at: datetime
     scanner_classification: str
     catalyst_status: str
+    ask: D  # verified executable-side price; "price" is indicative only
+    quote_symbol: str
+    regular_session_verified: bool
     existing_instrument_value: D = D("0")
     pending_instrument_value: D = D("0")
 
@@ -53,6 +58,7 @@ class EntryPlan:
     permitted: bool
     reason: str
     proposal: BuyProposal | None = None
+    intent_key: str | None = None
 
 
 def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
@@ -68,16 +74,20 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
         return EntryPlan(False, "UNRECONCILED_STATE")
     if not isinstance(candidate.symbol, str) or not candidate.symbol:
         return EntryPlan(False, "INVALID_SYMBOL")
-    if type(max_age_seconds) is not int or max_age_seconds < 0:
+    if type(max_age_seconds) is not int or not 0 <= max_age_seconds <= MAX_QUOTE_AGE_SECONDS:
         return EntryPlan(False, "INVALID_FRESHNESS_POLICY")
+    if candidate.quote_symbol != candidate.symbol:
+        return EntryPlan(False, "QUOTE_SYMBOL_MISMATCH")
+    if candidate.regular_session_verified is not True:
+        return EntryPlan(False, "UNVERIFIED_REGULAR_SESSION")
     if not _fresh(candidate.observed_at, as_of, max_age_seconds):
         return EntryPlan(False, "STALE_OR_FUTURE_DATA")
     if candidate.scanner_classification != "WATCHLIST":
         return EntryPlan(False, "SCANNER_NOT_ELIGIBLE")
     if candidate.catalyst_status != "VERIFIED":
         return EntryPlan(False, "CATALYST_REVIEW_REQUIRED")
-    if not (_positive(candidate.price) and _positive(candidate.stop_price)
-            and candidate.stop_price < candidate.price):
+    if not (_positive(candidate.price) and _positive(candidate.ask) and _positive(candidate.stop_price)
+            and candidate.stop_price < candidate.ask):
         return EntryPlan(False, "INVALID_ENTRY_OR_STOP")
     if not all(_nonnegative(x) for x in (reserved_cash,
                                          candidate.existing_instrument_value,
@@ -85,6 +95,17 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
         return EntryPlan(False, "INVALID_RESERVATIONS")
     if not isinstance(account.cash, D) or not account.cash.is_finite() or account.cash < 0:
         return EntryPlan(False, "INVALID_ACCOUNT_STATE")
+    # Check the unreserved account first, before reservations reduce cash.
+    if (isinstance(account.equity, D) and account.equity.is_finite()
+            and isinstance(account.session_open_equity, D) and account.session_open_equity.is_finite()
+            and isinstance(account.day_pnl, D) and account.day_pnl.is_finite()):
+        loss_limit = -(account.session_open_equity * DAILY_LOSS_FRACTION)
+        if (account.halted or account.day_pnl <= loss_limit
+                or account.equity - account.session_open_equity <= loss_limit):
+            return EntryPlan(False, "DAILY_LOSS_HALT")
+        if (account.cash > account.equity or
+                abs(account.equity - account.session_open_equity - account.day_pnl) > D("0.01")):
+            return EntryPlan(False, "INCONSISTENT_ACCOUNT_STATE")
     if reserved_cash > account.cash:
         return EntryPlan(False, "OVERCOMMITTED_CASH")
     # Validate session, daily loss halt, symbol and account with an ordinary
@@ -93,23 +114,27 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
                            candidate.pending_instrument_value)
     available_cash = account.cash - reserved_cash
     account_available = replace(account, cash=available_cash)
-    minimum = BuyProposal(candidate.symbol, D(1), candidate.price,
+    minimum = BuyProposal(candidate.symbol, D(1), candidate.ask,
                           candidate.stop_price, reserved_instrument)
     precheck = validate_buy(account_available, minimum,
                             expected_session_id=expected_session_id)
     if not precheck.permitted:
         return EntryPlan(False, precheck.reason)
-    by_risk = account.equity * RISK_FRACTION / (candidate.price - candidate.stop_price)
-    by_instrument = (account.equity * MAX_INSTRUMENT_FRACTION - reserved_instrument) / candidate.price
-    by_cash = available_cash / candidate.price
+    by_risk = account.equity * RISK_FRACTION / (candidate.ask - candidate.stop_price)
+    by_instrument = (account.equity * MAX_INSTRUMENT_FRACTION - reserved_instrument) / candidate.ask
+    by_cash = available_cash / candidate.ask
     quantity = min(by_risk, by_instrument, by_cash).to_integral_value(rounding=ROUND_FLOOR)
     if quantity < 1:
         return EntryPlan(False, "ZERO_AFFORDABLE_SHARES")
     proposal = replace(minimum, quantity=quantity)
     checked = validate_buy(account_available, proposal,
                             expected_session_id=expected_session_id)
-    return EntryPlan(checked.permitted, checked.reason,
-                     proposal if checked.permitted else None)
+    if not checked.permitted:
+        return EntryPlan(False, checked.reason)
+    key = sha256((f"PAPER|ENTRY|{expected_session_id}|{candidate.symbol}|"
+                  f"{candidate.observed_at.isoformat()}|{candidate.ask}|"
+                  f"{candidate.stop_price}|{quantity}").encode("utf-8")).hexdigest()
+    return EntryPlan(True, checked.reason, proposal, key)
 
 
 @dataclass(frozen=True)
@@ -119,11 +144,13 @@ class FilledPosition:
     filled_quantity: D
     average_fill_price: D
     protective_stop_price: D
+    reconciliation_version: int = 0  # positive caller-supplied position revision
     pending_exit_quantity: D = D("0")
 
 
 @dataclass(frozen=True)
 class ExitQuote:
+    symbol: str
     bid: D
     ask: D
     observed_at: datetime
@@ -156,16 +183,17 @@ def propose_exit(position: FilledPosition, quote: ExitQuote, *,
     if not (_whole(position.filled_quantity) and
             _positive(position.average_fill_price) and
             _positive(position.protective_stop_price) and
-            position.protective_stop_price < position.average_fill_price and
+            type(position.reconciliation_version) is int and
+            position.reconciliation_version > 0 and
             _nonnegative(position.pending_exit_quantity) and
             position.pending_exit_quantity <= position.filled_quantity and
             position.pending_exit_quantity == position.pending_exit_quantity.to_integral_value()):
         return hold("INVALID_POSITION_STATE")
-    if position.pending_exit_quantity:
-        return hold("PENDING_EXIT_RECONCILIATION")
+    if quote.symbol != position.symbol:
+        return hold("QUOTE_SYMBOL_MISMATCH")
     if not (_positive(take_profit_pct) and take_profit_pct < D("1000")):
         return hold("INVALID_TARGET")
-    if type(max_age_seconds) is not int or max_age_seconds < 0:
+    if type(max_age_seconds) is not int or not 0 <= max_age_seconds <= MAX_QUOTE_AGE_SECONDS:
         return hold("INVALID_FRESHNESS_POLICY")
     if quote.regular_session_verified is not True:
         return hold("UNVERIFIED_REGULAR_SESSION")
@@ -173,12 +201,21 @@ def propose_exit(position: FilledPosition, quote: ExitQuote, *,
         return hold("STALE_OR_FUTURE_QUOTE")
     if not (_positive(quote.bid) and _positive(quote.ask) and quote.bid <= quote.ask):
         return hold("INVALID_QUOTE")
+    available_quantity = position.filled_quantity - position.pending_exit_quantity
+    if not available_quantity:
+        return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
     if quote.bid <= position.protective_stop_price:
         reason = "PROTECTIVE_EXIT"
     elif quote.bid >= position.average_fill_price * (D(1) + take_profit_pct / 100):
+        if position.pending_exit_quantity:
+            return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
         reason = "TAKE_PROFIT"
     else:
+        if position.pending_exit_quantity:
+            return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
         return hold("TARGET_NOT_REACHED")
     # Stable across repeated evaluation of the same position / exit decision.
-    key = sha256(f"PAPER|{position.position_id}|{position.symbol}|EXIT".encode("utf-8")).hexdigest()
-    return ExitPlan("PROPOSE_PAPER_SELL", reason, position.filled_quantity, key)
+    key = sha256((f"PAPER|EXIT|{position.position_id}|{position.symbol}|"
+                  f"{position.reconciliation_version}|{reason}|{available_quantity}")
+                 .encode("utf-8")).hexdigest()
+    return ExitPlan("PROPOSE_PAPER_SELL", reason, available_quantity, key)
