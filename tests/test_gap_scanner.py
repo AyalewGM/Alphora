@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal as D
 from zoneinfo import ZoneInfo
 
-from alphora.research.gap_scanner import GapCandidate, scan_one, scan
+from alphora.research.gap_scanner import GapCandidate, screen_one, scan
 
 ET = ZoneInfo("America/New_York")
 
