@@ -122,8 +122,13 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(first.sequence, 1)
 
     def test_requires_disk_path(self):
-        with self.assertRaisesRegex(ValueError, "DURABLE_PATH_REQUIRED"):
-            PaperJournal(":memory:")
+        # SQLite opens empty names as temporary DBs and recognizes file: URI
+        # in-memory modes even when sqlite3.connect(uri=False) is the default.
+        for path in ("", "   ", ":memory:", "file::memory:?cache=shared",
+                     "file:journal?mode=memory&cache=shared"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ValueError, "DURABLE_PATH_REQUIRED"):
+                    PaperJournal(path)
 
 
 if __name__ == "__main__":
