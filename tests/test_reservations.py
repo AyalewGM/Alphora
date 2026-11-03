@@ -58,6 +58,17 @@ class OfflineReservationTests(unittest.TestCase):
         self.reserve("b", self.proposal(qty="80"))
         self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
 
+    def test_fee_budget_is_included_in_per_trade_planned_loss(self):
+        # A fee cap is potential loss in addition to the price-to-stop
+        # distance. With 100 shares at 50 and a stop at 48 the initial
+        # $500 risk cap leaves at most $300 for synthetic fees.
+        with self.assertRaisesRegex(ValueError, "RISK_VETO:TRADE_RISK_EXCEEDED"):
+            self.reserve("fee-over", fee_budget=D("300.01"))
+        self.assertEqual(self.book.snapshot().pending, ())
+        state = self.reserve("fee-at-cap", fee_budget=D("300"))
+        self.assertEqual(state.reserved_cash, D("5300"))
+        self.assertEqual(state.available_cash, D("94700"))
+
     def test_daily_loss_and_planned_trade_risk_veto(self):
         with self.assertRaisesRegex(ValueError, "TRADE_RISK_EXCEEDED"):
             self.reserve("a", self.proposal(qty="100", stop="44"))
