@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from .risk import BuyProposal, PaperAccount, INITIAL_EQUITY, DAILY_LOSS_FRACTION, validate_buy
+from .risk import BuyProposal, PaperAccount, INITIAL_EQUITY, DAILY_LOSS_FRACTION, RISK_FRACTION, validate_buy
 
 _ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
@@ -277,6 +277,12 @@ class OfflineReservations:
                 # raising inside _write() would roll back the shutdown.
                 self._db.execute("UPDATE book_meta SET value='1' WHERE key='halted'")
             else:
+                # A maximum synthetic fee is potential loss at the stop.
+                # The pre-trade guard checks price-to-stop risk alone, so
+                # including this budget prevents a fee-only risk-cap bypass.
+                if ((proposal.price - proposal.stop_price) * proposal.quantity
+                        + fee_budget > account.equity * RISK_FRACTION):
+                    raise ValueError("RISK_VETO:TRADE_RISK_EXCEEDED")
                 if proposal.quantity != proposal.quantity.to_integral_value():
                     raise ValueError("FRACTIONAL_SHARES")
                 quantity = int(proposal.quantity)
