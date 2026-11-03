@@ -129,7 +129,7 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
                 aapl, changed_asof, "buy_hold",
                 expected_strategy_sha256=aapl.sha256,
                 expected_spy_sha256=changed_asof.sha256)
-        shifted = candidate(day_shift=1)
+        shifted = candidate(day_shift=-1, as_of=self.spy.as_of)
         with self.assertRaisesRegex(ValueError, "BENCHMARK_DATE_MISMATCH"):
             compare_candidate_snapshots(
                 shifted, self.spy, "buy_hold",
