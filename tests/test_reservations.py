@@ -243,7 +243,7 @@ os._exit(24)  # No close or normal interpreter shutdown.
         recovered = self.book.snapshot()
         self.assertEqual(recovered.cash, D("99019"))
         self.assertEqual(recovered.reserved_cash, D("4001"))
-        self.assertEqual(recovered.positions, (("SPY", 20, D("980")),))
+        self.assertEqual(recovered.positions, (("SPY", 20, D("981")),))
         self.assertEqual(self.book.record_hypothetical_fill(
             "abrupt", "child-fill", 20, D("49"), fee=D("1")), recovered)
 
@@ -260,7 +260,7 @@ os._exit(24)  # No close or normal interpreter shutdown.
         self.assertEqual(state.cash, D("98038"))
         self.assertEqual(state.reserved_cash, D("3003"))
         self.assertEqual(state.available_cash, D("95035"))
-        self.assertEqual(state.positions, (("SPY", 40, D("1960")),))
+        self.assertEqual(state.positions, (("SPY", 40, D("1962")),))
         self.assertEqual(state.pending[0][2], 60)
         self.assertEqual(self.book.record_hypothetical_fill("p", "f1", 40, D("49"), fee=D("2")), state)
         with self.assertRaisesRegex(ValueError, "CONFLICTING_FILL_ID"):
@@ -268,7 +268,24 @@ os._exit(24)  # No close or normal interpreter shutdown.
         final = self.book.record_hypothetical_fill("p", "f2", 60, D("50"), fee=D("2"))
         self.assertEqual(final.cash, D("95036"))
         self.assertEqual(final.reserved_cash, D(0))
-        self.assertEqual(final.positions, (("SPY", 100, D("4960")),))
+        self.assertEqual(final.positions, (("SPY", 100, D("4964")),))
+
+    def test_fill_fees_enter_acquisition_cost_and_instrument_cap(self):
+        # Actual synthetic buy fees reduce cash AND increase acquisition
+        # cost basis; omitting them lets future same-symbol purchases breach
+        # the conservative 10% cost-based exposure floor.
+        self.reserve("fees", self.proposal(qty="20", stop="49"),
+                     fee_budget=D("100"))
+        filled = self.book.record_hypothetical_fill(
+            "fees", "fee-fill", 20, D("49"), fee=D("60"))
+        self.assertEqual(filled.cash, D("98960"))
+        self.assertEqual(filled.reserved_cash, D("0"))
+        self.assertEqual(filled.positions, (("SPY", 20, D("1040")),))
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+            self.reserve("excess-exposure", self.proposal(qty="180", stop="49"))
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), filled)
 
     def test_no_overfill_gaps_or_unbudgeted_fees(self):
         self.reserve("a", fee_budget=D("1"))
