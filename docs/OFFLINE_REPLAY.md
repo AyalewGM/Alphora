@@ -33,7 +33,26 @@ itself is complete or authentic, and it does not fetch an exchange calendar.
 The returned `session_manifest_matched` field is `False` when no manifest is
 supplied; it becomes `True` only after exact equality is checked, **not**
 vendor/calendar verification. Do not interpret an unchecked replay as complete
-session coverage. The replay/comparison also records `cost_bps` and `lookback`
+session coverage.
+
+### Optional independently pinned calendar-manifest digest
+
+Both replay functions also accept `expected_session_manifest_sha256=...`. The
+caller must keep this lowercase SHA-256 **separately** from the bar snapshot
+and the session-date manifest. To produce it deterministically, use
+`session_manifest_sha256(expected_session_dates)` before independently
+retaining the receipt. Canonical bytes are the ASCII prefix
+`alphora-session-manifest-v1` followed by a newline and strictly ordered
+`YYYY-MM-DD` dates joined by newlines, with no trailing newline.
+
+When supplied, a missing manifest, malformed hash or changed manifest hash
+fails closed. `session_manifest_digest_matched` reports whether this **hash
+equality** was checked; it remains `False` for an unpinned manifest, even
+when `session_manifest_matched` is `True`. Pinned means only exact receipt
+reproducibility. Hashing a manifest derived from the same bars and pinning the
+hash alongside them is not independent evidence, and SHA-256 cannot establish
+exchange calendars, early closes, holidays, halts, vendor trust, completeness
+or license rights. The caller remains responsible for independent provenance. The replay/comparison also records `cost_bps` and `lookback`
 to make these otherwise easy-to-omit research assumptions visible. Before any
 performance claims, obtain an independently sourced session manifest including
 holidays, early closes and halts, plus independent vendor data receipts. These
