@@ -84,6 +84,22 @@ require separate deterministic execution/portfolio enforcement and are
 research assumption; they do not model market impact, slippage, spreads or
 guaranteed stop fills.
 
+
+## Same-session SPY risk comparisons
+
+The comparison now carries an additional `comparison.aligned_strategy`,
+`comparison.aligned_capped_spy` and
+`comparison.aligned_fully_invested_spy` summary. Each reports return,
+max drawdown, Sharpe and number of session observations on identical
+post-warm-up dates. For non-buy-hold strategies, the legacy
+`comparison.strategy.sharpe` includes warm-up flat cash sessions and must
+**not** be directly compared with the shorter SPY series Sharpe. The new
+aligned summaries correct that *window mismatch* without changing the raw
+backtest or claiming risk/exposure-adjusted alpha. A 100%-invested SPY proxy
+continues to violate the approved 10% single-instrument limit and is clearly
+research context, never a compliant simulation. No live market or paper
+execution is involved.
+
 ## Critical limitations
 
 - All first-seen and revision timestamps are **caller-supplied claims**; a
