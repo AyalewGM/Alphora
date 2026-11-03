@@ -4,9 +4,10 @@ No network, broker, order, real-money, scheduler or automated execution paths.
 Rechecking a hash is not vendor authentication or calendar/corporate-action QA.
 """
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal as D
 from hashlib import sha256
+import json
 from typing import Final, Sequence
 
 from .backtest import Result, backtest
@@ -36,6 +37,7 @@ class ResearchReplay:
     session_manifest_session_count: int | None
     cost_bps: D
     lookback: int
+    input_fingerprint_sha256: str  # Local reproducibility receipt, NOT vendor proof.
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,7 @@ class ResearchComparison:
     session_manifest_session_count: int | None
     cost_bps: D
     lookback: int
+    input_fingerprint_sha256: str  # Local reproducibility receipt, NOT vendor proof.
 
 
 def _checked(snapshot: DataSnapshot, *, expected_sha256: str) -> DataSnapshot:
@@ -118,6 +121,36 @@ def _check_expected_sessions(
     return True, expected_session_manifest_sha256 is not None, digest, len(expected_session_dates)
 
 
+def _input_fingerprint(
+    *, kind: str, strategy: str, candidate_sha256: str,
+    spy_sha256: str | None, as_of: datetime, cost_bps: D,
+    lookback: int, manifest_sha256: str | None, manifest_pinned: bool,
+) -> str:
+    """Stable digest of *research inputs*, never vendor or result authentication.
+
+    Record a distinct digest if a caller repeats the same trial with or without
+    an independently pinned calendar manifest. A value computed from inputs
+    supplied by the same actor is not a signature or an attestation.
+    """
+    canonical = {
+        "schema": 1,
+        "kind": kind,
+        "candidate_snapshot_sha256": candidate_sha256,
+        "spy_snapshot_sha256": spy_sha256,
+        "as_of_utc": as_of.astimezone(timezone.utc).isoformat(timespec="microseconds"),
+        "strategy": strategy,
+        "cost_bps": format(cost_bps.normalize(), "f"),
+        "lookback": lookback,
+        "virtual_initial_equity": format(_INITIAL, "f"),
+        "max_instrument_allocation": format(_MAX_ALLOCATION, "f"),
+        "session_manifest_sha256": manifest_sha256,
+        "session_manifest_pinned": manifest_pinned,
+    }
+    data = json.dumps(canonical, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True, allow_nan=False).encode("ascii")
+    return sha256(data).hexdigest()
+
+
 def _parameters(strategy: str, lookback: int) -> None:
     if (not isinstance(strategy, str) or strategy not in _SUPPORTED_STRATEGIES
             or type(lookback) is not int or lookback < 2):
@@ -143,10 +176,16 @@ def replay_candidate_snapshot(
     result = backtest(checked.bars, strategy, initial=_INITIAL,
                       cost_bps=cost_bps, max_allocation=_MAX_ALLOCATION,
                       lookback=lookback)
+    fingerprint = _input_fingerprint(
+        kind="single_asset", strategy=strategy, candidate_sha256=checked.sha256,
+        spy_sha256=None, as_of=checked.as_of, cost_bps=cost_bps,
+        lookback=lookback, manifest_sha256=digest, manifest_pinned=digest_matched,
+    )
     return ResearchReplay(
         checked.symbol, checked.source, checked.source_revision,
         checked.price_basis, checked.as_of, checked.sha256, strategy, result,
         manifest_matched, digest_matched, digest, sessions, cost_bps, lookback,
+        fingerprint,
     )
 
 
@@ -179,7 +218,14 @@ def compare_candidate_snapshots(
         initial=_INITIAL, cost_bps=cost_bps,
         max_allocation=_MAX_ALLOCATION, lookback=lookback
     )
+    fingerprint = _input_fingerprint(
+        kind="spy_comparison", strategy=strategy,
+        candidate_sha256=candidate.sha256, spy_sha256=spy.sha256,
+        as_of=candidate.as_of, cost_bps=cost_bps, lookback=lookback,
+        manifest_sha256=digest, manifest_pinned=digest_matched,
+    )
     return ResearchComparison(
         candidate.sha256, spy.sha256, candidate.as_of, comparison,
         manifest_matched, digest_matched, digest, sessions, cost_bps, lookback,
+        fingerprint,
     )
