@@ -274,7 +274,7 @@ os._exit(24)  # No close or normal interpreter shutdown.
         # Actual synthetic buy fees reduce cash AND increase acquisition
         # cost basis; omitting them lets future same-symbol purchases breach
         # the conservative 10% cost-based exposure floor.
-        self.reserve("fees", self.proposal(qty="20", stop="49"),
+        self.reserve("fees", self.proposal(qty="20", stop="48"),
                      fee_budget=D("100"))
         filled = self.book.record_hypothetical_fill(
             "fees", "fee-fill", 20, D("49"), fee=D("60"))
