@@ -35,6 +35,16 @@ supplied; it becomes `True` only after exact equality is checked, **not**
 vendor/calendar verification. Do not interpret an unchecked replay as complete
 session coverage.
 
+The replay and comparison results also preserve
+`session_manifest_sha256` (recomputed from supplied dates) and
+`session_manifest_session_count` (number of supplied sessions). Both are
+`None` when no manifest was supplied. These fields make the exact calendar
+manifest independently comparable across audit reports even when its original
+file is no longer in memory. A computed receipt can exist **without** an
+externally pinned receipt: check `session_manifest_digest_matched` separately,
+and do not treat either field as proof of vendor/exchange authenticity.
+
+
 ### Optional independently pinned calendar-manifest digest
 
 Both replay functions also accept `expected_session_manifest_sha256=...`. The
