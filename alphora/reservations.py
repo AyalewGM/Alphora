@@ -270,7 +270,11 @@ class OfflineReservations:
             exposure = max(proposal.existing_instrument_value, filled_cost) + pending_symbol
             guard = validate_buy(
                 replace(account, cash=snapshot.available_cash),
-                replace(proposal, existing_instrument_value=exposure),
+                # Reserve the *new* intent's fee budget against the
+                # instrument cap too. Earlier pending fees and filled fees
+                # are already included in exposure, but this intent's budget
+                # would otherwise be omitted from the 10% limit.
+                replace(proposal, existing_instrument_value=exposure + fee_budget),
                 expected_session_id=snapshot.session_id, mode="paper",
             )
             if not guard.permitted:
