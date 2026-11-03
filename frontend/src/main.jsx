@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
+import { APPROVED_POLICY, loadLocalReadOnlyStatus } from "./api.js";
 
 const WATCHLIST = [
   { symbol: "SPY", name: "S&P 500 ETF", base: 582.40, change: 0.82 },
@@ -11,13 +12,7 @@ const WATCHLIST = [
   { symbol: "NVDA", name: "Nvidia", base: 142.35, change: 1.91 }
 ];
 const TIMEFRAMES = ["1D", "5D", "1M", "3M", "1Y"];
-const DEMO_POLICY = {
-  starting_virtual_equity: "100000",
-  max_planned_trade_risk_fraction: "0.005",
-  max_instrument_allocation_fraction: "0.10",
-  daily_loss_shutdown_fraction: "0.02",
-  rebalance_frequency: "daily"
-};
+const DEMO_POLICY = APPROVED_POLICY;
 
 function syntheticCandles(symbol, timeframe) {
   // Fixed illustrative bars: deterministic, offline and NEVER sourced from a market feed.
@@ -66,19 +61,22 @@ function App() {
   const [timeframe, setTimeframe] = useState("1D");
   const [tab, setTab] = useState("Overview");
   const [policy, setPolicy] = useState(DEMO_POLICY);
-  const [apiState, setApiState] = useState("Offline preview");
+  const [apiState, setApiState] = useState("Offline preview — API unverified");
   const [search, setSearch] = useState("");
   useEffect(() => {
     const controller = new AbortController();
-    // Optional read-only API call. Never use a broker or external market endpoint.
-    fetch("/v1/risk/policy", { signal: controller.signal })
-      .then(r => { if (!r.ok) throw new Error("API unavailable"); return r.json(); })
-      .then(data => {
-        if (data.mode !== "paper") throw new Error("Unsafe API mode");
-        setPolicy(data);
-        setApiState("Local API connected");
+    // Verify both local read-only contracts before declaring the API connected.
+    loadLocalReadOnlyStatus(fetch, controller.signal)
+      .then(({ policy: acceptedPolicy }) => {
+        if (controller.signal.aborted) return;
+        setPolicy(acceptedPolicy);
+        setApiState("Read-only local API verified");
       })
-      .catch(() => setApiState("Offline preview"));
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setPolicy(DEMO_POLICY);
+        setApiState("Offline preview — API unavailable or unverified");
+      });
     return () => controller.abort();
   }, []);
   const item = WATCHLIST.find(x => x.symbol === selected);
@@ -88,7 +86,7 @@ function App() {
     <header className="topbar">
       <div className="brand"><span className="logo">Α</span><div>ALPHORA <small>RESEARCH TERMINAL</small></div></div>
       <div className="top-center"><span className="chip blue">PAPER ONLY</span><span className="chip amber">SYNTHETIC DATA</span></div>
-      <div className="top-right"><span className="status-dot"/>{apiState}<span className="avatar">A</span></div>
+      <div className="top-right"><span className="status-dot"/><span role="status" aria-live="polite">{apiState}</span><span className="avatar">A</span></div>
     </header>
     <div className="workspace">
       <aside className="rail" aria-label="Workspace sections"><span className="rail-active">▥</span><span>⌁</span><span>◫</span><span>≡</span></aside>
@@ -110,7 +108,7 @@ function App() {
       </main>
       <aside className="sidebar">
         <section className="panel watchlist"><div className="sidehead"><h3>Watchlist</h3><span>DEMO</span></div><input aria-label="Filter watchlist" placeholder="Search symbols…" value={search} onChange={e=>setSearch(e.target.value)} /><div className="watchheader"><span>Symbol</span><span>Demo price</span></div>{filtered.map(x=><button type="button" className={selected===x.symbol?"watchrow chosen":"watchrow"} key={x.symbol} onClick={()=>setSelected(x.symbol)}><span className="watchname"><strong>{x.symbol}</strong><small>{x.name}</small></span><span><strong>${x.base.toFixed(2)}</strong><small className={x.change>=0?"positive":"negative"}>{x.change>=0?"+":""}{x.change.toFixed(2)}%</small></span></button>)}{filtered.length===0&&<p className="noresults">No demo symbols match</p>}</section>
-        <section className="panel riskpanel"><div className="sidehead"><h3>Execution boundary</h3><span className="safe-tag">LOCKED</span></div><div className="boundary"><span className="lock">◈</span><strong>Broker disconnected</strong><p>No credentials, order routing, execution endpoints or automated trading.</p></div><div className="rule"><span>Execution mode</span><strong>Research only</strong></div><div className="rule"><span>Rebalancing policy</span><strong>{policy.rebalance_frequency}</strong></div><div className="rule"><span>Live trading</span><strong className="negative">Disabled</strong></div></section>
+        <section className="panel riskpanel"><div className="sidehead"><h3>Execution boundary</h3><span className="safe-tag">LOCKED</span></div><div className="boundary"><span className="lock">◈</span><strong>Broker disconnected</strong><p>No credentials, order routing, execution endpoints or automated trading.</p></div><div className="rule"><span>Execution mode</span><strong>Research only</strong></div><div className="rule"><span>Local API status</span><strong>{apiState.startsWith("Read-only") ? "Verified" : "Unverified"}</strong></div><div className="rule"><span>Rebalancing policy</span><strong>{policy.rebalance_frequency}</strong></div><div className="rule"><span>Live trading</span><strong className="negative">Disabled</strong></div></section>
       </aside>
     </div>
   </div>;
