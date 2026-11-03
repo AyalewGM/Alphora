@@ -44,6 +44,10 @@ class WalkForwardCoverage:
     last_test_stop_index: int
     trailing_preholdout_sessions: int
     last_test_label_index: int
+    # Maximum disjoint closed [sample_index, sample_index + horizon] target
+    # intervals. This is NOT an estimate of statistically independent trials.
+    max_nonoverlapping_test_label_windows: int
+    overlap_excluded_test_label_windows: int
 
 
 def rolling_purged_folds(
@@ -147,11 +151,23 @@ def summarize_walk_forward_coverage(
     )
     boundary = folds[0].holdout_start_index
     tested = sum(f.test_stop - f.test_start for f in folds)
+    # Forward return labels share prices whenever [i, i+h] intervals overlap.
+    # Greedy earliest-finish selection is optimal for equal-length intervals:
+    # it gives the MAXIMUM count of pairwise nonoverlapping target intervals,
+    # not an independently sampled or statistically effective sample size.
+    max_nonoverlapping = 0
+    last_label_end = -1
+    for fold in folds:
+        for index in range(fold.test_start, fold.test_stop):
+            if index > last_label_end:  # Closed intervals: no shared endpoint.
+                max_nonoverlapping += 1
+                last_label_end = index + label_horizon_sessions
     # The generator returns contiguous, non-overlapping test spans.
     if (any(f.holdout_start_index != boundary for f in folds)
             or any(a.test_stop != b.test_start for a, b in zip(folds, folds[1:]))
             or folds[-1].last_test_label_index >= boundary
-            or tested > boundary):
+            or tested > boundary
+            or not (0 < max_nonoverlapping <= tested)):
         raise ValueError("INVALID_FOLD_COVERAGE")
     return WalkForwardCoverage(
         total_sessions=len(sessions),
@@ -164,4 +180,6 @@ def summarize_walk_forward_coverage(
         last_test_stop_index=folds[-1].test_stop,
         trailing_preholdout_sessions=boundary - folds[-1].test_stop,
         last_test_label_index=folds[-1].last_test_label_index,
+        max_nonoverlapping_test_label_windows=max_nonoverlapping,
+        overlap_excluded_test_label_windows=tested - max_nonoverlapping,
     )
