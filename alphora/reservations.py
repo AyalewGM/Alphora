@@ -245,7 +245,7 @@ class OfflineReservations:
             if not isinstance(proposal.symbol, str) or not _SYMBOL.fullmatch(proposal.symbol):
                 raise ValueError("INVALID_SYMBOL")
             existing = self._db.execute(
-                "SELECT symbol,qty,limit_price,stop_price,fee_budget FROM buy_intents WHERE id=?",
+                "SELECT symbol,qty,limit_price,stop_price,fee_budget,status FROM buy_intents WHERE id=?",
                 (intent_id,)).fetchone()
             fields = (proposal.symbol, proposal.quantity, proposal.price,
                       proposal.stop_price, fee_budget)
@@ -254,6 +254,11 @@ class OfflineReservations:
                        D(existing[3]), D(existing[4]))
                 if old != fields:
                     raise ValueError("CONFLICTING_INTENT_ID")
+                # A cancelled intent must never appear to have been reserved
+                # again: cancellation permanently releases its pending cash.
+                # Reuse a NEW id to request any subsequent virtual exposure.
+                if existing[5] == "CANCELLED":
+                    raise ValueError("CANCELLED_INTENT_ID")
                 return self._snapshot()  # stable dedupe, no second reservation
             pending_symbol = sum(
                 (row[3] for row in snapshot.pending if row[1] == proposal.symbol), D(0)
