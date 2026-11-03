@@ -6,6 +6,7 @@ Rechecking a hash is not vendor authentication or calendar/corporate-action QA.
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal as D
+from hashlib import sha256
 from typing import Final, Sequence
 
 from .backtest import Result, backtest
@@ -30,6 +31,7 @@ class ResearchReplay:
     strategy: str
     result: Result
     session_manifest_matched: bool
+    session_manifest_digest_matched: bool
     cost_bps: D
     lookback: int
 
@@ -41,6 +43,7 @@ class ResearchComparison:
     as_of: datetime
     comparison: BenchmarkComparison
     session_manifest_matched: bool
+    session_manifest_digest_matched: bool
     cost_bps: D
     lookback: int
 
@@ -71,26 +74,44 @@ def _checked(snapshot: DataSnapshot, *, expected_sha256: str) -> DataSnapshot:
     return observed
 
 
-def _check_expected_sessions(
-    snapshot: DataSnapshot, expected_session_dates: Sequence[date] | None
-) -> bool:
-    """Compare actual bar dates with a separately supplied session manifest.
+def session_manifest_sha256(expected_session_dates: Sequence[date]) -> str:
+    """Deterministic receipt for a *caller-supplied* daily-session manifest.
 
-    Equality is an auditable coverage condition, not an exchange-calendar or
-    vendor authenticity certification. A missing manifest is explicitly
-    indicated in the replay result rather than silently called verified.
+    To be meaningful, the receipt must be pinned independently of the data and
+    manifest being replayed; this is no calendar or vendor authentication.
     """
-    if expected_session_dates is None:
-        return False
     if (not isinstance(expected_session_dates, (tuple, list))
             or len(expected_session_dates) < 2
             or not all(type(day) is date for day in expected_session_dates)
             or any(b <= a for a, b in zip(
                 expected_session_dates, expected_session_dates[1:]))):
         raise ValueError("INVALID_SESSION_MANIFEST")
+    canonical = ("alphora-session-manifest-v1\n" +
+                 "\n".join(day.isoformat() for day in expected_session_dates))
+    return sha256(canonical.encode("ascii")).hexdigest()
+
+
+def _check_expected_sessions(
+    snapshot: DataSnapshot, expected_session_dates: Sequence[date] | None,
+    expected_session_manifest_sha256: str | None,
+) -> tuple[bool, bool]:
+    """Check coverage and, when supplied, independently pinned digest equality."""
+    if expected_session_dates is None:
+        if expected_session_manifest_sha256 is not None:
+            raise ValueError("SESSION_MANIFEST_REQUIRED")
+        return False, False
+    digest = session_manifest_sha256(expected_session_dates)
+    if expected_session_manifest_sha256 is not None:
+        if (type(expected_session_manifest_sha256) is not str
+                or len(expected_session_manifest_sha256) != 64
+                or any(ch not in "0123456789abcdef"
+                       for ch in expected_session_manifest_sha256)):
+            raise ValueError("INVALID_SESSION_MANIFEST_SHA256")
+        if expected_session_manifest_sha256 != digest:
+            raise ValueError("SESSION_MANIFEST_HASH_MISMATCH")
     if tuple(r.bar.day for r in snapshot.observations) != tuple(expected_session_dates):
         raise ValueError("SESSION_MANIFEST_MISMATCH")
-    return True
+    return True, expected_session_manifest_sha256 is not None
 
 
 def _parameters(strategy: str, lookback: int) -> None:
@@ -103,6 +124,7 @@ def replay_candidate_snapshot(
     snapshot: DataSnapshot, strategy: str, *,
     expected_sha256: str, cost_bps: D = D("5"), lookback: int = 20,
     expected_session_dates: Sequence[date] | None = None,
+    expected_session_manifest_sha256: str | None = None,
 ) -> ResearchReplay:
     """Replay an externally pinned, caller-attested candidate dataset.
 
@@ -112,14 +134,15 @@ def replay_candidate_snapshot(
     """
     _parameters(strategy, lookback)
     checked = _checked(snapshot, expected_sha256=expected_sha256)
-    manifest_matched = _check_expected_sessions(checked, expected_session_dates)
+    manifest_matched, digest_matched = _check_expected_sessions(
+        checked, expected_session_dates, expected_session_manifest_sha256)
     result = backtest(checked.bars, strategy, initial=_INITIAL,
                       cost_bps=cost_bps, max_allocation=_MAX_ALLOCATION,
                       lookback=lookback)
     return ResearchReplay(
         checked.symbol, checked.source, checked.source_revision,
         checked.price_basis, checked.as_of, checked.sha256, strategy, result,
-        manifest_matched, cost_bps, lookback,
+        manifest_matched, digest_matched, cost_bps, lookback,
     )
 
 
@@ -128,6 +151,7 @@ def compare_candidate_snapshots(
     *, expected_strategy_sha256: str, expected_spy_sha256: str,
     cost_bps: D = D("5"), lookback: int = 20,
     expected_session_dates: Sequence[date] | None = None,
+    expected_session_manifest_sha256: str | None = None,
 ) -> ResearchComparison:
     """Compare timestamp-aligned candidate series with price-only SPY proxies.
 
@@ -142,8 +166,10 @@ def compare_candidate_snapshots(
         raise ValueError("SPY_BENCHMARK_REQUIRED")
     if candidate.as_of != spy.as_of:
         raise ValueError("BENCHMARK_AS_OF_MISMATCH")
-    manifest_matched = _check_expected_sessions(candidate, expected_session_dates)
-    _check_expected_sessions(spy, expected_session_dates)
+    manifest_matched, digest_matched = _check_expected_sessions(
+        candidate, expected_session_dates, expected_session_manifest_sha256)
+    _check_expected_sessions(spy, expected_session_dates,
+                             expected_session_manifest_sha256)
     comparison = compare_with_spy(
         candidate.bars, spy.bars, strategy,
         initial=_INITIAL, cost_bps=cost_bps,
@@ -151,5 +177,5 @@ def compare_candidate_snapshots(
     )
     return ResearchComparison(
         candidate.sha256, spy.sha256, candidate.as_of, comparison,
-        manifest_matched, cost_bps, lookback,
+        manifest_matched, digest_matched, cost_bps, lookback,
     )
