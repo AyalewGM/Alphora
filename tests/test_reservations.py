@@ -66,6 +66,55 @@ class OfflineReservationTests(unittest.TestCase):
             self.book.reserve_buy("b", self.account(equity=D("98000"),
                 day_pnl=D("-2000")), self.proposal(), reconciled=True)
 
+    def test_session_open_equity_cannot_be_forged_to_raise_risk_limits(self):
+        # The virtual book starts a single fixed session at $100k. A caller
+        # cannot raise or lower the opening-loss baseline to avoid the 2% stop.
+        for opening_equity in (D("98000"), D("105000")):
+            with self.subTest(opening_equity=opening_equity):
+                forged = self.account(session_open_equity=opening_equity,
+                                      equity=opening_equity, day_pnl=D("0"))
+                with self.assertRaisesRegex(ValueError, "UNRECONCILED_CASH_OR_SESSION"):
+                    self.book.reserve_buy("forged", forged, self.proposal(),
+                                          reconciled=True)
+        self.assertEqual(self.book.snapshot().pending, ())
+
+    def test_reopen_rejects_corrupt_cash_and_keeps_state_unchanged(self):
+        self.reserve("a")
+        before = self.book.snapshot()
+        self.book.close()
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("UPDATE book_meta SET value='99999' WHERE key='cash'")
+        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+            OfflineReservations(self.path, session_id="2026-11-02")
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("UPDATE book_meta SET value=? WHERE key='cash'",
+                         (str(before.cash),))
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_failed_sqlite_fill_rolls_back_atomically_across_restart(self):
+        self.reserve("a", fee_budget=D("2"))
+        before = self.book.snapshot()
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("""CREATE TRIGGER injected_fill_failure
+                BEFORE INSERT ON hypothetical_fills BEGIN
+                    SELECT RAISE(ABORT, 'injected failure');
+                END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.book.record_hypothetical_fill("a", "partial-1", 20, D("49"),
+                                                fee=D("1"))
+        self.assertEqual(self.book.snapshot(), before)
+        with sqlite3.connect(self.path) as conn:
+            self.assertEqual(conn.execute(
+                "SELECT COUNT(*) FROM hypothetical_fills").fetchone()[0], 0)
+            conn.execute("DROP TRIGGER injected_fill_failure")
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+        after = self.book.record_hypothetical_fill("a", "partial-1",
+                                                   20, D("49"), fee=D("1"))
+        self.assertEqual(after.cash, D("99019"))
+
     def test_cash_overcommit_across_pending_symbols(self):
         for i in range(10):
             self.reserve(f"i{i}", self.proposal(symbol=f"S{i}", qty="200"))
