@@ -159,7 +159,7 @@ class OfflineReservations:
             fill_totals[intent_id] = (old_qty + qty, old_fees + fee)
             symbol = intents[intent_id][0]
             old_qty, old_cost = holdings.get(symbol, (0, D(0)))
-            holdings[symbol] = old_qty + qty, old_cost + qty * price
+            holdings[symbol] = old_qty + qty, old_cost + qty * price + fee
             spent_cash += qty * price + fee
         if (reserved > cash or cash + spent_cash != INITIAL_EQUITY
                 or any(fill_totals.get(ident, (0, D(0))) != (row[5], row[6])
