@@ -112,6 +112,7 @@ def assess_catalysts(symbol: str, *, as_of: datetime,
 
     reasons: set[str] = set()
     selected: dict[str, CatalystEvent] = {}
+    conflicted_ids: set[str] = set()
     for event in events:
         if not _valid_event(event, symbol):
             reasons.add("INVALID_OR_UNVERIFIED_METADATA")
@@ -119,12 +120,17 @@ def assess_catalysts(symbol: str, *, as_of: datetime,
         if event.received_at > as_of:
             reasons.add("FUTURE_INFORMATION_EXCLUDED")
             continue
+        # Examine every valid revision known as-of, even older publications.
+        # Never emit an arbitrary "first seen" version of a conflicted ID:
+        # the input list order is not a trustworthy publication sequence.
+        if event.event_id in conflicted_ids:
+            continue
         previous = selected.get(event.event_id)
         if previous is not None and previous != event:
-            # Compare all revisions known by as_of before age filtering.
-            # Contradictory historical timestamps must never silently disappear.
             reasons.add("CONFLICTING_EVENT_ID")
-        else:
+            conflicted_ids.add(event.event_id)
+            del selected[event.event_id]
+        elif previous is None:
             selected[event.event_id] = event
 
     timely = {}
