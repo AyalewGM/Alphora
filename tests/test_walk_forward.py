@@ -2,7 +2,7 @@
 import unittest
 from datetime import date, datetime, timedelta
 
-from alphora.research.walk_forward import rolling_purged_folds
+from alphora.research.walk_forward import (rolling_purged_folds, summarize_walk_forward_coverage)
 
 
 def fake_sessions(n):
@@ -141,6 +141,52 @@ class WalkForwardFoldTests(unittest.TestCase):
                             for i in range(len(first)-1)))
         # Public output does not expose a trading or order interface.
         self.assertFalse(hasattr(first[0], "submit_order"))
+
+    def test_coverage_reports_all_unscored_dates_not_just_test_rows(self):
+        days = fake_sessions(20)
+        report = summarize_walk_forward_coverage(
+            days, train_sessions=6, test_sessions=3,
+            label_horizon_sessions=2, embargo_sessions=1)
+        self.assertEqual(report.total_sessions, 20)
+        self.assertEqual(report.holdout_start_index, 20)
+        self.assertEqual(report.reserved_holdout_sessions, 0)
+        self.assertEqual(report.folds, 3)
+        self.assertEqual(report.tested_preholdout_sessions, 9)
+        self.assertEqual(report.untested_preholdout_sessions, 11)
+        self.assertEqual(report.first_test_index, 9)
+        self.assertEqual(report.last_test_stop_index, 18)
+        self.assertEqual(report.trailing_preholdout_sessions, 2)
+        self.assertEqual(report.last_test_label_index, 19)
+        self.assertEqual(report.tested_preholdout_sessions +
+                         report.untested_preholdout_sessions,
+                         report.holdout_start_index)
+
+    def test_holdout_coverage_excludes_reserved_rows_and_label_tail(self):
+        config = dict(train_sessions=8, test_sessions=3,
+                      label_horizon_sessions=2, embargo_sessions=1,
+                      holdout_sessions=6)
+        report = summarize_walk_forward_coverage(fake_sessions(32), **config)
+        self.assertEqual(report.holdout_start_index, 26)
+        self.assertEqual(report.reserved_holdout_sessions, 6)
+        self.assertEqual(report.folds, 4)
+        self.assertEqual(report.tested_preholdout_sessions, 12)
+        self.assertEqual(report.untested_preholdout_sessions, 14)
+        self.assertEqual(report.trailing_preholdout_sessions, 3)
+        self.assertEqual(report.last_test_label_index, 24)
+        self.assertLess(report.last_test_label_index, report.holdout_start_index)
+        self.assertEqual(report, summarize_walk_forward_coverage(
+            list(fake_sessions(32)), **config))
+
+    def test_coverage_fails_closed_using_same_fold_validation(self):
+        config = dict(train_sessions=6, test_sessions=3,
+                      label_horizon_sessions=2, embargo_sessions=1)
+        with self.assertRaisesRegex(ValueError, "INSUFFICIENT_MATURE_HISTORY"):
+            summarize_walk_forward_coverage(fake_sessions(13), **config)
+        with self.assertRaisesRegex(ValueError, "INVALID_SESSION_SEQUENCE"):
+            summarize_walk_forward_coverage(list(reversed(fake_sessions(20))), **config)
+        with self.assertRaisesRegex(ValueError, "INVALID_FOLD_CONFIGURATION"):
+            summarize_walk_forward_coverage(fake_sessions(20),
+                                            **(config | {"test_sessions": True}))
 
 
 if __name__ == "__main__":
