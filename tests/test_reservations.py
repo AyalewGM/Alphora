@@ -333,6 +333,37 @@ os._exit(24)  # No close or normal interpreter shutdown.
         with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
             self.book.snapshot()
 
+    def test_corrupt_persisted_identities_and_decimals_fail_closed(self):
+        """Malformed SQLite data must not be reinterpreted as valid holdings."""
+        self.reserve("a")
+        self.book.record_hypothetical_fill("a", "f1", 10, D("50"))
+        before = self.book.snapshot()
+        tampering = (
+            ("UPDATE buy_intents SET symbol='spy' WHERE id='a'",
+             "UPDATE buy_intents SET symbol='SPY' WHERE id='a'"),
+            ("UPDATE hypothetical_fills SET id='bad/id' WHERE id='f1'",
+             "UPDATE hypothetical_fills SET id='f1' WHERE id='bad/id'"),
+            ("UPDATE buy_intents SET limit_price='bad' WHERE id='a'",
+             "UPDATE buy_intents SET limit_price='50' WHERE id='a'"),
+            ("UPDATE hypothetical_fills SET fee='bad' WHERE id='f1'",
+             "UPDATE hypothetical_fills SET fee='0' WHERE id='f1'"),
+        )
+        for corrupt, restore in tampering:
+            with self.subTest(sql=corrupt):
+                with sqlite3.connect(self.path) as conn:
+                    conn.execute(corrupt)
+                with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+                    self.book.snapshot()
+                # Reopen must also reject corrupted persisted state before
+                # any new virtual intent can be accepted.
+                self.book.close()
+                with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+                    OfflineReservations(self.path, session_id="2026-11-02")
+                with sqlite3.connect(self.path) as conn:
+                    conn.execute(restore)
+                self.book = OfflineReservations(self.path, session_id="2026-11-02")
+                self.assertEqual(self.book.snapshot(), before)
+
     def test_missing_meta_with_existing_history_does_not_reseed_book(self):
         self.reserve("a")
         with sqlite3.connect(self.path) as conn:
