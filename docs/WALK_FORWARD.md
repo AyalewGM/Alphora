@@ -21,6 +21,7 @@ folds = rolling_purged_folds(
     test_sessions=21,
     label_horizon_sessions=5,
     embargo_sessions=2,
+    holdout_sessions=63,  # Reserve the last 63 sessions for untouched final evaluation.
 )
 
 for f in folds:
@@ -29,6 +30,25 @@ for f in folds:
     # Fit normalizers, imputers, selectors and models *only on train rows*.
     # Evaluate on test rows after the labels have actually matured.
 ```
+
+## Final untouched holdout boundary
+
+Set `holdout_sessions=N` to reserve the last N supplied session rows for a
+separately controlled final evaluation. The research fold generator rejects
+configurations without enough **mature pre-holdout labels** and requires every
+training and test label index to finish strictly before
+`len(session_days) - holdout_sessions`. Each emitted fold records that exclusive
+boundary as `holdout_start_index`. Its indices are reproducible, but neither
+the dates nor the labels are source-authenticated. The function **never fits,
+predicts on, or scores the reserved tail**, so a separate evaluation pipeline
+must enforce holdout release and one-time evaluation controls.
+
+This prevents an otherwise subtle leakage path: a research test observation
+may be outside the reserved tail while its forward return label would use
+outcomes *inside* the supposed untouched holdout. Keep the external holdout
+manifest pinned and independent, and avoid selecting hyperparameters using
+the final holdout. The default `holdout_sessions=0` preserves the prior
+research schedule.
 
 All index windows are half-open. The train window is **fixed-length rolling**,
 not expanding. Each test window has exactly `test_sessions` distinct dates,
@@ -75,7 +95,7 @@ optimistic results from scoring future-unobserved outcomes.
 
 Unit tests use synthetic weekday sequences and verify: fixed rolling windows,
 non-overlapping OOS dates, label maturity and strict purge/embargo boundaries,
-insufficient dataset rejection, malformed and duplicate date rejection,
+insufficient dataset and reserved-holdout rejection, malformed and duplicate date rejection,
 invalid parameter rejection and deterministic output.
 
 Before an ML or FinRL milestone is accepted, independent financial/ML QA
