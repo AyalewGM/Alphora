@@ -33,6 +33,7 @@ function amount(value) {
 }
 function date(value) {
   if (typeof value !== "string" || !DAY.test(value) ||
+      !Number.isFinite(Date.parse(value + "T00:00:00Z")) ||
       new Date(value + "T00:00:00Z").toISOString().slice(0, 10) !== value) {
     throw new Error("INVALID_DATE");
   }
@@ -77,8 +78,6 @@ export function parseLocalDailySnapshot(text) {
       throw new Error("PRE_CLOSE_VERSION");
     }
     if (previousVersion) {
-      const nextOpen = nyParts(new Date(`${day}T14:30:00Z`)); // Only for local date sanity; actual open gate below.
-      void nextOpen;
       // Compare the previous version's known NY wall-clock against the next dated bar's 09:30 session open.
       const prevNY = nyParts(previousVersion);
       if (prevNY.day > day || (prevNY.day === day && prevNY.minutes >= 9 * 60 + 30)) {
