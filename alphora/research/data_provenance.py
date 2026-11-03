@@ -84,7 +84,8 @@ def inspect_daily_snapshot(
     attestation truth, a complete ticker universe or corporate-action cash flows.
     """
     if (not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
-            or asset_type not in _ASSET_TYPES or price_basis not in _PRICE_BASES
+            or not isinstance(asset_type, str) or asset_type not in _ASSET_TYPES
+            or not isinstance(price_basis, str) or price_basis not in _PRICE_BASES
             or not all(isinstance(s, str) and _SOURCE.fullmatch(s)
                        for s in (source, source_revision))
             or not _aware(as_of)
