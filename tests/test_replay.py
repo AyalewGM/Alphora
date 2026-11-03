@@ -136,6 +136,79 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
                 expected_strategy_sha256=shifted.sha256,
                 expected_spy_sha256=self.spy.sha256)
 
+    def test_external_session_manifest_detects_missing_bars_after_repinning(self):
+        # The native receipt validator cannot detect a missing market session:
+        # its next-open check uses the next *recorded* bar. A separately
+        # supplied expected-session manifest can reject that same omission.
+        days = tuple(observation.bar.day for observation in self.spy.observations)
+        missing = inspect_daily_snapshot(
+            self.spy.symbol,
+            self.spy.observations[:8] + self.spy.observations[9:],
+            asset_type=self.spy.asset_type,
+            source=self.spy.source, source_revision=self.spy.source_revision,
+            price_basis=self.spy.price_basis, as_of=self.spy.as_of,
+        )
+        result = replay_candidate_snapshot(
+            self.spy, "buy_hold", expected_sha256=self.spy.sha256,
+            expected_session_dates=days,
+        )
+        self.assertTrue(result.session_manifest_matched)
+        self.assertFalse(replay_candidate_snapshot(
+            missing, "buy_hold", expected_sha256=missing.sha256,
+        ).session_manifest_matched)
+        with self.assertRaisesRegex(ValueError, "SESSION_MANIFEST_MISMATCH"):
+            replay_candidate_snapshot(
+                missing, "buy_hold", expected_sha256=missing.sha256,
+                expected_session_dates=days,
+            )
+
+    def test_session_manifest_must_have_exact_dates_in_order(self):
+        days = tuple(item.bar.day for item in self.spy.observations)
+        for invalid in ([], days[::-1], days[:1] + days[:1] + days[2:],
+                        (datetime(2026, 9, 1),) + days[1:],
+                        ("2026-09-01",) + days[1:]):
+            with self.subTest(manifest=repr(invalid)[:100]):
+                with self.assertRaisesRegex(ValueError, "INVALID_SESSION_MANIFEST"):
+                    replay_candidate_snapshot(
+                        self.spy, "buy_hold",
+                        expected_sha256=self.spy.sha256,
+                        expected_session_dates=invalid,
+                    )
+
+    def test_spy_comparison_requires_both_series_to_match_session_manifest(self):
+        days = tuple(item.bar.day for item in self.spy.observations)
+        aapl = candidate("AAPL", asset_type="STOCK")
+        result = compare_candidate_snapshots(
+            aapl, self.spy, "trend",
+            expected_strategy_sha256=aapl.sha256,
+            expected_spy_sha256=self.spy.sha256,
+            expected_session_dates=days, cost_bps=D("10"), lookback=5,
+        )
+        self.assertTrue(result.session_manifest_matched)
+        self.assertEqual(result.cost_bps, D("10"))
+        self.assertEqual(result.lookback, 5)
+        self.assertFalse(compare_candidate_snapshots(
+            aapl, self.spy, "buy_hold",
+            expected_strategy_sha256=aapl.sha256,
+            expected_spy_sha256=self.spy.sha256,
+        ).session_manifest_matched)
+        with self.assertRaisesRegex(ValueError, "SESSION_MANIFEST_MISMATCH"):
+            compare_candidate_snapshots(
+                aapl, self.spy, "buy_hold",
+                expected_strategy_sha256=aapl.sha256,
+                expected_spy_sha256=self.spy.sha256,
+                expected_session_dates=days[:-1],
+            )
+
+    def test_replay_records_cost_and_lookback_assumptions(self):
+        result = replay_candidate_snapshot(
+            self.spy, "trend", expected_sha256=self.spy.sha256,
+            lookback=5, cost_bps=D("12.5"),
+        )
+        self.assertEqual(result.cost_bps, D("12.5"))
+        self.assertEqual(result.lookback, 5)
+        self.assertFalse(result.session_manifest_matched)
+
     def test_benchmark_cannot_bypass_snapshot_pinning(self):
         aapl = candidate("AAPL", asset_type="STOCK")
         with self.assertRaisesRegex(ValueError, "SNAPSHOT_HASH_MISMATCH"):
