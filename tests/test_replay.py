@@ -350,5 +350,86 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
                          metrics.aligned_strategy.total_return -
                          metrics.aligned_capped_spy.total_return)
 
+    def test_research_fingerprint_is_stable_under_repeated_equivalent_inputs(self):
+        from datetime import timezone
+        first = replay_candidate_snapshot(
+            self.spy, "trend", expected_sha256=self.spy.sha256,
+            cost_bps=D("5"), lookback=5)
+        second = replay_candidate_snapshot(
+            self.spy, "trend", expected_sha256=self.spy.sha256,
+            cost_bps=D("5.000"), lookback=5)
+        # Equivalent timezone representations and decimal scaling are not
+        # different research trials.
+        normalized = replace(self.spy,
+                             as_of=self.spy.as_of.astimezone(timezone.utc))
+        third = replay_candidate_snapshot(
+            normalized, "trend", expected_sha256=self.spy.sha256,
+            cost_bps=D("5.0"), lookback=5)
+        self.assertRegex(first.input_fingerprint_sha256, r"^[0-9a-f]{64}$")
+        self.assertEqual(first.input_fingerprint_sha256,
+                         second.input_fingerprint_sha256)
+        self.assertEqual(second.input_fingerprint_sha256,
+                         third.input_fingerprint_sha256)
+
+    def test_research_fingerprint_changes_with_strategy_cost_and_lookback(self):
+        base = replay_candidate_snapshot(
+            self.spy, "trend", expected_sha256=self.spy.sha256,
+            cost_bps=D("5"), lookback=5)
+        variants = [
+            ("momentum", D("5"), 5),
+            ("trend", D("5.01"), 5),
+            ("trend", D("5"), 6),
+        ]
+        for strategy, cost, lookback in variants:
+            with self.subTest(strategy=strategy, cost=cost, lookback=lookback):
+                alternate = replay_candidate_snapshot(
+                    self.spy, strategy, expected_sha256=self.spy.sha256,
+                    cost_bps=cost, lookback=lookback)
+                self.assertNotEqual(base.input_fingerprint_sha256,
+                                    alternate.input_fingerprint_sha256)
+
+    def test_research_fingerprint_distinguishes_unpinned_and_pinned_calendar(self):
+        dates = tuple(item.bar.day for item in self.spy.observations)
+        digest = session_manifest_sha256(dates)
+        def replay(days=None, pinned=None):
+            return replay_candidate_snapshot(
+                self.spy, "buy_hold", expected_sha256=self.spy.sha256,
+                expected_session_dates=days,
+                expected_session_manifest_sha256=pinned)
+        absent = replay()
+        unpinned = replay(dates)
+        pinned = replay(dates, digest)
+        self.assertNotEqual(absent.input_fingerprint_sha256,
+                            unpinned.input_fingerprint_sha256)
+        self.assertNotEqual(unpinned.input_fingerprint_sha256,
+                            pinned.input_fingerprint_sha256)
+        self.assertEqual(pinned.input_fingerprint_sha256,
+                         replay(list(dates), digest).input_fingerprint_sha256)
+
+    def test_comparison_fingerprint_binds_both_sources_and_comparison_kind(self):
+        aapl = candidate("AAPL", asset_type="STOCK")
+        def compare(spy):
+            return compare_candidate_snapshots(
+                aapl, spy, "trend",
+                expected_strategy_sha256=aapl.sha256,
+                expected_spy_sha256=spy.sha256,
+                lookback=5)
+        first = compare(self.spy)
+        second = compare(self.spy)
+        different_spy = inspect_daily_snapshot(
+            "SPY", self.spy.observations, asset_type="ETF",
+            source=self.spy.source,
+            source_revision="offline_fixture_v2",
+            price_basis=self.spy.price_basis, as_of=self.spy.as_of)
+        self.assertEqual(first.input_fingerprint_sha256,
+                         second.input_fingerprint_sha256)
+        self.assertNotEqual(first.input_fingerprint_sha256,
+                            compare(different_spy).input_fingerprint_sha256)
+        single = replay_candidate_snapshot(
+            aapl, "trend", expected_sha256=aapl.sha256, lookback=5)
+        self.assertNotEqual(first.input_fingerprint_sha256,
+                            single.input_fingerprint_sha256)
+
+
 if __name__ == "__main__":
     unittest.main()
