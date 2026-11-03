@@ -222,21 +222,31 @@ class OfflineReservations:
                 expected_session_id=snapshot.session_id, mode="paper",
             )
             if not guard.permitted:
-                raise ValueError(f"RISK_VETO:{guard.reason}")
-            if proposal.quantity != proposal.quantity.to_integral_value():
-                raise ValueError("FRACTIONAL_SHARES")
-            quantity = int(proposal.quantity)
-            if not _integer_shares(quantity):
-                raise ValueError("INVALID_QUANTITY")
-            reserve = proposal.quantity * proposal.price + fee_budget
-            if reserve > snapshot.available_cash:
-                raise ValueError("INSUFFICIENT_UNRESERVED_CASH")
-            self._db.execute(
-                "INSERT INTO buy_intents(id,symbol,qty,limit_price,stop_price,fee_budget) VALUES(?,?,?,?,?,?)",
-                (intent_id, proposal.symbol, quantity, str(proposal.price),
-                 str(proposal.stop_price), str(fee_budget)),
-            )
-            return self._snapshot()
+                if guard.reason != "DAILY_LOSS_HALT":
+                    raise ValueError(f"RISK_VETO:{guard.reason}")
+                # Crossing the 2% daily-loss limit is a one-way shutdown,
+                # not merely a rejection of this particular proposal.
+                # Commit the halt in the same transaction as the risk check;
+                # raising inside _write() would roll back the shutdown.
+                self._db.execute("UPDATE book_meta SET value='1' WHERE key='halted'")
+            else:
+                if proposal.quantity != proposal.quantity.to_integral_value():
+                    raise ValueError("FRACTIONAL_SHARES")
+                quantity = int(proposal.quantity)
+                if not _integer_shares(quantity):
+                    raise ValueError("INVALID_QUANTITY")
+                reserve = proposal.quantity * proposal.price + fee_budget
+                if reserve > snapshot.available_cash:
+                    raise ValueError("INSUFFICIENT_UNRESERVED_CASH")
+                self._db.execute(
+                    "INSERT INTO buy_intents(id,symbol,qty,limit_price,stop_price,fee_budget) VALUES(?,?,?,?,?,?)",
+                    (intent_id, proposal.symbol, quantity, str(proposal.price),
+                     str(proposal.stop_price), str(fee_budget)),
+                )
+                return self._snapshot()
+        # The only successful transaction without a reservation is the
+        # durable risk shutdown; keep the public veto contract unchanged.
+        raise ValueError("RISK_VETO:DAILY_LOSS_HALT")
 
     def record_hypothetical_fill(self, intent_id: str, fill_id: str,
                                  qty: int, price: D, *, fee: D = D(0)):
