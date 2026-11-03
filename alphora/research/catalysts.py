@@ -119,14 +119,21 @@ def assess_catalysts(symbol: str, *, as_of: datetime,
         if event.received_at > as_of:
             reasons.add("FUTURE_INFORMATION_EXCLUDED")
             continue
-        if event.published_at <= previous_session_close_at:
-            reasons.add("OLDER_THAN_PREVIOUS_CLOSE")
-            continue
         previous = selected.get(event.event_id)
         if previous is not None and previous != event:
+            # Compare all revisions known by as_of before age filtering.
+            # Contradictory historical timestamps must never silently disappear.
             reasons.add("CONFLICTING_EVENT_ID")
         else:
             selected[event.event_id] = event
+
+    timely = {}
+    for event_id, event in selected.items():
+        if event.published_at <= previous_session_close_at:
+            reasons.add("OLDER_THAN_PREVIOUS_CLOSE")
+            continue
+        timely[event_id] = event
+    selected = timely
 
     evidence: list[EvidenceItem] = []
     for event in selected.values():
