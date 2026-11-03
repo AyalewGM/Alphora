@@ -25,7 +25,10 @@ def _integer_shares(value):
 
 
 def _decimal(value):
-    return D(value)
+    try:
+        return D(value)
+    except (ValueError, TypeError, ArithmeticError) as exc:
+        raise ValueError("BOOK_STATE_CORRUPT") from exc
 
 
 @dataclass(frozen=True)
@@ -123,8 +126,11 @@ class OfflineReservations:
             "SELECT id,symbol,qty,limit_price,stop_price,fee_budget,filled,fees_paid,status "
             "FROM buy_intents ORDER BY id"
         ):
-            limit, stop, budget, paid = map(D, (limit, stop, budget, paid))
-            if (not _integer_shares(qty) or not 0 <= filled <= qty
+            limit, stop, budget, paid = map(_decimal, (limit, stop, budget, paid))
+            if (not isinstance(ident, str) or not _ID.fullmatch(ident)
+                    or not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
+                    or not _integer_shares(qty) or type(filled) is not int
+                    or not 0 <= filled <= qty
                     or not _money(limit, positive=True) or not _money(stop, positive=True)
                     or stop >= limit or not _money(budget)
                     or not _money(paid) or paid > budget
@@ -140,11 +146,12 @@ class OfflineReservations:
         holdings = {}
         fill_totals = {}
         spent_cash = D(0)
-        for intent_id, qty, price, fee in self._db.execute(
-            "SELECT intent_id,qty,price,fee FROM hypothetical_fills"
+        for fill_id, intent_id, qty, price, fee in self._db.execute(
+            "SELECT id,intent_id,qty,price,fee FROM hypothetical_fills"
         ):
-            price, fee = D(price), D(fee)
-            if (intent_id not in intents or not _integer_shares(qty)
+            price, fee = _decimal(price), _decimal(fee)
+            if (not isinstance(fill_id, str) or not _ID.fullmatch(fill_id)
+                    or intent_id not in intents or not _integer_shares(qty)
                     or not _money(price, positive=True) or not _money(fee)
                     or not intents[intent_id][3] < price <= intents[intent_id][2]):
                 raise ValueError("BOOK_STATE_CORRUPT")
