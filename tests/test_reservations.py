@@ -58,6 +58,34 @@ class OfflineReservationTests(unittest.TestCase):
         self.reserve("b", self.proposal(qty="80"))
         self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
 
+    def test_fee_budget_is_included_in_new_instrument_allocation(self):
+        # Base $9,990 notional is below the $10,000 per-symbol cap, but
+        # the reserved maximum fee is part of conservative exposure.
+        near_cap = self.proposal(qty="100", price="99.90", stop="99.89")
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+            self.reserve("over-with-fees", near_cap, fee_budget=D("10.01"))
+        self.assertEqual(self.book.snapshot().pending, ())
+        at_cap = self.reserve("at-cap-with-fees", near_cap, fee_budget=D("10"))
+        self.assertEqual(at_cap.reserved_cash, D("10000"))
+        self.assertEqual(at_cap.available_cash, D("90000"))
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), at_cap)
+
+    def test_new_fee_budget_combines_with_existing_pending_fees(self):
+        self.reserve("first", self.proposal(qty="100", stop="49"),
+                     fee_budget=D("30"))
+        # 5,030 earlier pending + 4,950 new notional + 21 fees = 10,001.
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+            self.reserve("second-over", self.proposal(qty="99", stop="49"),
+                         fee_budget=D("21"))
+        self.assertEqual(self.book.snapshot().reserved_cash, D("5030"))
+        self.assertEqual(
+            self.reserve("second-at-cap", self.proposal(qty="99", stop="49"),
+                         fee_budget=D("20")).reserved_cash,
+            D("10000"),
+        )
+
     def test_fee_budget_is_included_in_per_trade_planned_loss(self):
         # A fee cap is potential loss in addition to the price-to-stop
         # distance. With 100 shares at 50 and a stop at 48 the initial
