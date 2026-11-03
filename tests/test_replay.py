@@ -8,7 +8,8 @@ from zoneinfo import ZoneInfo
 from alphora.research.backtest import Bar, backtest
 from alphora.research.data_provenance import ObservedDailyBar, inspect_daily_snapshot
 from alphora.research.replay import (
-    replay_candidate_snapshot, compare_candidate_snapshots
+    replay_candidate_snapshot, compare_candidate_snapshots,
+    session_manifest_sha256,
 )
 
 ET = ZoneInfo("America/New_York")
@@ -216,6 +217,77 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
                 aapl, self.spy, "trend",
                 expected_strategy_sha256=aapl.sha256,
                 expected_spy_sha256="0" * 64)
+
+
+    def test_external_session_digest_is_recorded_without_authentication_claim(self):
+        days = tuple(item.bar.day for item in self.spy.observations)
+        digest = session_manifest_sha256(days)
+        self.assertEqual(digest, session_manifest_sha256(list(days)))
+        replay = replay_candidate_snapshot(
+            self.spy, "buy_hold", expected_sha256=self.spy.sha256,
+            expected_session_dates=days, expected_session_manifest_sha256=digest)
+        self.assertTrue(replay.session_manifest_matched)
+        self.assertTrue(replay.session_manifest_digest_matched)
+        unpinned = replay_candidate_snapshot(
+            self.spy, "buy_hold", expected_sha256=self.spy.sha256,
+            expected_session_dates=days)
+        self.assertTrue(unpinned.session_manifest_matched)
+        self.assertFalse(unpinned.session_manifest_digest_matched)
+        self.assertFalse(replay_candidate_snapshot(
+            self.spy, "buy_hold", expected_sha256=self.spy.sha256
+        ).session_manifest_digest_matched)
+
+    def test_manifest_change_cannot_pass_using_old_external_digest(self):
+        days = tuple(item.bar.day for item in self.spy.observations)
+        pinned = session_manifest_sha256(days)
+        omitted = days[:8] + days[9:]
+        # A separately supplied pin detects even a syntactically valid
+        # rewritten manifest before checking its equality with the bars.
+        with self.assertRaisesRegex(ValueError, "SESSION_MANIFEST_HASH_MISMATCH"):
+            replay_candidate_snapshot(
+                self.spy, "buy_hold", expected_sha256=self.spy.sha256,
+                expected_session_dates=omitted,
+                expected_session_manifest_sha256=pinned)
+        with self.assertRaisesRegex(ValueError, "SESSION_MANIFEST_MISMATCH"):
+            replay_candidate_snapshot(
+                self.spy, "buy_hold", expected_sha256=self.spy.sha256,
+                expected_session_dates=omitted,
+                expected_session_manifest_sha256=session_manifest_sha256(omitted))
+
+    def test_missing_or_malformed_session_digest_fails_closed(self):
+        days = tuple(item.bar.day for item in self.spy.observations)
+        with self.assertRaisesRegex(ValueError, "SESSION_MANIFEST_REQUIRED"):
+            replay_candidate_snapshot(
+                self.spy, "buy_hold", expected_sha256=self.spy.sha256,
+                expected_session_manifest_sha256="0" * 64)
+        for bad in ("NOT_A_SHA256", "0" * 63, "A" * 64, 1, [], True):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(
+                        ValueError, "INVALID_SESSION_MANIFEST_SHA256"):
+                    replay_candidate_snapshot(
+                        self.spy, "buy_hold", expected_sha256=self.spy.sha256,
+                        expected_session_dates=days,
+                        expected_session_manifest_sha256=bad)
+
+    def test_spy_comparison_requires_both_datasets_and_pin(self):
+        days = tuple(item.bar.day for item in self.spy.observations)
+        digest = session_manifest_sha256(days)
+        aapl = candidate("AAPL", asset_type="STOCK")
+        verified = compare_candidate_snapshots(
+            aapl, self.spy, "trend",
+            expected_strategy_sha256=aapl.sha256,
+            expected_spy_sha256=self.spy.sha256,
+            expected_session_dates=days,
+            expected_session_manifest_sha256=digest)
+        self.assertTrue(verified.session_manifest_matched)
+        self.assertTrue(verified.session_manifest_digest_matched)
+        with self.assertRaisesRegex(ValueError, "SESSION_MANIFEST_HASH_MISMATCH"):
+            compare_candidate_snapshots(
+                aapl, self.spy, "trend",
+                expected_strategy_sha256=aapl.sha256,
+                expected_spy_sha256=self.spy.sha256,
+                expected_session_dates=days,
+                expected_session_manifest_sha256="0" * 64)
 
 
 if __name__ == "__main__":
