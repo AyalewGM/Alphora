@@ -26,6 +26,26 @@ class WalkForwardFold:
     holdout_start_index: int  # No research test labels reach this boundary.
 
 
+@dataclass(frozen=True)
+class WalkForwardCoverage:
+    """Counts only candidate research test rows; NOT independent trials.
+
+    Untested pre-holdout rows include training, purge/embargo gaps and
+    label-maturation tail sessions. Nothing reports realized returns.
+    """
+
+    total_sessions: int
+    holdout_start_index: int
+    reserved_holdout_sessions: int
+    folds: int
+    tested_preholdout_sessions: int
+    untested_preholdout_sessions: int
+    first_test_index: int
+    last_test_stop_index: int
+    trailing_preholdout_sessions: int
+    last_test_label_index: int
+
+
 def rolling_purged_folds(
     sessions: Sequence[date],
     *,
@@ -103,3 +123,45 @@ def rolling_purged_folds(
         offset += test_sessions
 
     return tuple(folds)
+
+
+def summarize_walk_forward_coverage(
+    sessions: Sequence[date], *,
+    train_sessions: int,
+    test_sessions: int,
+    label_horizon_sessions: int,
+    embargo_sessions: int = 0,
+    holdout_sessions: int = 0,
+) -> WalkForwardCoverage:
+    """Return auditable index counts from the verified fold generator.
+
+    Do not interpret a large raw session count as independent performance
+    observations: folds retrain and adjacent forward-return labels overlap.
+    This function does no fitting, scoring, data fetching or execution.
+    """
+    folds = rolling_purged_folds(
+        sessions, train_sessions=train_sessions, test_sessions=test_sessions,
+        label_horizon_sessions=label_horizon_sessions,
+        embargo_sessions=embargo_sessions,
+        holdout_sessions=holdout_sessions,
+    )
+    boundary = folds[0].holdout_start_index
+    tested = sum(f.test_stop - f.test_start for f in folds)
+    # The generator returns contiguous, non-overlapping test spans.
+    if (any(f.holdout_start_index != boundary for f in folds)
+            or any(a.test_stop != b.test_start for a, b in zip(folds, folds[1:]))
+            or folds[-1].last_test_label_index >= boundary
+            or tested > boundary):
+        raise ValueError("INVALID_FOLD_COVERAGE")
+    return WalkForwardCoverage(
+        total_sessions=len(sessions),
+        holdout_start_index=boundary,
+        reserved_holdout_sessions=holdout_sessions,
+        folds=len(folds),
+        tested_preholdout_sessions=tested,
+        untested_preholdout_sessions=boundary - tested,
+        first_test_index=folds[0].test_start,
+        last_test_stop_index=folds[-1].test_stop,
+        trailing_preholdout_sessions=boundary - folds[-1].test_stop,
+        last_test_label_index=folds[-1].last_test_label_index,
+    )
