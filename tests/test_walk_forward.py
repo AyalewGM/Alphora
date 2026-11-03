@@ -188,6 +188,40 @@ class WalkForwardFoldTests(unittest.TestCase):
             summarize_walk_forward_coverage(fake_sessions(20),
                                             **(config | {"test_sessions": True}))
 
+    def test_coverage_counts_closed_forward_label_interval_overlap(self):
+        # Test rows 9..17 have horizon-2 labels on closed intervals:
+        # [9,11], [10,12], ... [17,19]. Only 3 can be disjoint.
+        report = summarize_walk_forward_coverage(
+            fake_sessions(20), train_sessions=6, test_sessions=3,
+            label_horizon_sessions=2, embargo_sessions=1)
+        self.assertEqual(report.tested_preholdout_sessions, 9)
+        self.assertEqual(report.max_nonoverlapping_test_label_windows, 3)
+        self.assertEqual(report.overlap_excluded_test_label_windows, 6)
+        self.assertEqual(report.max_nonoverlapping_test_label_windows +
+                         report.overlap_excluded_test_label_windows,
+                         report.tested_preholdout_sessions)
+
+    def test_shorter_label_horizon_changes_overlap_accounting(self):
+        # Nine consecutive OOS rows for a one-session forward label
+        # admit at most five disjoint closed index intervals.
+        report = summarize_walk_forward_coverage(
+            fake_sessions(20), train_sessions=6, test_sessions=3,
+            label_horizon_sessions=1, embargo_sessions=1)
+        self.assertEqual(report.tested_preholdout_sessions, 9)
+        self.assertEqual(report.max_nonoverlapping_test_label_windows, 5)
+        self.assertEqual(report.overlap_excluded_test_label_windows, 4)
+
+    def test_holdout_excludes_reserved_intervals_from_overlap_counts(self):
+        report = summarize_walk_forward_coverage(
+            fake_sessions(32), train_sessions=8, test_sessions=3,
+            label_horizon_sessions=2, embargo_sessions=1,
+            holdout_sessions=6)
+        self.assertEqual(report.tested_preholdout_sessions, 12)
+        self.assertEqual(report.max_nonoverlapping_test_label_windows, 4)
+        self.assertEqual(report.overlap_excluded_test_label_windows, 8)
+        self.assertLess(report.last_test_label_index,
+                        report.holdout_start_index)
+
 
 if __name__ == "__main__":
     unittest.main()
