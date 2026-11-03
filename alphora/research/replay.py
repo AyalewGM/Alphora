@@ -32,6 +32,8 @@ class ResearchReplay:
     result: Result
     session_manifest_matched: bool
     session_manifest_digest_matched: bool
+    session_manifest_sha256: str | None
+    session_manifest_session_count: int | None
     cost_bps: D
     lookback: int
 
@@ -44,6 +46,8 @@ class ResearchComparison:
     comparison: BenchmarkComparison
     session_manifest_matched: bool
     session_manifest_digest_matched: bool
+    session_manifest_sha256: str | None
+    session_manifest_session_count: int | None
     cost_bps: D
     lookback: int
 
@@ -94,12 +98,12 @@ def session_manifest_sha256(expected_session_dates: Sequence[date]) -> str:
 def _check_expected_sessions(
     snapshot: DataSnapshot, expected_session_dates: Sequence[date] | None,
     expected_session_manifest_sha256: str | None,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, str | None, int | None]:
     """Check coverage and, when supplied, independently pinned digest equality."""
     if expected_session_dates is None:
         if expected_session_manifest_sha256 is not None:
             raise ValueError("SESSION_MANIFEST_REQUIRED")
-        return False, False
+        return False, False, None, None
     digest = session_manifest_sha256(expected_session_dates)
     if expected_session_manifest_sha256 is not None:
         if (type(expected_session_manifest_sha256) is not str
@@ -111,7 +115,7 @@ def _check_expected_sessions(
             raise ValueError("SESSION_MANIFEST_HASH_MISMATCH")
     if tuple(r.bar.day for r in snapshot.observations) != tuple(expected_session_dates):
         raise ValueError("SESSION_MANIFEST_MISMATCH")
-    return True, expected_session_manifest_sha256 is not None
+    return True, expected_session_manifest_sha256 is not None, digest, len(expected_session_dates)
 
 
 def _parameters(strategy: str, lookback: int) -> None:
@@ -134,7 +138,7 @@ def replay_candidate_snapshot(
     """
     _parameters(strategy, lookback)
     checked = _checked(snapshot, expected_sha256=expected_sha256)
-    manifest_matched, digest_matched = _check_expected_sessions(
+    manifest_matched, digest_matched, digest, sessions = _check_expected_sessions(
         checked, expected_session_dates, expected_session_manifest_sha256)
     result = backtest(checked.bars, strategy, initial=_INITIAL,
                       cost_bps=cost_bps, max_allocation=_MAX_ALLOCATION,
@@ -142,7 +146,7 @@ def replay_candidate_snapshot(
     return ResearchReplay(
         checked.symbol, checked.source, checked.source_revision,
         checked.price_basis, checked.as_of, checked.sha256, strategy, result,
-        manifest_matched, digest_matched, cost_bps, lookback,
+        manifest_matched, digest_matched, digest, sessions, cost_bps, lookback,
     )
 
 
@@ -166,7 +170,7 @@ def compare_candidate_snapshots(
         raise ValueError("SPY_BENCHMARK_REQUIRED")
     if candidate.as_of != spy.as_of:
         raise ValueError("BENCHMARK_AS_OF_MISMATCH")
-    manifest_matched, digest_matched = _check_expected_sessions(
+    manifest_matched, digest_matched, digest, sessions = _check_expected_sessions(
         candidate, expected_session_dates, expected_session_manifest_sha256)
     _check_expected_sessions(spy, expected_session_dates,
                              expected_session_manifest_sha256)
@@ -177,5 +181,5 @@ def compare_candidate_snapshots(
     )
     return ResearchComparison(
         candidate.sha256, spy.sha256, candidate.as_of, comparison,
-        manifest_matched, digest_matched, cost_bps, lookback,
+        manifest_matched, digest_matched, digest, sessions, cost_bps, lookback,
     )
