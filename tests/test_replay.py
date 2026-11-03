@@ -289,6 +289,51 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
                 expected_session_dates=days,
                 expected_session_manifest_sha256="0" * 64)
 
+    def test_replay_without_manifest_has_no_audit_receipt(self):
+        result = replay_candidate_snapshot(
+            self.spy, "buy_hold", expected_sha256=self.spy.sha256)
+        self.assertFalse(result.session_manifest_matched)
+        self.assertFalse(result.session_manifest_digest_matched)
+        self.assertIsNone(result.session_manifest_sha256)
+        self.assertIsNone(result.session_manifest_session_count)
+
+    def test_unpinned_session_receipt_is_reproducible_not_authenticated(self):
+        days = tuple(item.bar.day for item in self.spy.observations)
+        result = replay_candidate_snapshot(
+            self.spy, "buy_hold", expected_sha256=self.spy.sha256,
+            expected_session_dates=days)
+        self.assertTrue(result.session_manifest_matched)
+        self.assertFalse(result.session_manifest_digest_matched)
+        self.assertEqual(result.session_manifest_sha256,
+                         session_manifest_sha256(days))
+        self.assertEqual(result.session_manifest_session_count, len(days))
+
+    def test_pinned_session_receipt_is_recorded_exactly(self):
+        days = tuple(item.bar.day for item in self.spy.observations)
+        pin = session_manifest_sha256(days)
+        result = replay_candidate_snapshot(
+            self.spy, "trend", expected_sha256=self.spy.sha256,
+            expected_session_dates=days,
+            expected_session_manifest_sha256=pin)
+        self.assertTrue(result.session_manifest_digest_matched)
+        self.assertEqual(result.session_manifest_sha256, pin)
+        self.assertEqual(result.session_manifest_session_count,
+                         len(self.spy.bars))
+
+    def test_spy_comparison_audit_receipt_matches_both_inputs(self):
+        days = tuple(item.bar.day for item in self.spy.observations)
+        pin = session_manifest_sha256(days)
+        aapl = candidate("AAPL", asset_type="STOCK")
+        result = compare_candidate_snapshots(
+            aapl, self.spy, "trend",
+            expected_strategy_sha256=aapl.sha256,
+            expected_spy_sha256=self.spy.sha256,
+            expected_session_dates=days,
+            expected_session_manifest_sha256=pin)
+        self.assertEqual(result.session_manifest_sha256, pin)
+        self.assertEqual(result.session_manifest_session_count, len(days))
+        self.assertTrue(result.session_manifest_digest_matched)
+
 
 if __name__ == "__main__":
     unittest.main()
