@@ -88,6 +88,22 @@ class CatalystAssessmentTests(unittest.TestCase):
         self.assertEqual(result.classification, "REVIEW_REQUIRED")
         self.assertIn("CONFLICTING_EVENT_ID", result.reasons)
 
+    def test_conflicting_known_revision_before_close_requires_review(self):
+        recent = event()
+        old = replace(recent, published_at=CLOSE - timedelta(days=1),
+                      first_seen_at=CLOSE - timedelta(days=1))
+        for records in ((recent, old), (old, recent)):
+            result = assess(*records)
+            self.assertEqual(result.classification, "REVIEW_REQUIRED")
+            self.assertIn("CONFLICTING_EVENT_ID", result.reasons)
+
+    def test_future_revision_does_not_poison_known_event(self):
+        future = replace(event(), direction="NEGATIVE",
+                         received_at=NOW + timedelta(minutes=1))
+        result = assess(event(), future)
+        self.assertEqual(result.classification, "PRIMARY_EVENT")
+        self.assertNotIn("CONFLICTING_EVENT_ID", result.reasons)
+
     def test_invalid_timestamps_do_not_qualify(self):
         result = assess(event(first_seen_at=datetime(2026, 11, 2, 23)))
         self.assertEqual(result.evidence, ())
