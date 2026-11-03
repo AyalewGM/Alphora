@@ -31,6 +31,39 @@ for f in folds:
     # Evaluate on test rows after the labels have actually matured.
 ```
 
+## Transparent out-of-sample (OOS) coverage accounting
+
+Use `summarize_walk_forward_coverage(...)` with the exact same arguments as
+`rolling_purged_folds(...)` to obtain an immutable accounting receipt for the
+research fold schedule. For example:
+
+```python
+from alphora.research.walk_forward import summarize_walk_forward_coverage
+
+coverage = summarize_walk_forward_coverage(
+    session_days, train_sessions=252, test_sessions=21,
+    label_horizon_sessions=5, embargo_sessions=2, holdout_sessions=63
+)
+print(coverage.tested_preholdout_sessions,
+      coverage.untested_preholdout_sessions,
+      coverage.reserved_holdout_sessions)
+```
+
+The three counts partition the full supplied session sequence:
+`tested_preholdout_sessions + untested_preholdout_sessions +
+reserved_holdout_sessions == total_sessions`. **Untested** includes the
+initial training-only and purge period, gaps, and the final horizon-maturation
+tail; it is not an assertion that dates were missing from a market feed.
+`trailing_preholdout_sessions` counts sessions after the final test window
+and before the reserved holdout; those may contain label outcomes, but are
+not scored as OOS test rows. All counts are derived afresh from the validated
+fold generator rather than trusted caller-supplied indices.
+
+This is a *coverage denominator*, not a backtest result, independent-trial
+count or performance estimate. Adjacent forward labels can overlap, and
+retraining across folds creates dependence. Never claim all pre-holdout days
+were evaluated or include untouched holdout dates in cross-validation scores.
+
 ## Final untouched holdout boundary
 
 Set `holdout_sessions=N` to reserve the last N supplied session rows for a
