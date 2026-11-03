@@ -335,5 +335,20 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
         self.assertTrue(result.session_manifest_digest_matched)
 
 
+    def test_spy_replay_exposes_equal_session_risk_metrics(self):
+        aapl = candidate("AAPL", asset_type="STOCK")
+        compared = compare_candidate_snapshots(
+            aapl, self.spy, "trend",
+            expected_strategy_sha256=aapl.sha256,
+            expected_spy_sha256=self.spy.sha256, cost_bps=D("5"))
+        metrics = compared.comparison
+        self.assertEqual(metrics.evaluation_start, 20)
+        self.assertEqual(metrics.aligned_strategy.sessions, 15)
+        self.assertEqual(metrics.aligned_capped_spy.sessions, 15)
+        self.assertEqual(metrics.aligned_fully_invested_spy.sessions, 15)
+        self.assertEqual(metrics.excess_vs_capped_buy_hold,
+                         metrics.aligned_strategy.total_return -
+                         metrics.aligned_capped_spy.total_return)
+
 if __name__ == "__main__":
     unittest.main()
