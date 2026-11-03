@@ -308,6 +308,22 @@ os._exit(24)  # No close or normal interpreter shutdown.
         with self.assertRaisesRegex(ValueError, "NO_OPEN_INTENT"):
             self.book.record_hypothetical_fill("a", "f2", 1, D("50"))
 
+    def test_cancelled_intent_retry_must_not_masquerade_as_reserved(self):
+        proposal = self.proposal(qty="20")
+        self.reserve("cancelled", proposal)
+        cancelled = self.book.cancel_remaining("cancelled")
+        self.assertEqual(cancelled.reserved_cash, D("0"))
+        with self.assertRaisesRegex(ValueError, "CANCELLED_INTENT_ID"):
+            self.reserve("cancelled", proposal)
+        self.assertEqual(self.book.snapshot(), cancelled)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        with self.assertRaisesRegex(ValueError, "CANCELLED_INTENT_ID"):
+            self.reserve("cancelled", proposal)
+        self.assertEqual(self.book.snapshot(), cancelled)
+        # Restoring the desired virtual exposure requires a fresh intent ID.
+        self.assertEqual(self.reserve("replacement", proposal).reserved_cash, D("1000"))
+
     def test_restart_persists_reservations_fills_and_halt(self):
         self.reserve("a", fee_budget=D("1"))
         self.book.record_hypothetical_fill("a", "f1", 10, D("49"))
