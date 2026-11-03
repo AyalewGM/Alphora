@@ -88,6 +88,33 @@ class CatalystAssessmentTests(unittest.TestCase):
         self.assertEqual(result.classification, "REVIEW_REQUIRED")
         self.assertIn("CONFLICTING_EVENT_ID", result.reasons)
 
+    def test_conflicting_id_revisions_are_excluded_in_any_input_order(self):
+        positive = event()
+        negative = event(direction="NEGATIVE")
+        unrelated = event(event_id="other-source", category="GUIDANCE")
+        all_orders = [
+            (positive, negative, unrelated),
+            (negative, unrelated, positive),
+            (unrelated, positive, negative),
+            (negative, positive, unrelated),
+        ]
+        assessments = [assess(*records) for records in all_orders]
+        for result in assessments:
+            self.assertEqual(result.classification, "REVIEW_REQUIRED")
+            self.assertIn("CONFLICTING_EVENT_ID", result.reasons)
+            self.assertEqual([item.event_id for item in result.evidence], ["other-source"])
+        self.assertTrue(all(result == assessments[0] for result in assessments))
+
+    def test_conflicting_previous_close_versions_excluded_in_any_order(self):
+        recent = event()
+        old = replace(recent, published_at=CLOSE - timedelta(days=1),
+                      first_seen_at=CLOSE - timedelta(days=1))
+        first = assess(recent, old)
+        second = assess(old, recent)
+        self.assertEqual(first, second)
+        self.assertEqual(first.evidence, ())
+        self.assertIn("CONFLICTING_EVENT_ID", first.reasons)
+
     def test_conflicting_known_revision_before_close_requires_review(self):
         recent = event()
         old = replace(recent, published_at=CLOSE - timedelta(days=1),
