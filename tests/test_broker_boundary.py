@@ -75,8 +75,13 @@ class BrokerBoundaryTests(unittest.TestCase):
         for path in sorted(ROOT.rglob("*.py")):
             if any(part in EXCLUDED_DIRS for part in path.relative_to(ROOT).parts):
                 continue
-            if path.resolve() == Path(__file__).resolve():
-                continue  # Synthetic unsafe fixtures are deliberately present here.
+            if path.resolve() in {
+                Path(__file__).resolve(),
+                (ROOT / "tests" / "test_research_boundary.py").resolve(),
+            }:
+                # Both test modules intentionally contain forbidden strings
+                # as negative fixtures, not executable brokerage calls.
+                continue
             try:
                 problems.extend(f"{path.relative_to(ROOT)}: {msg}"
                                 for msg in violations(path.read_text(encoding="utf-8")))
