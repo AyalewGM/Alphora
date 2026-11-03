@@ -57,6 +57,57 @@ class WalkForwardFoldTests(unittest.TestCase):
         self.assertEqual(first.test_start, 5)
         self.assertEqual(first.last_test_label_index, 7)
 
+    def test_reserved_final_holdout_excludes_test_label_outcomes(self):
+        days = fake_sessions(32)
+        held_out = 6
+        folds = rolling_purged_folds(
+            days, train_sessions=8, test_sessions=3,
+            label_horizon_sessions=2, embargo_sessions=1,
+            holdout_sessions=held_out)
+        self.assertTrue(folds)
+        boundary = len(days) - held_out
+        for fold in folds:
+            self.assertEqual(fold.holdout_start_index, boundary)
+            self.assertLess(fold.test_stop, boundary)
+            self.assertLess(fold.last_test_label_index, boundary)
+            self.assertLess(fold.last_train_label_index, fold.test_start)
+        # Labels for prior out-of-sample rows cannot enter the untouched tail.
+        self.assertEqual(folds, rolling_purged_folds(
+            list(days), train_sessions=8, test_sessions=3,
+            label_horizon_sessions=2, embargo_sessions=1,
+            holdout_sessions=held_out))
+
+    def test_holdout_protection_removes_later_folds(self):
+        days = fake_sessions(25)
+        config = dict(train_sessions=6, test_sessions=3,
+                      label_horizon_sessions=2, embargo_sessions=1)
+        regular = rolling_purged_folds(days, **config)
+        reserved = rolling_purged_folds(days, holdout_sessions=8, **config)
+        self.assertGreater(len(regular), len(reserved))
+        self.assertEqual(reserved[-1].holdout_start_index, 17)
+        self.assertTrue(all(f.last_test_label_index < 17 for f in reserved))
+        self.assertTrue(all(f.holdout_start_index == len(days) for f in regular))
+
+    def test_holdout_needs_enough_mature_pre_holdout_history(self):
+        config = dict(train_sessions=6, test_sessions=3,
+                      label_horizon_sessions=2, embargo_sessions=1)
+        with self.assertRaisesRegex(ValueError, "INSUFFICIENT_MATURE_HISTORY"):
+            rolling_purged_folds(fake_sessions(16), holdout_sessions=3, **config)
+        result = rolling_purged_folds(fake_sessions(17), holdout_sessions=3,
+                                     **config)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].last_test_label_index, 13)
+        self.assertEqual(result[0].holdout_start_index, 14)
+
+    def test_invalid_holdout_configuration_fails_closed(self):
+        for invalid in (-1, 1.0, True, "2", None):
+            with self.subTest(holdout_sessions=invalid):
+                with self.assertRaisesRegex(ValueError, "INVALID_FOLD_CONFIGURATION"):
+                    rolling_purged_folds(fake_sessions(30),
+                                         train_sessions=6, test_sessions=3,
+                                         label_horizon_sessions=2,
+                                         holdout_sessions=invalid)
+
     def test_sessions_must_be_exact_dates_strictly_increasing(self):
         days = fake_sessions(20)
         kwargs = dict(train_sessions=6, test_sessions=3, label_horizon_sessions=2)
