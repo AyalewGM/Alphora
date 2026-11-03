@@ -100,6 +100,29 @@ continues to violate the approved 10% single-instrument limit and is clearly
 research context, never a compliant simulation. No live market or paper
 execution is involved.
 
+
+## Offline research-input fingerprint
+
+Each `ResearchReplay` and `ResearchComparison` now exposes
+`input_fingerprint_sha256`, a deterministic SHA-256 of a versioned canonical
+research-input record. The record includes strategy and pinned snapshot digest(s),
+as-of instant normalized to UTC, execution cost assumption, lookback,
+fixed virtual equity and per-symbol research allocation, optional session
+manifest digest, and **whether that manifest was separately pinned**.
+Decimal scales (such as `5.0` vs `5.00`) and equivalent time-zone
+representations produce the same fingerprint. Changing strategy, cost,
+lookback, snapshot source revision, benchmark source, or calendar pin status
+produces a different fingerprint.
+
+This is a **reproducibility and comparison key only**, not a signature,
+independent vendor attestation, trading permission, proof that the computed
+result is correct, or immutable database receipt. Store the returned result,
+input files and externally pinned vendor/session attestations separately.
+It deliberately does not claim to include library version, Git commit,
+Python environment, exchange calendar truth, corporate actions or modeling
+decisions outside the helper call. A future full research provenance record
+must pin code SHA, environment lock, and independent vendor source receipts.
+
 ## Critical limitations
 
 - All first-seen and revision timestamps are **caller-supplied claims**; a
