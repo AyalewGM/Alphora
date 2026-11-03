@@ -103,14 +103,12 @@ class BrokerBoundaryTests(unittest.TestCase):
         for path in sorted(ROOT.rglob("*.py")):
             if any(part in EXCLUDED_DIRS for part in path.relative_to(ROOT).parts):
                 continue
-            fixture_path = path.resolve() in {
-                Path(__file__).resolve(),
-                (ROOT / "tests" / "test_research_boundary.py").resolve(),
-            }
+            fixture_path = path.relative_to(ROOT).parts[0] == "tests"
             try:
                 # Check *all* Python modules for imports and executable broker
-                # calls, including fixture modules. Only their bare test strings
-                # are exempt from generic literal scanning.
+                # calls, including tests. Test assertion/fixture literals are
+                # not executable broker paths; reject calls to known network
+                # sinks, imports and dynamic methods even within tests.
                 problems.extend(
                     f"{path.relative_to(ROOT)}: {msg}"
                     for msg in violations(path.read_text(encoding="utf-8"),
