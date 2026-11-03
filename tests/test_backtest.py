@@ -2,7 +2,7 @@ import unittest
 import csv
 import tempfile
 from dataclasses import replace
-from datetime import date,timedelta
+from datetime import date,datetime,timedelta
 from decimal import Decimal as D
 from pathlib import Path
 from alphora.research.backtest import Bar,load_csv,signal,backtest
@@ -24,6 +24,33 @@ class BacktestTests(unittest.TestCase):
 
     def test_invalid_ohlc_rejected(self):
         with self.assertRaises(ValueError):backtest([replace(self.bars[0],high=D(1))]+self.bars[1:],"trend")
+
+    def test_high_below_open_rejected(self):
+        bad=replace(self.bars[0], high=D("99.5"))
+        with self.assertRaisesRegex(ValueError, "INVALID_BARS"):
+            backtest([bad]+self.bars[1:],"buy_hold")
+
+    def test_low_above_close_rejected(self):
+        bad=replace(self.bars[0], low=D("100.5"))
+        with self.assertRaisesRegex(ValueError, "INVALID_BARS"):
+            backtest([bad]+self.bars[1:],"buy_hold")
+
+    def test_valid_extremes_accepted(self):
+        self.assertEqual(len(backtest(self.bars,"buy_hold").equity_curve),len(self.bars))
+
+    def test_boolean_or_fractional_volume_rejected(self):
+        for invalid_volume in (True, False, 1000.0, D("1000")):
+            with self.subTest(volume=repr(invalid_volume)):
+                bad=replace(self.bars[0],volume=invalid_volume)
+                with self.assertRaisesRegex(ValueError, "INVALID_BARS"):
+                    backtest([bad]+self.bars[1:],"buy_hold")
+
+    def test_non_date_or_datetime_bar_day_rejected(self):
+        for invalid_day in ("2025-01-01", datetime(2025,1,1), None):
+            with self.subTest(day=repr(invalid_day)):
+                bad=replace(self.bars[0],day=invalid_day)
+                with self.assertRaisesRegex(ValueError, "INVALID_BARS"):
+                    backtest([bad]+self.bars[1:],"buy_hold")
 
     def test_nan_rejected(self):
         with self.assertRaises(ValueError):backtest([replace(self.bars[0],close=D("NaN"))]+self.bars[1:],"trend")
