@@ -66,6 +66,36 @@ class OfflineReservationTests(unittest.TestCase):
             self.book.reserve_buy("b", self.account(equity=D("98000"),
                 day_pnl=D("-2000")), self.proposal(), reconciled=True)
 
+    def test_daily_loss_veto_persists_one_way_halt_across_restart(self):
+        self.reserve("pending", self.proposal(symbol="SPY", qty="20"))
+        before = self.book.snapshot()
+        self.assertFalse(before.halted)
+        loss_account = self.account(equity=D("98000"), day_pnl=D("-2000"))
+        with self.assertRaisesRegex(ValueError, "RISK_VETO:DAILY_LOSS_HALT"):
+            self.book.reserve_buy("rejected", loss_account,
+                                  self.proposal(symbol="QQQ"),
+                                  reconciled=True)
+        state = self.book.snapshot()
+        self.assertTrue(state.halted)
+        self.assertEqual(state.pending, before.pending)
+        self.assertEqual(state.cash, before.cash)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertTrue(self.book.snapshot().halted)
+        # A later caller assertion of recovered equity must not un-halt.
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.reserve("after-recovery", self.proposal(symbol="QQQ"))
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.book.record_hypothetical_fill("pending", "fill-after-stop",
+                                               1, D("50"))
+        self.assertEqual(self.book.cancel_remaining("pending").reserved_cash, D(0))
+
+    def test_non_loss_risk_veto_does_not_trigger_permanent_halt(self):
+        with self.assertRaisesRegex(ValueError, "TRADE_RISK_EXCEEDED"):
+            self.reserve("bad", self.proposal(qty="100", stop="44"))
+        self.assertFalse(self.book.snapshot().halted)
+        self.reserve("still-valid", self.proposal(qty="20"))
+
     def test_session_open_equity_cannot_be_forged_to_raise_risk_limits(self):
         # The virtual book starts a single fixed session at $100k. A caller
         # cannot raise or lower the opening-loss baseline to avoid the 2% stop.
