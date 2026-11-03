@@ -1,0 +1,201 @@
+"""Offline SQLite cash-reservation, idempotency and synthetic-fill tests."""
+import tempfile
+import sqlite3
+import threading
+import unittest
+from dataclasses import replace
+from decimal import Decimal as D
+from pathlib import Path
+
+from alphora.risk import BuyProposal, PaperAccount, INITIAL_EQUITY
+from alphora.reservations import OfflineReservations
+
+
+class OfflineReservationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "paper.sqlite"
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+
+    def tearDown(self):
+        self.book.close()
+        self.tmp.cleanup()
+
+    def account(self, **changes):
+        base = PaperAccount(D("100000"), D("100000"),
+                            self.book.snapshot().cash, D("0"), "2026-11-02")
+        return replace(base, **changes)
+
+    def proposal(self, *, symbol="SPY", qty="100", price="50", stop="48", existing="0"):
+        return BuyProposal(symbol, D(qty), D(price), D(stop), D(existing))
+
+    def reserve(self, ident="a", proposal=None, **kw):
+        return self.book.reserve_buy(ident, self.account(), proposal or self.proposal(),
+                                     reconciled=True, **kw)
+
+    def test_initial_zero_reservations_and_defaults(self):
+        state = self.book.snapshot()
+        self.assertEqual(state.cash, INITIAL_EQUITY)
+        self.assertEqual(state.available_cash, INITIAL_EQUITY)
+        self.assertEqual(state.pending, ())
+        self.assertEqual(state.session_id, "2026-11-02")
+        self.assertFalse(hasattr(self.book, "submit_order"))
+
+    def test_pending_reserves_cash_and_exact_id_is_idempotent(self):
+        first = self.reserve(fee_budget=D("4"))
+        self.assertEqual(first.reserved_cash, D("5004"))
+        self.assertEqual(first.available_cash, D("94996"))
+        self.assertEqual(self.reserve(fee_budget=D("4")), first)
+        with self.assertRaisesRegex(ValueError, "CONFLICTING_INTENT_ID"):
+            self.reserve(proposal=self.proposal(qty="90"), fee_budget=D("4"))
+
+    def test_multiple_pending_intents_share_instrument_cap(self):
+        self.reserve("a", self.proposal(qty="120"))
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+            self.reserve("b", self.proposal(qty="100"))
+        self.reserve("b", self.proposal(qty="80"))
+        self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
+
+    def test_daily_loss_and_planned_trade_risk_veto(self):
+        with self.assertRaisesRegex(ValueError, "TRADE_RISK_EXCEEDED"):
+            self.reserve("a", self.proposal(qty="100", stop="44"))
+        account = self.account(equity=D("98000"), cash=D("98000"), day_pnl=D("-2000"))
+        with self.assertRaisesRegex(ValueError, "UNRECONCILED_CASH_OR_SESSION"):
+            self.book.reserve_buy("b", account, self.proposal(), reconciled=True)
+        with self.assertRaisesRegex(ValueError, "DAILY_LOSS_HALT"):
+            self.book.reserve_buy("b", self.account(equity=D("98000"),
+                day_pnl=D("-2000")), self.proposal(), reconciled=True)
+
+    def test_cash_overcommit_across_pending_symbols(self):
+        for i in range(10):
+            self.reserve(f"i{i}", self.proposal(symbol=f"S{i}", qty="200"))
+        self.assertEqual(self.book.snapshot().available_cash, D(0))
+        with self.assertRaisesRegex(ValueError, "INSUFFICIENT_CASH"):
+            self.reserve("extra", self.proposal(symbol="XYZ", qty="1"))
+
+    def test_partial_fill_releases_price_improvement_and_keeps_remaining_locked(self):
+        self.reserve("p", fee_budget=D("5"))
+        state = self.book.record_hypothetical_fill("p", "f1", 40, D("49"), fee=D("2"))
+        self.assertEqual(state.cash, D("98038"))
+        self.assertEqual(state.reserved_cash, D("3003"))
+        self.assertEqual(state.available_cash, D("95035"))
+        self.assertEqual(state.positions, (("SPY", 40, D("1960")),))
+        self.assertEqual(state.pending[0][2], 60)
+        self.assertEqual(self.book.record_hypothetical_fill("p", "f1", 40, D("49"), fee=D("2")), state)
+        with self.assertRaisesRegex(ValueError, "CONFLICTING_FILL_ID"):
+            self.book.record_hypothetical_fill("p", "f1", 40, D("49"), fee=D("3"))
+        final = self.book.record_hypothetical_fill("p", "f2", 60, D("50"), fee=D("2"))
+        self.assertEqual(final.cash, D("95036"))
+        self.assertEqual(final.reserved_cash, D(0))
+        self.assertEqual(final.positions, (("SPY", 100, D("4960")),))
+
+    def test_no_overfill_gaps_or_unbudgeted_fees(self):
+        self.reserve("a", fee_budget=D("1"))
+        for qty, price, fee in ((101, D(50), D(0)), (1, D(51), D(0)),
+                                (1, D(48), D(0)), (1, D(50), D(2))):
+            with self.subTest(qty=qty, price=price, fee=fee):
+                with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS"):
+                    self.book.record_hypothetical_fill("a", "new", qty, price, fee=fee)
+        self.assertEqual(self.book.snapshot().cash, D("100000"))
+        self.assertEqual(self.book.snapshot().reserved_cash, D("5001"))
+
+    def test_cancel_releases_unfilled_reserve_but_retains_fills(self):
+        self.reserve("a")
+        self.book.record_hypothetical_fill("a", "f1", 20, D("50"))
+        state = self.book.cancel_remaining("a")
+        self.assertEqual(state.cash, D("99000"))
+        self.assertEqual(state.reserved_cash, D(0))
+        self.assertEqual(state.positions, (("SPY", 20, D("1000")),))
+        self.assertEqual(self.book.cancel_remaining("a"), state)
+        with self.assertRaisesRegex(ValueError, "NO_OPEN_INTENT"):
+            self.book.record_hypothetical_fill("a", "f2", 1, D("50"))
+
+    def test_restart_persists_reservations_fills_and_halt(self):
+        self.reserve("a", fee_budget=D("1"))
+        self.book.record_hypothetical_fill("a", "f1", 10, D("49"))
+        old = self.book.snapshot()
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), old)
+        self.assertEqual(self.book.record_hypothetical_fill("a", "f1", 10, D("49")), old)
+        self.book.halt()
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertTrue(self.book.snapshot().halted)
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.reserve("b", self.proposal(symbol="QQQ"))
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.book.record_hypothetical_fill("a", "f2", 1, D("50"))
+        self.assertEqual(self.book.cancel_remaining("a").reserved_cash, D(0))
+
+    def test_reopen_mismatch_and_nondurable_paths_rejected(self):
+        with self.assertRaisesRegex(ValueError, "BOOK_REOPEN_MISMATCH"):
+            OfflineReservations(self.path, session_id="2026-11-03")
+        for path in ("", " ", ":memory:", "file:paper?mode=memory", "file::memory:"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(ValueError, "INVALID_PAPER_BOOK"):
+                    OfflineReservations(path, session_id="2026-11-02")
+
+    def test_malformed_and_unreconciled_rejected(self):
+        for ident in ("bad/id", "", "b"*129):
+            with self.assertRaises(ValueError):
+                self.reserve(ident)
+        with self.assertRaisesRegex(ValueError, "INVALID_OR_UNRECONCILED_INTENT"):
+            self.book.reserve_buy("a", self.account(), self.proposal(), reconciled=False)
+        with self.assertRaisesRegex(ValueError, "UNRECONCILED_CASH_OR_SESSION"):
+            self.book.reserve_buy("a", self.account(cash=D("99999")),
+                                  self.proposal(), reconciled=True)
+        for fill_qty in (0, 1.5, True, -1):
+            with self.subTest(qty=fill_qty):
+                with self.assertRaises(ValueError):
+                    self.book.record_hypothetical_fill("a", "f", fill_qty, D("50"))
+
+    def test_book_ledger_tampering_fails_closed(self):
+        self.reserve("a")
+        self.book.record_hypothetical_fill("a", "f1", 10, D("50"))
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("UPDATE book_meta SET value='100000' WHERE key='cash'")
+        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+            self.book.snapshot()
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("UPDATE book_meta SET value='99500' WHERE key='cash'")
+            conn.execute("DELETE FROM hypothetical_fills")
+        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+            self.book.snapshot()
+
+    def test_missing_meta_with_existing_history_does_not_reseed_book(self):
+        self.reserve("a")
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("DELETE FROM book_meta")
+        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+            OfflineReservations(self.path, session_id="2026-11-02")
+
+    def test_initial_capital_cannot_be_overridden(self):
+        for amount in (D("100001"), D("99999")):
+            with self.subTest(value=amount):
+                with self.assertRaisesRegex(ValueError, "INVALID_PAPER_BOOK"):
+                    OfflineReservations(self.path, session_id="2026-11-02",
+                                        starting_cash=amount)
+
+    def test_cross_connection_transaction_prevents_double_reserve(self):
+        attempts = []
+        def attempt(label):
+            book = OfflineReservations(self.path, session_id="2026-11-02")
+            try:
+                book.reserve_buy(label, PaperAccount(D("100000"), D("100000"),
+                    D("100000"), D("0"), "2026-11-02"),
+                    self.proposal(symbol="SPY", qty="200"), reconciled=True)
+                attempts.append("ok")
+            except ValueError as exc:
+                attempts.append(str(exc))
+            finally:
+                book.close()
+        threads = [threading.Thread(target=attempt, args=(f"t{i}",)) for i in range(3)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        self.assertEqual(attempts.count("ok"), 1)
+        self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
+
+
+if __name__ == "__main__":
+    unittest.main()
