@@ -23,9 +23,10 @@ ORDER_SUBMISSION_METHODS = frozenset({
     "replace_order", "replace_order_by_id", "cancel_order",
 })
 BROKER_HOST_MARKERS = ("alpaca.markets",)
+NETWORK_SINKS = {"get", "post", "put", "patch", "delete", "request", "urlopen", "connect", "create_connection"}
 
 
-def violations(source: str) -> list[str]:
+def violations(source: str, *, ignore_fixture_literals: bool = False) -> list[str]:
     """Find known unsafe constructs in Python code; all matches are fail-closed."""
     tree = ast.parse(source)
     problems = []
@@ -51,7 +52,34 @@ def violations(source: str) -> list[str]:
                 and kw.value.value is False for kw in node.keywords
             ):
                 problems.append(f"line {node.lineno}: live broker client")
+            # These dynamic usages remain executable even in a file containing
+            # intentionally prohibited strings as static regression fixtures.
+            if name in ("__import__", "import_module") and node.args:
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    module = first.value.lower().strip()
+                    if (module in BROKER_IMPORT_ROOTS or any(
+                            module.startswith(root + ".") for root in BROKER_IMPORT_ROOTS)):
+                        problems.append(f"line {node.lineno}: dynamic broker import")
+            if name in ("getattr", "__getattribute__") and len(node.args) >= 2:
+                method = node.args[1]
+                if isinstance(method, ast.Constant) and isinstance(method.value, str):
+                    value = method.value
+                    if (value in ORDER_SUBMISSION_METHODS or
+                            value.startswith(("order_buy_", "order_sell_"))):
+                        problems.append(f"line {node.lineno}: dynamic broker method")
+            if name in NETWORK_SINKS:
+                args = list(node.args) + [kw.value for kw in node.keywords]
+                for argument in args:
+                    if (isinstance(argument, ast.Constant) and
+                            isinstance(argument.value, str) and
+                            any(host in argument.value.lower()
+                                for host in BROKER_HOST_MARKERS)):
+                        problems.append(f"line {node.lineno}: broker network request")
+                        break
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if ignore_fixture_literals:
+                continue
             value = node.value.lower().strip()
             # Includes attempts to import SDKs dynamically using literal strings.
             if value in BROKER_IMPORT_ROOTS or any(
@@ -75,16 +103,19 @@ class BrokerBoundaryTests(unittest.TestCase):
         for path in sorted(ROOT.rglob("*.py")):
             if any(part in EXCLUDED_DIRS for part in path.relative_to(ROOT).parts):
                 continue
-            if path.resolve() in {
+            fixture_path = path.resolve() in {
                 Path(__file__).resolve(),
                 (ROOT / "tests" / "test_research_boundary.py").resolve(),
-            }:
-                # Both test modules intentionally contain forbidden strings
-                # as negative fixtures, not executable brokerage calls.
-                continue
+            }
             try:
-                problems.extend(f"{path.relative_to(ROOT)}: {msg}"
-                                for msg in violations(path.read_text(encoding="utf-8")))
+                # Check *all* Python modules for imports and executable broker
+                # calls, including fixture modules. Only their bare test strings
+                # are exempt from generic literal scanning.
+                problems.extend(
+                    f"{path.relative_to(ROOT)}: {msg}"
+                    for msg in violations(path.read_text(encoding="utf-8"),
+                                          ignore_fixture_literals=fixture_path)
+                )
             except SyntaxError as exc:
                 problems.append(f"{path.relative_to(ROOT)}: invalid Python: {exc}")
         # Also prevent accidental broker dependency introduction.
@@ -125,6 +156,22 @@ class BrokerBoundaryTests(unittest.TestCase):
         for source in unsafe:
             with self.subTest(source=source):
                 self.assertTrue(violations(source))
+
+    def test_fixture_module_exemption_does_not_hide_executable_broker_usage(self):
+        for source in (
+            "from alpaca.trading.client import TradingClient",
+            "client.submit_order(order)",
+            "client.create_order(symbol='AAPL')",
+            "m = __import__('alpaca.trading.client')",
+            "m = importlib.import_module('alpaca.trading.client')",
+            "method = getattr(broker, 'submit_order')",
+            "requests.post('https://paper-api.alpaca.markets/v2/orders')",
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(violations(source, ignore_fixture_literals=True))
+        self.assertEqual(
+            violations("text = 'paper-api.alpaca.markets'",
+                       ignore_fixture_literals=True), [])
 
     def test_offline_paper_proposals_and_explanatory_prose_allowed(self):
         safe = '''"""This module never submits broker orders or calls submit_order."""
