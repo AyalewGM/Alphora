@@ -90,6 +90,48 @@ class OfflineReservationTests(unittest.TestCase):
                                                1, D("50"))
         self.assertEqual(self.book.cancel_remaining("pending").reserved_cash, D(0))
 
+    def test_idempotent_intent_retry_cannot_hide_new_daily_loss(self):
+        original = self.reserve("same-id", self.proposal(qty="20"))
+        self.assertFalse(original.halted)
+        loss = self.account(equity=D("98000"), day_pnl=D("-2000"))
+        with self.assertRaisesRegex(ValueError, "DAILY_LOSS_HALT"):
+            self.book.reserve_buy("same-id", loss, self.proposal(qty="20"),
+                                  reconciled=True)
+        halted = self.book.snapshot()
+        self.assertTrue(halted.halted)
+        self.assertEqual(halted.pending, original.pending)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertTrue(self.book.snapshot().halted)
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.reserve("other-id", self.proposal(symbol="QQQ"))
+
+    def test_explicit_loss_observation_does_not_need_new_order(self):
+        self.reserve("pending", self.proposal(qty="20"))
+        observed = self.book.observe_daily_loss(
+            self.account(equity=D("98000"), day_pnl=D("-2000")),
+            reconciled=True)
+        self.assertTrue(observed.halted)
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.book.record_hypothetical_fill("pending", "f1", 1, D("50"))
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertTrue(self.book.snapshot().halted)
+
+    def test_observer_rejects_unreconciled_and_inconsistent_marks(self):
+        with self.assertRaisesRegex(ValueError, "INVALID_OR_UNRECONCILED_ACCOUNT"):
+            self.book.observe_daily_loss(self.account())
+        with self.assertRaisesRegex(ValueError, "UNRECONCILED_CASH_OR_SESSION"):
+            self.book.observe_daily_loss(self.account(cash=D("99999")),
+                                         reconciled=True)
+        with self.assertRaisesRegex(ValueError, "INCONSISTENT_ACCOUNT_STATE"):
+            self.book.observe_daily_loss(self.account(day_pnl=D("-50")),
+                                         reconciled=True)
+        self.assertFalse(self.book.snapshot().halted)
+        # A caller-asserted manual upstream stop must propagate one-way.
+        self.assertTrue(self.book.observe_daily_loss(
+            self.account(halted=True), reconciled=True).halted)
+
     def test_non_loss_risk_veto_does_not_trigger_permanent_halt(self):
         with self.assertRaisesRegex(ValueError, "TRADE_RISK_EXCEEDED"):
             self.reserve("bad", self.proposal(qty="100", stop="44"))
