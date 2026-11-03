@@ -23,6 +23,7 @@ class WalkForwardFold:
     train_last_day: date
     test_first_day: date
     test_last_day: date
+    holdout_start_index: int  # No research test labels reach this boundary.
 
 
 def rolling_purged_folds(
@@ -32,6 +33,7 @@ def rolling_purged_folds(
     test_sessions: int,
     label_horizon_sessions: int,
     embargo_sessions: int = 0,
+    holdout_sessions: int = 0,
 ) -> tuple[WalkForwardFold, ...]:
     """Produce equal-length, non-overlapping out-of-sample test windows.
 
@@ -43,13 +45,17 @@ def rolling_purged_folds(
     Later folds intentionally retrain using prior matured OOS history. All test
     labels must themselves have matured within the input sequence. No partial
     final fold is emitted, so the caller must report excluded trailing sessions.
+    Optional final holdout reserves the most recent N samples and their outcomes
+    exclusively for separate untouched evaluation. Training/test labels cannot
+    mature inside that reserved tail; it does not train or score the holdout.
     This does NOT prevent feature-level lookahead or establish vendor truth.
     """
     if (type(train_sessions) is not int or train_sessions < 2
             or type(test_sessions) is not int or test_sessions < 1
             or type(label_horizon_sessions) is not int
             or label_horizon_sessions < 1
-            or type(embargo_sessions) is not int or embargo_sessions < 0):
+            or type(embargo_sessions) is not int or embargo_sessions < 0
+            or type(holdout_sessions) is not int or holdout_sessions < 0):
         raise ValueError("INVALID_FOLD_CONFIGURATION")
     if (not isinstance(sessions, (tuple, list)) or
             not all(type(day) is date for day in sessions) or
@@ -57,10 +63,11 @@ def rolling_purged_folds(
         raise ValueError("INVALID_SESSION_SEQUENCE")
 
     n = len(sessions)
+    holdout_start = n - holdout_sessions
     gap = label_horizon_sessions + embargo_sessions
     # Last OOS row also requires its future-horizon label to be observed.
     required = train_sessions + gap + test_sessions + label_horizon_sessions
-    if n < required:
+    if holdout_start < required:
         raise ValueError("INSUFFICIENT_MATURE_HISTORY")
 
     folds = []
@@ -73,7 +80,7 @@ def rolling_purged_folds(
         last_train_label = train_stop - 1 + label_horizon_sessions
         last_test_label = test_stop - 1 + label_horizon_sessions
 
-        if last_test_label >= n:
+        if last_test_label >= holdout_start:
             break
         # Defense-in-depth; the test date must be after every training label.
         if last_train_label + embargo_sessions >= test_start:
@@ -90,6 +97,7 @@ def rolling_purged_folds(
             train_last_day=sessions[train_stop - 1],
             test_first_day=sessions[test_start],
             test_last_day=sessions[test_stop - 1],
+            holdout_start_index=holdout_start,
         ))
         # Step exactly one test window to avoid counting an OOS date twice.
         offset += test_sessions
