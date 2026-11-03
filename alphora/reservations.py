@@ -220,8 +220,10 @@ class OfflineReservations:
                 or not _money(fee_budget)
                 or reconciled is not True):
             raise ValueError("INVALID_OR_UNRECONCILED_INTENT")
-        # Observe even for an already-known intent ID. Stable replay must
-        # never suppress a newly reported 2% loss or upstream manual halt.
+        # Preserve the established already-halted rejection contract while
+        # recording new loss observations even on idempotent retries.
+        if self.snapshot().halted:
+            raise ValueError("PAPER_BOOK_HALTED")
         observed = self.observe_daily_loss(account, reconciled=reconciled)
         if observed.halted:
             raise ValueError("RISK_VETO:DAILY_LOSS_HALT")
