@@ -1,6 +1,8 @@
 """Offline SQLite cash-reservation, idempotency and synthetic-fill tests."""
 import tempfile
 import sqlite3
+import subprocess
+import sys
 import threading
 import unittest
 from dataclasses import replace
@@ -186,6 +188,53 @@ class OfflineReservationTests(unittest.TestCase):
         after = self.book.record_hypothetical_fill("a", "partial-1",
                                                    20, D("49"), fee=D("1"))
         self.assertEqual(after.cash, D("99019"))
+
+    def test_abrupt_child_exit_discards_uncommitted_sqlite_mutations(self):
+        """A separate process dies with an open WAL write transaction."""
+        self.reserve("abrupt")
+        before = self.book.snapshot()
+        script = """
+import os
+import sqlite3
+import sys
+conn = sqlite3.connect(sys.argv[1], timeout=5, isolation_level=None)
+conn.execute('PRAGMA journal_mode=WAL')
+conn.execute('BEGIN IMMEDIATE')
+conn.execute("UPDATE book_meta SET value='1' WHERE key='halted'")
+conn.execute("UPDATE buy_intents SET status='CANCELLED' WHERE id='abrupt'")
+os._exit(23)  # No commit, rollback, context exit, or connection close.
+"""
+        child = subprocess.run([sys.executable, "-c", script, str(self.path)],
+                               capture_output=True, text=True, timeout=15)
+        self.assertEqual(child.returncode, 23, child.stderr)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+        self.assertFalse(self.book.snapshot().halted)
+
+    def test_abrupt_child_exit_preserves_committed_synthetic_fill(self):
+        """A process ends without cleanup immediately after a fill commit."""
+        self.reserve("abrupt", fee_budget=D("2"))
+        script = """
+import os
+import sys
+from decimal import Decimal as D
+from alphora.reservations import OfflineReservations
+book = OfflineReservations(sys.argv[1], session_id='2026-11-02')
+book.record_hypothetical_fill('abrupt', 'child-fill', 20, D('49'), fee=D('1'))
+os._exit(24)  # No close or normal interpreter shutdown.
+"""
+        child = subprocess.run([sys.executable, "-c", script, str(self.path)],
+                               capture_output=True, text=True, timeout=15)
+        self.assertEqual(child.returncode, 24, child.stderr)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        recovered = self.book.snapshot()
+        self.assertEqual(recovered.cash, D("99019"))
+        self.assertEqual(recovered.reserved_cash, D("4001"))
+        self.assertEqual(recovered.positions, (("SPY", 20, D("980")),))
+        self.assertEqual(self.book.record_hypothetical_fill(
+            "abrupt", "child-fill", 20, D("49"), fee=D("1")), recovered)
 
     def test_cash_overcommit_across_pending_symbols(self):
         for i in range(10):
