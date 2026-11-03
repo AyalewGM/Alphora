@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import sqlite3
 
-from .risk import BuyProposal, PaperAccount, INITIAL_EQUITY, validate_buy
+from .risk import BuyProposal, PaperAccount, INITIAL_EQUITY, DAILY_LOSS_FRACTION, validate_buy
 
 _ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
@@ -177,6 +177,39 @@ class OfflineReservations:
         with self._write():
             self._db.execute("UPDATE book_meta SET value='1' WHERE key='halted'")
 
+    def observe_daily_loss(self, account: PaperAccount, *, reconciled: bool = False):
+        """Persist a one-way offline halt from a caller-asserted account mark.
+
+        This is an explicit observation operation, NOT a live monitoring feed.
+        Reconciliation and mark authenticity remain the caller's responsibility.
+        It must also run on idempotent reservation retries, which otherwise skip
+        the pre-trade risk gate.
+        """
+        if not isinstance(account, PaperAccount) or reconciled is not True:
+            raise ValueError("INVALID_OR_UNRECONCILED_ACCOUNT")
+        with self._write():
+            snapshot = self._snapshot()
+            if snapshot.halted:
+                return snapshot
+            if (account.session_id != snapshot.session_id
+                    or account.session_open_equity != INITIAL_EQUITY
+                    or account.cash != snapshot.cash):
+                raise ValueError("UNRECONCILED_CASH_OR_SESSION")
+            if (type(account.equity) is not D or not _money(account.equity, positive=True)
+                    or type(account.day_pnl) is not D or not account.day_pnl.is_finite()
+                    or type(account.halted) is not bool):
+                raise ValueError("INVALID_ACCOUNT_STATE")
+            day_change = account.equity - INITIAL_EQUITY
+            loss_floor = -(INITIAL_EQUITY * DAILY_LOSS_FRACTION)
+            if (account.halted or account.day_pnl <= loss_floor
+                    or day_change <= loss_floor):
+                self._db.execute("UPDATE book_meta SET value='1' WHERE key='halted'")
+                return self._snapshot()
+            if (account.cash > account.equity
+                    or abs(day_change - account.day_pnl) > D("0.01")):
+                raise ValueError("INCONSISTENT_ACCOUNT_STATE")
+            return snapshot
+
     def reserve_buy(self, intent_id: str, account: PaperAccount,
                     proposal: BuyProposal, *, fee_budget: D = D(0),
                     reconciled: bool = False):
@@ -187,6 +220,11 @@ class OfflineReservations:
                 or not _money(fee_budget)
                 or reconciled is not True):
             raise ValueError("INVALID_OR_UNRECONCILED_INTENT")
+        # Observe even for an already-known intent ID. Stable replay must
+        # never suppress a newly reported 2% loss or upstream manual halt.
+        observed = self.observe_daily_loss(account, reconciled=reconciled)
+        if observed.halted:
+            raise ValueError("RISK_VETO:DAILY_LOSS_HALT")
         with self._write():
             snapshot = self._snapshot()
             if snapshot.halted:
