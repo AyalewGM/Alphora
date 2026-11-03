@@ -19,6 +19,26 @@ expected_strategy_sha256=..., expected_spy_sha256=...)` separately rechecks both
 datasets, requires an ETF labeled `SPY` for the benchmark, identical `as_of`
 instant and session dates, then calls the existing price-only SPY comparison.
 
+## Optional, externally supplied session-coverage check
+
+Both replay functions now accept `expected_session_dates=(...)`, a strictly
+increasing sequence of exact `datetime.date` values supplied **separately**
+from the candidate snapshot. When provided, every replayed daily bar must match
+this manifest in date, length and order. Missing, duplicate, reordered and
+additional dates fail closed. This addresses a specific gap: a snapshot can
+contain a missing exchange session and still satisfy the previous
+next-*recorded*-open timestamp rule. It does **not** establish that the manifest
+itself is complete or authentic, and it does not fetch an exchange calendar.
+
+The returned `session_manifest_matched` field is `False` when no manifest is
+supplied; it becomes `True` only after exact equality is checked, **not**
+vendor/calendar verification. Do not interpret an unchecked replay as complete
+session coverage. The replay/comparison also records `cost_bps` and `lookback`
+to make these otherwise easy-to-omit research assumptions visible. Before any
+performance claims, obtain an independently sourced session manifest including
+holidays, early closes and halts, plus independent vendor data receipts. These
+checks do not make raw data trading-ready.
+
 Only `RAW_UNADJUSTED` input is currently permitted; adjusted or total-return
 series are rejected because the simulator does not model corporate-action
 cash flows. Passing this gate is **not** a claim that a raw dataset is usable
@@ -55,7 +75,7 @@ guaranteed stop fills.
 ## Evidence and future gates
 
 Run `python -m unittest discover -s tests -v`; tests exercise hash
-modifications, retroactive revisions, price-basis mixing, unsafe parameters
+modifications, retroactive revisions, missing-session manifests, price-basis mixing, unsafe parameters
 and SPY comparison alignment with synthetic data.
 
 Before using any real-data performance result, obtain separately verified,
