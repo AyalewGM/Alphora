@@ -85,6 +85,9 @@ class OfflineReservations:
                       _decimal(meta.get("starting_cash", "0")) != starting_cash or
                       set(meta) != {"session_id", "starting_cash", "cash", "halted"}):
                     raise ValueError("BOOK_REOPEN_MISMATCH")
+                # Reopening a corrupted persisted book must fail before any
+                # new reservations or hypothetical fills can be recorded.
+                self._snapshot()
         except BaseException:
             self._db.close()
             raise
@@ -189,6 +192,7 @@ class OfflineReservations:
             if snapshot.halted:
                 raise ValueError("PAPER_BOOK_HALTED")
             if (account.session_id != snapshot.session_id or
+                    account.session_open_equity != INITIAL_EQUITY or
                     account.cash != snapshot.cash or account.halted):
                 raise ValueError("UNRECONCILED_CASH_OR_SESSION")
             if not isinstance(proposal.symbol, str) or not _SYMBOL.fullmatch(proposal.symbol):
