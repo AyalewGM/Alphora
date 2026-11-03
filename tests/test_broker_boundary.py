@@ -8,7 +8,9 @@ from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCANNED = (ROOT / "alphora", ROOT / "research")
+EXCLUDED_DIRS = {".git", ".venv", "venv", "site-packages", "__pycache__"}
+BROKER_DISTRIBUTIONS = ("alpaca-py", "alpaca-trade-api", "ib-insync", "ibapi", "ccxt", "robin-stocks", "python-binance")
+BROKER_ENV_NAMES = {"APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "APCA_API_BASE_URL"}
 BROKER_IMPORT_ROOTS = frozenset({
     "alpaca", "alpaca_trade_api", "ib_insync", "ibapi", "ccxt", "robin_stocks",
     "binance",
@@ -16,9 +18,11 @@ BROKER_IMPORT_ROOTS = frozenset({
 ORDER_SUBMISSION_METHODS = frozenset({
     "submit_order", "submit_orders", "place_order", "place_orders",
     "send_order", "send_orders", "liquidate_position",
-    "close_position", "close_all_positions",
+    "close_position", "close_all_positions", "create_order",
+    "create_market_buy_order", "create_limit_buy_order", "placeOrder",
+    "replace_order", "replace_order_by_id", "cancel_order",
 })
-BROKER_HOST_MARKERS = ("api.alpaca.markets", "paper-api.alpaca.markets")
+BROKER_HOST_MARKERS = ("alpaca.markets",)
 
 
 def violations(source: str) -> list[str]:
@@ -38,8 +42,15 @@ def violations(source: str) -> list[str]:
             name = target.attr if isinstance(target, ast.Attribute) else (
                 target.id if isinstance(target, ast.Name) else None
             )
-            if name in ORDER_SUBMISSION_METHODS:
+            if (name in ORDER_SUBMISSION_METHODS or
+                    (isinstance(name, str) and
+                     name.startswith(("order_buy_", "order_sell_")))):
                 problems.append(f"line {node.lineno}: order execution call {name}")
+            if name == "TradingClient" and any(
+                kw.arg == "paper" and isinstance(kw.value, ast.Constant)
+                and kw.value.value is False for kw in node.keywords
+            ):
+                problems.append(f"line {node.lineno}: live broker client")
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             value = node.value.lower().strip()
             # Includes attempts to import SDKs dynamically using literal strings.
@@ -49,7 +60,10 @@ def violations(source: str) -> list[str]:
                 problems.append(f"line {node.lineno}: broker module literal")
             elif any(host in value for host in BROKER_HOST_MARKERS):
                 problems.append(f"line {node.lineno}: broker endpoint literal")
-            elif value in ORDER_SUBMISSION_METHODS:
+            elif value.upper() in BROKER_ENV_NAMES:
+                problems.append(f"line {node.lineno}: broker credential name")
+            elif (value in ORDER_SUBMISSION_METHODS or
+                  value.startswith(("order_buy_", "order_sell_"))):
                 # Catches getattr(client, 'submit_order') without flagging prose.
                 problems.append(f"line {node.lineno}: order execution literal {value}")
     return problems
@@ -58,14 +72,21 @@ def violations(source: str) -> list[str]:
 class BrokerBoundaryTests(unittest.TestCase):
     def test_repository_has_no_broker_imports_or_execution_calls(self):
         problems = []
-        for directory in SCANNED:
-            self.assertTrue(directory.is_dir(), f"missing source directory: {directory}")
-            for path in sorted(directory.rglob("*.py")):
-                try:
-                    problems.extend(f"{path.relative_to(ROOT)}: {msg}"
-                                    for msg in violations(path.read_text(encoding="utf-8")))
-                except SyntaxError as exc:
-                    problems.append(f"{path.relative_to(ROOT)}: invalid Python: {exc}")
+        for path in sorted(ROOT.rglob("*.py")):
+            if any(part in EXCLUDED_DIRS for part in path.relative_to(ROOT).parts):
+                continue
+            if path.resolve() == Path(__file__).resolve():
+                continue  # Synthetic unsafe fixtures are deliberately present here.
+            try:
+                problems.extend(f"{path.relative_to(ROOT)}: {msg}"
+                                for msg in violations(path.read_text(encoding="utf-8")))
+            except SyntaxError as exc:
+                problems.append(f"{path.relative_to(ROOT)}: invalid Python: {exc}")
+        # Also prevent accidental broker dependency introduction.
+        dependency_text = (ROOT / "pyproject.toml").read_text(encoding="utf-8").lower()
+        for distribution in BROKER_DISTRIBUTIONS:
+            if distribution in dependency_text:
+                problems.append(f"pyproject.toml: broker dependency {distribution}")
         self.assertEqual(problems, [], "No broker connectivity is authorized")
 
     def test_known_broker_paths_are_rejected(self):
@@ -80,6 +101,21 @@ class BrokerBoundaryTests(unittest.TestCase):
             "module = __import__('alpaca.trading.client')",
             "url = 'https://api.alpaca.markets/v2/orders'",
             "url = 'https://paper-api.alpaca.markets/v2/orders'",
+            "ex.create_order('AAPL', 'market', 'buy', 1)",
+            "ex.create_market_buy_order('AAPL', 1)",
+            "ex.create_limit_buy_order('AAPL', 1, 100)",
+            "ib.placeOrder(contract, order)",
+            "rh.order_buy_market('AAPL', 1)",
+            "rh.order_sell_market('AAPL', 1)",
+            "client.replace_order_by_id('abc')",
+            "client.replace_order(order)",
+            "client.cancel_order(order)",
+            "url = 'https://broker-api.sandbox.alpaca.markets/v1'",
+            "url = 'wss://stream.data.alpaca.markets'",
+            "TradingClient('dummy', 'dummy', paper=False)",
+            "keyname = 'APCA_API_KEY_ID'",
+            "keyname = 'APCA_API_SECRET_KEY'",
+            "keyname = 'APCA_API_BASE_URL'",
         )
         for source in unsafe:
             with self.subTest(source=source):
