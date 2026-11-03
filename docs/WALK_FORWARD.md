@@ -141,3 +141,27 @@ The existing $100,000 simulated starting equity, 0.5% planned per-trade risk,
 10% allocation cap, 2% daily loss halt and daily rebalance settings are
 unchanged. This splitter enforces *none* of those portfolio controls.
 No Alpaca credentials, connections or orders are permitted.
+
+## Forward-return target overlap accounting
+
+The coverage receipt now additionally reports
+`max_nonoverlapping_test_label_windows` and
+`overlap_excluded_test_label_windows`. For a forward label on sample index
+`i` that uses outcomes through `i + label_horizon_sessions`, the full
+**closed** interval `[i, i + horizon]` is treated as a target window. Two
+samples whose intervals share even one price observation (including an
+endpoint) are **not counted as nonoverlapping**. The implementation greedily
+selects the earliest-finishing eligible window across all OOS folds, which
+maximizes the number of pairwise disjoint equal-length target intervals.
+
+For example, nine consecutive test samples with a two-session forward-return
+label have at most **three** mutually disjoint closed target intervals.
+Nine is the number of scored rows, three is the maximum number of disjoint
+label windows, and six is the difference. Holdout dates are never counted.
+These figures do **not** estimate effective statistical sample size,
+independent experiments, Sharpe confidence, performance, label correctness,
+market-price autocorrelation or the dependence caused by repeated model
+fitting. A rigorous evaluation must additionally use correctly clustered or
+block-bootstrap uncertainty estimates and appropriate multiple-testing
+controls. Do not inflate test significance using raw OOS row counts.
+
