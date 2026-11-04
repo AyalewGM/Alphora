@@ -113,6 +113,24 @@ class CorporateActionsTests(unittest.TestCase):
         # Delisting conflicts with reverse split on this date.
         self.assert_code("EVENT_CONFLICT_OR_LOOKAHEAD", actions=self.events[:-1] + (e,))
 
+    def test_externally_declared_sessions_detect_non_event_gap(self):
+        # Without a separately supplied calendar, dropping this non-event
+        # first day cannot be discovered from corporate actions alone.
+        self.assertEqual(len(self.replay(sessions=self.s[1:]).days), 4)
+        self.assert_code("SESSION_CALENDAR_MISMATCH",
+                         sessions=self.s[1:],
+                         expected_session_days=tuple(self.d))
+        self.assertEqual(self.replay(expected_session_days=tuple(self.d)),
+                         self.replay())
+
+    def test_invalid_external_calendar_declaration_fails_closed(self):
+        for invalid in ((), list(self.d), tuple(self.d[:2] + self.d[1:]),
+                        tuple(reversed(self.d)),
+                        (self.d[0], None) + tuple(self.d[2:])):
+            with self.subTest(invalid=invalid):
+                self.assert_code("INVALID_EXPECTED_SESSION_DATES",
+                                 expected_session_days=invalid)
+
     def test_reordered_sessions_rejected(self):
         self.assert_code("INVALID_OR_LATE_SESSION_MARK", sessions=self.s[:1] + self.s[2:3] + self.s[1:2] + self.s[3:])
 
