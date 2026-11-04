@@ -54,6 +54,13 @@ def validate_buy(
     """
     if mode != "paper":
         return Decision(False, "REAL_TRADING_DISABLED")
+    # Invalid/untyped paper snapshots must never be interpreted as an
+    # affirmative risk decision. In particular, `0`/None are not a valid
+    # representation of a cleared persistent kill switch.
+    if not isinstance(account, PaperAccount) or not isinstance(proposal, BuyProposal):
+        return Decision(False, "INVALID_ACCOUNT_OR_ORDER")
+    if type(account.halted) is not bool:
+        return Decision(False, "INVALID_ACCOUNT_STATE")
     if (not isinstance(expected_session_id, str) or not expected_session_id
             or not isinstance(account.session_id, str) or not account.session_id
             or account.session_id != expected_session_id):
