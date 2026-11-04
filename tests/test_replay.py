@@ -42,6 +42,50 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
     def setUp(self):
         self.spy = candidate()
 
+    @staticmethod
+    def _zero_volume_snapshot(original, index=1):
+        # The generic bar validator allows zero volume (halts do occur), and
+        # rebuilding/re-pinning produces an otherwise valid dataset receipt.
+        records = list(original.observations)
+        records[index] = replace(records[index], bar=replace(
+            records[index].bar, volume=0))
+        return inspect_daily_snapshot(
+            original.symbol, records, asset_type=original.asset_type,
+            source=original.source, source_revision=original.source_revision,
+            price_basis=original.price_basis, as_of=original.as_of,
+        )
+
+    def test_pinned_replay_rejects_zero_volume_sessions(self):
+        stopped = self._zero_volume_snapshot(self.spy, index=1)
+        self.assertNotEqual(stopped.sha256, self.spy.sha256)
+        self.assertEqual(stopped.bars[1].volume, 0)
+        with self.assertRaisesRegex(
+                ValueError, "ZERO_VOLUME_RESEARCH_REPLAY_UNSUPPORTED"):
+            replay_candidate_snapshot(
+                stopped, "buy_hold", expected_sha256=stopped.sha256)
+        # Reject even a non-entry session; the offline engine has no halt
+        # or reopening-auction model that could safely interpret such a bar.
+        later_halt = self._zero_volume_snapshot(self.spy, index=15)
+        with self.assertRaisesRegex(
+                ValueError, "ZERO_VOLUME_RESEARCH_REPLAY_UNSUPPORTED"):
+            replay_candidate_snapshot(
+                later_halt, "trend", expected_sha256=later_halt.sha256)
+
+    def test_spy_comparison_rejects_zero_volume_in_either_leg(self):
+        aapl = candidate("AAPL", asset_type="STOCK")
+        for bad_candidate, bad_spy in (
+            (self._zero_volume_snapshot(aapl), self.spy),
+            (aapl, self._zero_volume_snapshot(self.spy)),
+        ):
+            with self.subTest(zero_volume_symbol=bad_candidate.symbol
+                              if bad_candidate.bars[1].volume == 0 else "SPY"):
+                with self.assertRaisesRegex(
+                        ValueError, "ZERO_VOLUME_RESEARCH_REPLAY_UNSUPPORTED"):
+                    compare_candidate_snapshots(
+                        bad_candidate, bad_spy, "buy_hold",
+                        expected_strategy_sha256=bad_candidate.sha256,
+                        expected_spy_sha256=bad_spy.sha256)
+
     def test_replays_only_pinned_snapshot_with_approved_research_allocation(self):
         output = replay_candidate_snapshot(
             self.spy, "buy_hold", expected_sha256=self.spy.sha256,
