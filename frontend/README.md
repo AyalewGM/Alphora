@@ -42,7 +42,7 @@ Required JSON structure (all amounts decimal strings, times timezone-aware, date
 }
 ```
 
-The example is **illustrative only**; its hash is a dummy placeholder and does not authenticate the bars. Client checks include bounded record counts/file size, strictly increasing days, exact decimal syntax, OHLC consistency, valid volumes, timezone-aware observation timestamps and conservative next-open lookahead screening (09:30 America/New_York). The exchange calendar, early closes, vendor attestations, file signatures, receipt integrity, corporate actions and historical universe membership remain **unverified**.
+The example is **illustrative only**; its hash is a dummy placeholder and does not authenticate the bars. Client checks include bounded record counts/file size, strictly increasing days, exact decimal syntax, OHLC consistency, valid volumes, timezone-aware observation timestamps and conservative next-open lookahead screening (09:30 America/New_York). The daily chart draws volumes in a **separate fixed-height strip**, normalized relative to the largest displayed bar: this prevents realistic million-share totals from overflowing the SVG or obscuring prices. Volume heights are relative graphical proportions, **not** absolute volume counts, opening-auction liquidity, guaranteed fills or a paper-trading eligibility check. The exchange calendar, early closes, vendor attestations, file signatures, receipt integrity, corporate actions and historical universe membership remain **unverified**.
 
 For production-quality historical charts, use a separately reviewed API that exposes only authenticated, independently checked `DataSnapshot` exports. Do not convert this manual import into signal, sizing, or order eligibility.
 
