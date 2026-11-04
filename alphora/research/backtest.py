@@ -28,11 +28,22 @@ def validate(bars):
 
 def load_csv(path):
     with open(path,encoding="utf-8",newline="") as f:
-        r=csv.DictReader(f)
-        if r.fieldnames!=["date","open","high","low","close","volume"]:
+        r=csv.DictReader(f,strict=True)
+        try:
+            header=r.fieldnames
+        except csv.Error as exc:
+            raise ValueError("CSV_SCHEMA") from exc
+        if header!=["date","open","high","low","close","volume"]:
             raise ValueError("CSV_SCHEMA")
         bars=[]
-        for item in r:
+        while True:
+            try:
+                item=next(r)
+            except StopIteration:
+                break
+            except csv.Error as exc:
+                # Malformed quoting may otherwise silently swallow future rows.
+                raise ValueError("BAD_CSV_ROW") from exc
             try:
                 # DictReader stores surplus CSV columns under a None key as
                 # a list. Reject malformed row widths rather than raising
