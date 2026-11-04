@@ -71,7 +71,19 @@ checks do not make raw data trading-ready.
 Only `RAW_UNADJUSTED` input is currently permitted; adjusted or total-return
 series are rejected because the simulator does not model corporate-action
 cash flows. Passing this gate is **not** a claim that a raw dataset is usable
-across splits or dividends. The benchmark's fully invested SPY reference
+across splits or dividends.
+
+The replay bridge also **rejects every zero-volume daily bar**, including in
+either SPY comparison leg. The underlying generic OHLCV validator correctly
+permits zero-volume observations, but the simplified next-open backtester
+would otherwise invent a fill on a session with no reported share turnover.
+This guard applies even to a newly re-pinned snapshot: matching hashes alone
+cannot make an impossible historical execution valid. It is conservative and
+may exclude legitimate halted/inactive sessions. **Positive daily volume is
+not proof that liquidity existed at the open**, that a simulated position
+could fill, or that slippage/market impact is accurately modeled. Opening
+auction, halts, quote availability and participation limits still require
+separately validated intraday market data and a suitable fill model. The benchmark's fully invested SPY reference
 **does not comply** with Alphora's per-instrument 10% cap and exists solely
 as price-only research context. The capped reference does not match time in
 market, and excess returns do not establish alpha.
