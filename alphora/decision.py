@@ -5,7 +5,7 @@ returned plans are neither approvals nor executable instructions.
 """
 from dataclasses import dataclass, replace
 from datetime import datetime
-from decimal import Decimal as D, ROUND_FLOOR
+from decimal import Decimal as D, ROUND_FLOOR, DecimalException
 from hashlib import sha256
 import re
 
@@ -72,6 +72,8 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
     """
     if reconciled is not True:
         return EntryPlan(False, "UNRECONCILED_STATE")
+    if not isinstance(account, PaperAccount) or not isinstance(candidate, EntryCandidate):
+        return EntryPlan(False, "INVALID_ACCOUNT_OR_ORDER")
     if not isinstance(candidate.symbol, str) or not candidate.symbol:
         return EntryPlan(False, "INVALID_SYMBOL")
     if type(max_age_seconds) is not int or not 0 <= max_age_seconds <= MAX_QUOTE_AGE_SECONDS:
@@ -99,31 +101,37 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
     if (isinstance(account.equity, D) and account.equity.is_finite()
             and isinstance(account.session_open_equity, D) and account.session_open_equity.is_finite()
             and isinstance(account.day_pnl, D) and account.day_pnl.is_finite()):
-        loss_limit = -(account.session_open_equity * DAILY_LOSS_FRACTION)
-        if (account.halted or account.day_pnl <= loss_limit
-                or account.equity - account.session_open_equity <= loss_limit):
-            return EntryPlan(False, "DAILY_LOSS_HALT")
-        if (account.cash > account.equity or
-                abs(account.equity - account.session_open_equity - account.day_pnl) > D("0.01")):
-            return EntryPlan(False, "INCONSISTENT_ACCOUNT_STATE")
+        try:
+            loss_limit = -(account.session_open_equity * DAILY_LOSS_FRACTION)
+            if (account.halted or account.day_pnl <= loss_limit
+                    or account.equity - account.session_open_equity <= loss_limit):
+                return EntryPlan(False, "DAILY_LOSS_HALT")
+            if (account.cash > account.equity or
+                    abs(account.equity - account.session_open_equity - account.day_pnl) > D("0.01")):
+                return EntryPlan(False, "INCONSISTENT_ACCOUNT_STATE")
+        except DecimalException:
+            return EntryPlan(False, "INVALID_ACCOUNT_OR_ORDER")
     if reserved_cash > account.cash:
         return EntryPlan(False, "OVERCOMMITTED_CASH")
     # Validate session, daily loss halt, symbol and account with an ordinary
     # one-share proposal before calculating the maximum feasible size.
-    reserved_instrument = (candidate.existing_instrument_value +
-                           candidate.pending_instrument_value)
-    available_cash = account.cash - reserved_cash
-    account_available = replace(account, cash=available_cash)
-    minimum = BuyProposal(candidate.symbol, D(1), candidate.ask,
-                          candidate.stop_price, reserved_instrument)
-    precheck = validate_buy(account_available, minimum,
-                            expected_session_id=expected_session_id)
-    if not precheck.permitted:
-        return EntryPlan(False, precheck.reason)
-    by_risk = account.equity * RISK_FRACTION / (candidate.ask - candidate.stop_price)
-    by_instrument = (account.equity * MAX_INSTRUMENT_FRACTION - reserved_instrument) / candidate.ask
-    by_cash = available_cash / candidate.ask
-    quantity = min(by_risk, by_instrument, by_cash).to_integral_value(rounding=ROUND_FLOOR)
+    try:
+        reserved_instrument = (candidate.existing_instrument_value +
+                               candidate.pending_instrument_value)
+        available_cash = account.cash - reserved_cash
+        account_available = replace(account, cash=available_cash)
+        minimum = BuyProposal(candidate.symbol, D(1), candidate.ask,
+                              candidate.stop_price, reserved_instrument)
+        precheck = validate_buy(account_available, minimum,
+                                expected_session_id=expected_session_id)
+        if not precheck.permitted:
+            return EntryPlan(False, precheck.reason)
+        by_risk = account.equity * RISK_FRACTION / (candidate.ask - candidate.stop_price)
+        by_instrument = (account.equity * MAX_INSTRUMENT_FRACTION - reserved_instrument) / candidate.ask
+        by_cash = available_cash / candidate.ask
+        quantity = min(by_risk, by_instrument, by_cash).to_integral_value(rounding=ROUND_FLOOR)
+    except DecimalException:
+        return EntryPlan(False, "INVALID_ACCOUNT_OR_ORDER")
     if quantity < 1:
         return EntryPlan(False, "ZERO_AFFORDABLE_SHARES")
     proposal = replace(minimum, quantity=quantity)
@@ -174,6 +182,8 @@ def propose_exit(position: FilledPosition, quote: ExitQuote, *,
     fills may differ. Protective stop has priority over take-profit.
     """
     hold = lambda reason: ExitPlan("HOLD", reason)
+    if not isinstance(position, FilledPosition) or not isinstance(quote, ExitQuote):
+        return hold("INVALID_POSITION_OR_QUOTE")
     if not isinstance(position.position_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", position.position_id):
         return hold("INVALID_POSITION_ID")
     if (not position.symbol or not isinstance(position.symbol, str) or
@@ -201,19 +211,22 @@ def propose_exit(position: FilledPosition, quote: ExitQuote, *,
         return hold("STALE_OR_FUTURE_QUOTE")
     if not (_positive(quote.bid) and _positive(quote.ask) and quote.bid <= quote.ask):
         return hold("INVALID_QUOTE")
-    available_quantity = position.filled_quantity - position.pending_exit_quantity
-    if not available_quantity:
-        return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
-    if quote.bid <= position.protective_stop_price:
-        reason = "PROTECTIVE_EXIT"
-    elif quote.bid >= position.average_fill_price * (D(1) + take_profit_pct / 100):
-        if position.pending_exit_quantity:
+    try:
+        available_quantity = position.filled_quantity - position.pending_exit_quantity
+        if not available_quantity:
             return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
-        reason = "TAKE_PROFIT"
-    else:
-        if position.pending_exit_quantity:
-            return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
-        return hold("TARGET_NOT_REACHED")
+        if quote.bid <= position.protective_stop_price:
+            reason = "PROTECTIVE_EXIT"
+        elif quote.bid >= position.average_fill_price * (D(1) + take_profit_pct / 100):
+            if position.pending_exit_quantity:
+                return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
+            reason = "TAKE_PROFIT"
+        else:
+            if position.pending_exit_quantity:
+                return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
+            return hold("TARGET_NOT_REACHED")
+    except DecimalException:
+        return hold("INVALID_POSITION_OR_QUOTE")
     # Stable across repeated evaluation of the same position / exit decision.
     key = sha256((f"PAPER|EXIT|{position.position_id}|{position.symbol}|"
                   f"{position.reconciliation_version}|{reason}|{available_quantity}")
