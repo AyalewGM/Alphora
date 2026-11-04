@@ -6,7 +6,8 @@ availability; this module cannot authenticate that claim or the exchange calenda
 """
 from dataclasses import dataclass
 from datetime import date, datetime, time
-from decimal import Decimal
+from decimal import Decimal, DecimalException, Inexact, localcontext
+from functools import wraps
 from zoneinfo import ZoneInfo
 
 _ET = ZoneInfo("America/New_York")
@@ -85,6 +86,23 @@ class CorporateActionReplay:
     days: tuple[LedgerDay, ...]
 
 
+def _exact_ledger_arithmetic(fn):
+    """Fail closed on invalid, overflowing or silently rounded ledger arithmetic."""
+    @wraps(fn)
+    def guarded(*args, **kwargs):
+        try:
+            # Decimal's default precision can silently drop dollars, cash or
+            # dividend entitlements on extreme/corrupt inputs. Reject those
+            # snapshots rather than reporting financially incorrect totals.
+            with localcontext() as context:
+                context.traps[Inexact] = True
+                return fn(*args, **kwargs)
+        except DecimalException as exc:
+            raise ValueError("UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc
+    return guarded
+
+
+@_exact_ledger_arithmetic
 def replay_static_position(*, asset_id: str, sessions: tuple[SessionClose, ...],
                            actions: tuple[Split | CashDividend | CashDelisting, ...],
                            initial_cash: Decimal, initial_shares: int,
