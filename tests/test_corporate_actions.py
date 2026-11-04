@@ -134,6 +134,18 @@ class CorporateActionsTests(unittest.TestCase):
     def test_reordered_sessions_rejected(self):
         self.assert_code("INVALID_OR_LATE_SESSION_MARK", sessions=self.s[:1] + self.s[2:3] + self.s[1:2] + self.s[3:])
 
+    def test_inexact_ledger_arithmetic_fails_closed(self):
+        # Decimal's default 28-digit precision would silently drop the
+        # ordinary position mark when added to this extreme cash balance.
+        self.assert_code("UNREPRESENTABLE_LEDGER_ARITHMETIC",
+                         initial_cash=D("1e31"))
+
+    def test_overflowing_dividend_fails_closed(self):
+        # A finite Decimal may still overflow the active arithmetic context.
+        dividend = replace(self.events[1], amount_per_share=D("1e999999"))
+        self.assert_code("UNREPRESENTABLE_LEDGER_ARITHMETIC",
+                         actions=self.events[:1] + (dividend,) + self.events[2:])
+
     def test_delisting_zero_known_vs_unknown(self):
         a = replace(self.events[-1], settlement_per_share=D(0))
         r = self.replay(actions=self.events[:-1] + (a,))
