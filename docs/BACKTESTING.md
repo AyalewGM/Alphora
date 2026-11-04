@@ -3,7 +3,7 @@
 This is a **research prototype**, not a production backtester or order execution engine.
 
 ## Data
-Use CSV with columns `date,open,high,low,close,volume`; strict ascending unique dates, finite positive prices, valid OHLC and nonnegative volume. Malformed CSV row widths (missing or extra fields) are rejected as `BAD_CSV_ROW` instead of raising an unhandled parser exception. Strategy lookback is strictly an integer >=2; bool, fractional or string lookbacks fail closed. No online market-data provider has been connected. Inputs require external provenance checks, vendor licensing, adjusted/unadjusted consistency, exchange calendars, splits, dividends, delisted securities and survivorship-bias mitigation before reliable market conclusions.
+Use CSV with columns `date,open,high,low,close,volume`; strict ascending unique dates, finite positive prices, valid OHLC and nonnegative volume. Malformed CSV row widths (missing or extra fields) and malformed quoting are rejected as `BAD_CSV_ROW` rather than permitting row swallowing or an unhandled parser exception. Strategy lookback is strictly an integer >=2; bool, fractional or string lookbacks fail closed. No online market-data provider has been connected. Inputs require external provenance checks, vendor licensing, adjusted/unadjusted consistency, exchange calendars, splits, dividends, delisted securities and survivorship-bias mitigation before reliable market conclusions.
 
 ## Strategies
 `trend`: closing price above trailing SMA; `momentum`: closing price above close 20 sessions ago; `mean_reversion`: close below prior-20-session mean; `buy_hold`: always own when affordable.
