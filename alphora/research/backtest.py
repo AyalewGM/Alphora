@@ -28,29 +28,30 @@ def validate(bars):
 
 def load_csv(path):
     with open(path,encoding="utf-8",newline="") as f:
-        r=csv.DictReader(f,strict=True)
+        # csv.DictReader silently skips blank records, which can hide
+        # missing sessions in historical replay. Inspect every CSV record.
+        r=csv.reader(f,strict=True)
         try:
-            header=r.fieldnames
-        except csv.Error as exc:
+            header=next(r)
+        except (csv.Error, StopIteration) as exc:
             raise ValueError("CSV_SCHEMA") from exc
         if header!=["date","open","high","low","close","volume"]:
             raise ValueError("CSV_SCHEMA")
         bars=[]
         while True:
             try:
-                item=next(r)
+                row=next(r)
             except StopIteration:
                 break
             except csv.Error as exc:
                 # Malformed quoting may otherwise silently swallow future rows.
                 raise ValueError("BAD_CSV_ROW") from exc
             try:
-                # DictReader stores surplus CSV columns under a None key as
-                # a list. Reject malformed row widths rather than raising
-                # an uncaught AttributeError when a non-string is stripped.
-                if None in item or any(not isinstance(v, str) or not v.strip()
-                                       for v in item.values()):
+                # Reject blank records, truncated rows, and surplus columns
+                # without silently dropping a potential historical session.
+                if len(row)!=len(header) or any(not v.strip() for v in row):
                     raise ValueError("MISSING_OR_EXTRA_FIELD")
+                item=dict(zip(header,row))
                 bars.append(Bar(date.fromisoformat(item["date"]),*(D(item[k]) for k in ("open","high","low","close")),int(item["volume"])))
             except (ArithmeticError,ValueError,TypeError) as exc:
                 raise ValueError("BAD_CSV_ROW") from exc
