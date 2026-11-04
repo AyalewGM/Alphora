@@ -59,6 +59,25 @@ class TestRisk(unittest.TestCase):
                                       expected_session_id="2026-11-02").reason,
                          "INVALID_ACCOUNT_OR_ORDER")
 
+    def test_extreme_decimals_fail_closed(self):
+        # Decimal accepts finite exponents beyond the active arithmetic
+        # context; neither a calculation overflow nor a rounded-zero
+        # notional may become a permitted paper buy.
+        for proposal in (
+            replace(self.buy, quantity=D("1e1000000")),
+            replace(self.buy, price=D("1e1000000")),
+            replace(self.buy, price=D("1e-10000000"),
+                    stop_price=D("5e-10000001")),
+        ):
+            with self.subTest(proposal=proposal):
+                decision = self.decide(proposal=proposal)
+                self.assertFalse(decision.permitted)
+                self.assertEqual(decision.reason, "INVALID_ACCOUNT_OR_ORDER")
+        account = replace(self.account, equity=D("1e1000000"))
+        decision = self.decide(account=account)
+        self.assertFalse(decision.permitted)
+        self.assertEqual(decision.reason, "INVALID_ACCOUNT_OR_ORDER")
+
     def test_bad_session(self):
         self.assertEqual(validate_buy(self.account, self.buy, expected_session_id="wrong").reason,
                          "SESSION_MISMATCH")
