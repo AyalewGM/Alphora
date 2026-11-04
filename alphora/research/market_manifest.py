@@ -156,7 +156,11 @@ def inspect_market_manifest(manifest: MarketManifest, *,
         if period.start > as_of_day or (period.end is not None and period.end > as_of_day):
             raise ValueError("FUTURE_INSTRUMENT_EVENT")
         last_end = period.end
-    if (a.delisted_on is not None and a.symbols[-1].end != a.delisted_on):
+    # An active security must retain an open-ended ticker interval. A closed
+    # final symbol with no delisting event is an incomplete security master,
+    # even when all provided historical bars precede that terminal date.
+    if ((a.delisted_on is None and a.symbols[-1].end is not None)
+            or (a.delisted_on is not None and a.symbols[-1].end != a.delisted_on)):
         raise ValueError("INVALID_SYMBOL_HISTORY")
     if (not isinstance(u, UniverseMembership) or not _date(u.day)
             or type(u.included) is not bool
