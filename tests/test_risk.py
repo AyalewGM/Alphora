@@ -59,6 +59,33 @@ class TestRisk(unittest.TestCase):
                                       expected_session_id="2026-11-02").reason,
                          "INVALID_ACCOUNT_OR_ORDER")
 
+    def test_inexact_risk_boundary_arithmetic(self):
+        # True notional exceeds the 10% $10,000 cap by a tiny fraction,
+        # but default Decimal precision can round 20 * price to $10,000.
+        hidden_notional = replace(
+            self.buy,
+            price=D("500.00000000000000000000000001"),
+            stop_price=D("475.00000000000000000000000001"),
+        )
+        self.assertEqual(self.decide(proposal=hidden_notional).reason,
+                         "INVALID_ACCOUNT_OR_ORDER")
+        # Likewise the existing exposure must not silently disappear when
+        # summing its value with the full $10,000 proposed notional.
+        hidden_position = replace(
+            self.buy, existing_instrument_value=D("0.0000000000000000000000000001"),
+        )
+        self.assertEqual(self.decide(proposal=hidden_position).reason,
+                         "INVALID_ACCOUNT_OR_ORDER")
+        # A stop just below $475 makes true planned loss greater than $500;
+        # default arithmetic can round the risk back to exactly $500.
+        hidden_risk = replace(
+            self.buy, stop_price=D("474.999999999999999999999999999"),
+        )
+        self.assertEqual(self.decide(proposal=hidden_risk).reason,
+                         "INVALID_ACCOUNT_OR_ORDER")
+        # Ordinary exact boundary cases must remain accepted.
+        self.assertTrue(self.decide().permitted)
+
     def test_extreme_decimals_fail_closed(self):
         # Decimal accepts finite exponents beyond the active arithmetic
         # context; neither a calculation overflow nor a rounded-zero
