@@ -57,7 +57,11 @@ def load_csv(path):
                 # underscores, signs and whitespace. Reject such silently
                 # normalized vendor values rather than changing their meaning.
                 if (not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", item["date"])
-                    or not re.fullmatch(r"(?:0|[1-9][0-9]*)", item["volume"])):
+                    or not re.fullmatch(r"(?:0|[1-9][0-9]*)", item["volume"])
+                    # Decimal accepts underscores, Unicode digits, signs, and
+                    # exponent notation; reject implicit vendor normalization.
+                    or any(not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", item[k])
+                           for k in ("open", "high", "low", "close"))):
                     raise ValueError("NONCANONICAL_CSV_VALUE")
                 bars.append(Bar(date.fromisoformat(item["date"]),*(D(item[k]) for k in ("open","high","low","close")),int(item["volume"])))
             except (ArithmeticError,ValueError,TypeError) as exc:

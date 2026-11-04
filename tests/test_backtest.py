@@ -115,6 +115,33 @@ class BacktestTests(unittest.TestCase):
                             encoding="utf-8")
             self.assertEqual(load_csv(path)[0].volume, 0)
 
+    def test_csv_requires_canonical_ohlc_prices(self):
+        # Decimal accepts these noncanonical strings without reporting an
+        # error, obscuring vendor input and reproducibility of research.
+        header = "date,open,high,low,close,volume"
+        good_later = "2025-01-02,101,102,100,101,1000"
+        fields = ("open", "high", "low", "close")
+        bad_values = ("1_00", " 100 ", "+100", "1e2", "١٠٠",
+                      "00100", "100.", ".5")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bars.csv"
+            for field in fields:
+                for value in bad_values:
+                    with self.subTest(field=field, value=value):
+                        row = ["2025-01-01", "100", "100", "100", "100", "1000"]
+                        row[1 + fields.index(field)] = value
+                        path.write_text(header + "\n" + ",".join(row) +
+                                        "\n" + good_later + "\n", encoding="utf-8")
+                        with self.assertRaisesRegex(ValueError, "BAD_CSV_ROW"):
+                            load_csv(path)
+            # Preserve canonical integer and fractional decimal prices.
+            for price in ("100", "100.00", "0.50", "100.123"):
+                with self.subTest(valid_price=price):
+                    path.write_text(header + "\n" +
+                                    ",".join(["2025-01-01", *([price] * 4), "1000"]) +
+                                    "\n" + good_later + "\n", encoding="utf-8")
+                    self.assertEqual(load_csv(path)[0].open, D(price))
+
     def test_duplicate_date_rejected(self):
         with self.assertRaises(ValueError):backtest([self.bars[0],self.bars[0]],"trend")
 
