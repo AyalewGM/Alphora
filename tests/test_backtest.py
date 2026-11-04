@@ -65,6 +65,27 @@ class BacktestTests(unittest.TestCase):
                             encoding="utf-8")
             self.assertEqual(len(load_csv(path)), 2)
 
+    def test_csv_blank_records_and_empty_file_fail_closed(self):
+        header = "date,open,high,low,close,volume"
+        first = "2025-01-01,100,101,99,100,1000"
+        second = "2025-01-02,101,102,100,101,1000"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bars.csv"
+            path.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "CSV_SCHEMA"):
+                load_csv(path)
+
+            # DictReader previously skipped these without reporting data loss.
+            for rows in (
+                "\n" + first + "\n" + second,
+                first + "\n\n" + second,
+                first + "\n" + second + "\n",
+            ):
+                with self.subTest(rows=repr(rows)):
+                    path.write_text(header + "\n" + rows + "\n", encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "BAD_CSV_ROW"):
+                        load_csv(path)
+
     def test_duplicate_date_rejected(self):
         with self.assertRaises(ValueError):backtest([self.bars[0],self.bars[0]],"trend")
 
