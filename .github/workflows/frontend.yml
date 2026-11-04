@@ -28,7 +28,7 @@ jobs:
         run: |
           npm install --package-lock-only --no-audit --no-fund
           echo 'ALPHORA_LOCKFILE_BEGIN'
-          base64 -w0 package-lock.json | fold -w 1200 | sed 's/^/ALPHORA_LOCKFILE_CHUNK:/'
+          node -e 'const s=JSON.stringify(require("./package-lock.json")); for(let i=0;i<s.length;i+=1000) console.log("ALPHORA_LOCKFILE_JSON:"+s.slice(i,i+1000));'
           echo 'ALPHORA_LOCKFILE_END'
       - run: npm test
       - run: npm run build
