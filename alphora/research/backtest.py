@@ -90,6 +90,11 @@ class Result:
 
 def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=D("0.10"),lookback=20):
     validate(bars)
+    # A positive open price on a zero-volume session does not establish a
+    # tradable next-open fill. Until exchange halts and stale prints are
+    # modeled, fail closed rather than invent trades or optimistic P&L.
+    if any(b.volume == 0 for b in bars):
+        raise ValueError("ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED")
     if (strategy not in ("trend","momentum","mean_reversion","buy_hold")
         or type(lookback) is not int or lookback < 2
         or not all(isinstance(x,D) and x.is_finite() for x in (initial,cost_bps,max_allocation))

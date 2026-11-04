@@ -142,6 +142,29 @@ class BacktestTests(unittest.TestCase):
                                     "\n" + good_later + "\n", encoding="utf-8")
                     self.assertEqual(load_csv(path)[0].open, D(price))
 
+    def test_zero_volume_rejected_before_hypothetical_fills(self):
+        # The primitive simulator is also callable without the pinned replay
+        # wrapper. Never fabricate an open fill on a no-trade session.
+        from alphora.research.benchmarks import compare_with_spy
+        for index in (0, 1, len(self.bars) - 1):
+            with self.subTest(zero_volume_index=index):
+                empty = list(self.bars)
+                empty[index] = replace(empty[index], volume=0)
+                with self.assertRaisesRegex(
+                    ValueError, "ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED"
+                ):
+                    backtest(empty, "buy_hold")
+                # Benchmark helpers must not claim an investable SPY reference
+                # if *either* leg has zero-volume observations.
+                with self.assertRaisesRegex(
+                    ValueError, "ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED"
+                ):
+                    compare_with_spy(self.bars, empty, "buy_hold")
+                with self.assertRaisesRegex(
+                    ValueError, "ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED"
+                ):
+                    compare_with_spy(empty, self.bars, "buy_hold")
+
     def test_duplicate_date_rejected(self):
         with self.assertRaises(ValueError):backtest([self.bars[0],self.bars[0]],"trend")
 
