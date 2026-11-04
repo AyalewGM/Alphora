@@ -34,15 +34,20 @@ def load_csv(path):
         bars=[]
         for item in r:
             try:
-                if any(v is None or not v.strip() for v in item.values()):
-                    raise ValueError("MISSING_FIELD")
+                # DictReader stores surplus CSV columns under a None key as
+                # a list. Reject malformed row widths rather than raising
+                # an uncaught AttributeError when a non-string is stripped.
+                if None in item or any(not isinstance(v, str) or not v.strip()
+                                       for v in item.values()):
+                    raise ValueError("MISSING_OR_EXTRA_FIELD")
                 bars.append(Bar(date.fromisoformat(item["date"]),*(D(item[k]) for k in ("open","high","low","close")),int(item["volume"])))
             except (ArithmeticError,ValueError,TypeError) as exc:
                 raise ValueError("BAD_CSV_ROW") from exc
     return validate(bars)
 
 def signal(closes,strategy,lookback=20):
-    if strategy not in ("trend","momentum","mean_reversion","buy_hold") or lookback<2:
+    if (strategy not in ("trend","momentum","mean_reversion","buy_hold")
+            or type(lookback) is not int or lookback < 2):
         raise ValueError("STRATEGY_OR_LOOKBACK")
     if strategy=="buy_hold": return True
     if len(closes)<lookback+1: return False
@@ -63,7 +68,8 @@ class Result:
 def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=D("0.10"),lookback=20):
     validate(bars)
     if (strategy not in ("trend","momentum","mean_reversion","buy_hold")
-        or lookback<2 or not all(isinstance(x,D) and x.is_finite() for x in (initial,cost_bps,max_allocation))
+        or type(lookback) is not int or lookback < 2
+        or not all(isinstance(x,D) and x.is_finite() for x in (initial,cost_bps,max_allocation))
         or initial<=0 or not D(0)<=cost_bps<D(10000)
         or not D(0)<max_allocation<=D(1)):
         raise ValueError("INVALID_PARAMETERS")
