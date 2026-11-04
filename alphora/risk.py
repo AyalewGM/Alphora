@@ -3,7 +3,7 @@
 This module never contacts a broker. Use Decimal for money calculations.
 """
 from dataclasses import dataclass
-from decimal import Decimal, DecimalException
+from decimal import Decimal, DecimalException, Inexact, localcontext
 
 INITIAL_EQUITY = Decimal("100000")
 RISK_FRACTION = Decimal("0.005")
@@ -93,27 +93,31 @@ def validate_buy(
     # passing the finite-input test. Return a deterministic veto, never an
     # uncaught arithmetic exception or affirmative paper decision.
     try:
-        # Do not let an inconsistent reported P&L bypass the daily loss halt.
-        observed_day_pnl = account.equity - account.session_open_equity
-        loss_limit = -(account.session_open_equity * DAILY_LOSS_FRACTION)
-        if account.halted or account.day_pnl <= loss_limit or observed_day_pnl <= loss_limit:
-            return Decision(False, "DAILY_LOSS_HALT")
-        # Cash-only, no deposits/withdrawals in this paper snapshot.
-        if (account.cash > account.equity or
-                abs(observed_day_pnl - account.day_pnl) > Decimal("0.01")):
-            return Decision(False, "INCONSISTENT_ACCOUNT_STATE")
-        notional = proposal.price * proposal.quantity
-        planned_risk = (proposal.price - proposal.stop_price) * proposal.quantity
-        # Very small Decimals may round a positive order to zero in the
-        # active decimal context; never treat that as a free, safe purchase.
-        if notional <= 0 or planned_risk <= 0:
-            return Decision(False, "INVALID_ACCOUNT_OR_ORDER")
-        if planned_risk > account.equity * RISK_FRACTION:
-            return Decision(False, "TRADE_RISK_EXCEEDED")
-        if proposal.existing_instrument_value + notional > account.equity * MAX_INSTRUMENT_FRACTION:
-            return Decision(False, "INSTRUMENT_ALLOCATION_EXCEEDED")
-        if notional > account.cash:
-            return Decision(False, "INSUFFICIENT_CASH")
+        # Reject any rounded accounting calculation; a small loss or
+        # allocation excess must not disappear at the Decimal precision boundary.
+        with localcontext() as context:
+            context.traps[Inexact] = True
+            # Do not let an inconsistent reported P&L bypass the daily loss halt.
+            observed_day_pnl = account.equity - account.session_open_equity
+            loss_limit = -(account.session_open_equity * DAILY_LOSS_FRACTION)
+            if account.halted or account.day_pnl <= loss_limit or observed_day_pnl <= loss_limit:
+                return Decision(False, "DAILY_LOSS_HALT")
+            # Cash-only, no deposits/withdrawals in this paper snapshot.
+            if (account.cash > account.equity or
+                    abs(observed_day_pnl - account.day_pnl) > Decimal("0.01")):
+                return Decision(False, "INCONSISTENT_ACCOUNT_STATE")
+            notional = proposal.price * proposal.quantity
+            planned_risk = (proposal.price - proposal.stop_price) * proposal.quantity
+            # Very small Decimals may round a positive order to zero in the
+            # active decimal context; never treat that as a free, safe purchase.
+            if notional <= 0 or planned_risk <= 0:
+                return Decision(False, "INVALID_ACCOUNT_OR_ORDER")
+            if planned_risk > account.equity * RISK_FRACTION:
+                return Decision(False, "TRADE_RISK_EXCEEDED")
+            if proposal.existing_instrument_value + notional > account.equity * MAX_INSTRUMENT_FRACTION:
+                return Decision(False, "INSTRUMENT_ALLOCATION_EXCEEDED")
+            if notional > account.cash:
+                return Decision(False, "INSUFFICIENT_CASH")
     except DecimalException:
         return Decision(False, "INVALID_ACCOUNT_OR_ORDER")
     return Decision(True, "PAPER_BUY_ALLOWED")
