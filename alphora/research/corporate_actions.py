@@ -89,7 +89,8 @@ def replay_static_position(*, asset_id: str, sessions: tuple[SessionClose, ...],
                            actions: tuple[Split | CashDividend | CashDelisting, ...],
                            initial_cash: Decimal, initial_shares: int,
                            initial_cost_basis: Decimal, as_of: datetime,
-                           price_basis: str) -> CorporateActionReplay:
+                           price_basis: str,
+                           expected_session_days: tuple[date, ...] | None = None) -> CorporateActionReplay:
     """Apply known actions at session open, and dividends on ex-/payable dates.
 
     Shares are static except for splits/settlement; no trades or purchases are
@@ -126,6 +127,20 @@ def replay_static_position(*, asset_id: str, sessions: tuple[SessionClose, ...],
             raise ValueError("INVALID_RAW_MARK")
         by_date[s.day] = s
         previous = s
+
+    # Optional, externally supplied calendar declaration. A missing session
+    # without a scheduled action is otherwise invisible to this static ledger.
+    # Equality here proves only consistency with the supplied dates, never
+    # calendar authenticity or market-data completeness.
+    if expected_session_days is not None:
+        if (not isinstance(expected_session_days, tuple)
+                or not expected_session_days
+                or any(not _date(d) for d in expected_session_days)
+                or any(later <= earlier for earlier, later in
+                       zip(expected_session_days, expected_session_days[1:]))):
+            raise ValueError("INVALID_EXPECTED_SESSION_DATES")
+        if tuple(by_date) != expected_session_days:
+            raise ValueError("SESSION_CALENDAR_MISMATCH")
 
     effective: dict[date, Split | CashDividend | CashDelisting] = {}
     payments: dict[date, list[CashDividend]] = {}
