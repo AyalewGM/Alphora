@@ -137,6 +137,12 @@ def inspect_market_manifest(manifest: MarketManifest, *,
                 (not _date(a.delisted_on) or a.delisted_on < a.listed_on))
             or not isinstance(a.symbols, tuple) or not a.symbols):
         raise ValueError("INVALID_INSTRUMENT")
+    # No independent per-event availability receipt is present. Effective
+    # symbol/delisting dates beyond this ET cutoff would disclose future
+    # security-master information to a historical research snapshot.
+    as_of_day = m.as_of.astimezone(_ET).date()
+    if a.delisted_on is not None and a.delisted_on > as_of_day:
+        raise ValueError("FUTURE_INSTRUMENT_EVENT")
     last_end = None
     for i, period in enumerate(a.symbols):
         if (not isinstance(period, SymbolPeriod)
@@ -147,6 +153,8 @@ def inspect_market_manifest(manifest: MarketManifest, *,
                 or (i == 0 and period.start != a.listed_on)
                 or (i > 0 and (last_end is None or period.start <= last_end))):
             raise ValueError("INVALID_SYMBOL_HISTORY")
+        if period.start > as_of_day or (period.end is not None and period.end > as_of_day):
+            raise ValueError("FUTURE_INSTRUMENT_EVENT")
         last_end = period.end
     if (a.delisted_on is not None and a.symbols[-1].end != a.delisted_on):
         raise ValueError("INVALID_SYMBOL_HISTORY")

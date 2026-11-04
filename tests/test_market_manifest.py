@@ -117,6 +117,28 @@ class MarketManifestTests(unittest.TestCase):
             with self.subTest(asset=asset), self.assertRaises(ValueError):
                 check(replace(m, instrument=asset))
 
+    def test_future_dated_symbol_or_delisting_cannot_leak_into_snapshot(self):
+        m = fixture()
+        original = m.instrument.symbols
+        after_cutoff = date(2026, 1, 2)
+        before_future_change = date(2026, 1, 1)
+        # Both historical bars are covered by NEW. Without a cutoff guard,
+        # an otherwise-valid manifest could disclose a future ticker rename.
+        future_symbol_end = replace(m.instrument, symbols=(
+            original[0], SymbolPeriod("NEW", date(2025, 1, 2), before_future_change),
+            SymbolPeriod("FUT", after_cutoff)))
+        future_symbol_start = replace(m.instrument, symbols=(
+            original[0], SymbolPeriod("NEW", date(2025, 1, 2), date(2025, 11, 29)),
+            SymbolPeriod("FUT", after_cutoff)))
+        future_delisting = replace(m.instrument, delisted_on=before_future_change,
+                                  symbols=(original[0],
+                                           SymbolPeriod("NEW", date(2025, 1, 2),
+                                                        before_future_change)))
+        for asset in (future_symbol_end, future_symbol_start, future_delisting):
+            with self.subTest(asset=asset), self.assertRaisesRegex(
+                    ValueError, "FUTURE_INSTRUMENT_EVENT"):
+                check(replace(m, instrument=asset))
+
     def test_universe_exclusion_has_reason_and_changes_hash(self):
         m = fixture()
         excluded = replace(m, membership=replace(m.membership, included=False,
