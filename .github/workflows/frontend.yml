@@ -21,14 +21,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm install --no-audit --no-fund
-      # Temporary review preparation: capture npm's registry-resolved integrity-pinned lockfile.
-      # This only emits public package metadata and is removed after the file is committed.
-      - name: Generate deterministic lockfile candidate for review
-        run: |
-          npm install --package-lock-only --no-audit --no-fund
-          echo 'ALPHORA_LOCKFILE_BEGIN'
-          node -e 'const s=JSON.stringify(require("./package-lock.json")); for(let i=0;i<s.length;i+=1000) console.log("ALPHORA_LOCKFILE_JSON:"+s.slice(i,i+1000));'
-          echo 'ALPHORA_LOCKFILE_END'
+      - run: npm ci --no-audit --no-fund
       - run: npm test
       - run: npm run build
