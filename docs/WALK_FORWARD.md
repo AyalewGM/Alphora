@@ -165,3 +165,21 @@ fitting. A rigorous evaluation must additionally use correctly clustered or
 block-bootstrap uncertainty estimates and appropriate multiple-testing
 controls. Do not inflate test significance using raw OOS row counts.
 
+
+## Versioned walk-forward input fingerprint
+
+`summarize_walk_forward_coverage(...)` returns `input_fingerprint_sha256`,
+a deterministic SHA-256 over the **entire supplied ordered session list**
+(including reserved holdout dates), train/test sizes, forward-label horizon,
+embargo, holdout length and the generated fold-index windows. A changed
+reserved holdout date changes this fingerprint even when the number of
+tested rows is unchanged. Equivalent tuple/list inputs yield the same receipt.
+The version marker is `alphora-walk-forward-input-v1`.
+
+A caller may supply `expected_input_fingerprint_sha256` from a value
+independently retained **outside this run**; malformed digests and mismatches
+fail closed. `expected_input_fingerprint_matched` records whether an expected
+string was supplied and matched. This is a research-repeatability guard, **not**
+independent authentication of exchange sessions, source revisions, market data,
+the point-in-time asset universe, corporate actions or feature availability.
+A caller-controlled external pin is not itself a trusted attestation.

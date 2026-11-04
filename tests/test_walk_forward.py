@@ -223,5 +223,58 @@ class WalkForwardFoldTests(unittest.TestCase):
                         report.holdout_start_index)
 
 
+    def test_input_fingerprint_binds_calendar_folds_and_parameters(self):
+        days = fake_sessions(50)
+        config = dict(train_sessions=8, test_sessions=3,
+                      label_horizon_sessions=2, embargo_sessions=1,
+                      holdout_sessions=6)
+        base = summarize_walk_forward_coverage(days, **config)
+        self.assertEqual(len(base.input_fingerprint_sha256), 64)
+        self.assertFalse(base.expected_input_fingerprint_matched)
+        self.assertEqual(base.input_fingerprint_sha256,
+                         summarize_walk_forward_coverage(list(days), **config).input_fingerprint_sha256)
+        earlier_first_day = (days[0] - timedelta(days=1),) + days[1:]
+        self.assertNotEqual(base.input_fingerprint_sha256,
+                            summarize_walk_forward_coverage(earlier_first_day, **config).input_fingerprint_sha256)
+        self.assertNotEqual(base.input_fingerprint_sha256,
+                            summarize_walk_forward_coverage(days,
+                                **(config | {"label_horizon_sessions": 3})).input_fingerprint_sha256)
+        self.assertNotEqual(base.input_fingerprint_sha256,
+                            summarize_walk_forward_coverage(days,
+                                **(config | {"holdout_sessions": 5})).input_fingerprint_sha256)
+
+    def test_input_fingerprint_includes_reserved_tail_date_changes(self):
+        days = fake_sessions(50)
+        config = dict(train_sessions=8, test_sessions=3,
+                      label_horizon_sessions=2, embargo_sessions=1,
+                      holdout_sessions=6)
+        old = summarize_walk_forward_coverage(days, **config)
+        changed_tail = days[:-1] + (days[-1] + timedelta(days=1),)
+        new = summarize_walk_forward_coverage(changed_tail, **config)
+        self.assertEqual(old.folds, new.folds)
+        self.assertEqual(old.tested_preholdout_sessions, new.tested_preholdout_sessions)
+        self.assertNotEqual(old.input_fingerprint_sha256, new.input_fingerprint_sha256)
+
+    def test_expected_input_fingerprint_fails_closed(self):
+        days = fake_sessions(50)
+        config = dict(train_sessions=8, test_sessions=3,
+                      label_horizon_sessions=2, embargo_sessions=1,
+                      holdout_sessions=6)
+        base = summarize_walk_forward_coverage(days, **config)
+        pinned = summarize_walk_forward_coverage(
+            list(days), expected_input_fingerprint_sha256=base.input_fingerprint_sha256,
+            **config)
+        self.assertTrue(pinned.expected_input_fingerprint_matched)
+        self.assertEqual(base.input_fingerprint_sha256, pinned.input_fingerprint_sha256)
+        for invalid in (True, 123, "bad", "A" * 64):
+            with self.subTest(expected=invalid):
+                with self.assertRaisesRegex(ValueError, "INVALID_WALK_FORWARD_FINGERPRINT"):
+                    summarize_walk_forward_coverage(
+                        days, expected_input_fingerprint_sha256=invalid, **config)
+        with self.assertRaisesRegex(ValueError, "WALK_FORWARD_FINGERPRINT_MISMATCH"):
+            summarize_walk_forward_coverage(
+                days, expected_input_fingerprint_sha256="0" * 64, **config)
+
+
 if __name__ == "__main__":
     unittest.main()

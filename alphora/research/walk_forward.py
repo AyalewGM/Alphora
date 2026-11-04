@@ -5,6 +5,8 @@ No vendor data, ML dependencies, broker endpoints, orders, or network calls.
 """
 from dataclasses import dataclass
 from datetime import date
+from hashlib import sha256
+import json
 from typing import Sequence
 
 
@@ -48,6 +50,8 @@ class WalkForwardCoverage:
     # intervals. This is NOT an estimate of statistically independent trials.
     max_nonoverlapping_test_label_windows: int
     overlap_excluded_test_label_windows: int
+    input_fingerprint_sha256: str  # Local receipt; not authenticated vendor provenance.
+    expected_input_fingerprint_matched: bool  # Expected digest provided by caller.
 
 
 def rolling_purged_folds(
@@ -136,6 +140,7 @@ def summarize_walk_forward_coverage(
     label_horizon_sessions: int,
     embargo_sessions: int = 0,
     holdout_sessions: int = 0,
+    expected_input_fingerprint_sha256: str | None = None,
 ) -> WalkForwardCoverage:
     """Return auditable index counts from the verified fold generator.
 
@@ -169,6 +174,33 @@ def summarize_walk_forward_coverage(
             or tested > boundary
             or not (0 < max_nonoverlapping <= tested)):
         raise ValueError("INVALID_FOLD_COVERAGE")
+    # Bind every supplied session (including the untouched holdout), all fold
+    # parameters, and exact fold windows into a versioned research receipt.
+    # This is not independent proof of the vendor/calendar dates.
+    fingerprint_payload = {
+        "schema": "alphora-walk-forward-input-v1",
+        "sessions": [day.isoformat() for day in sessions],
+        "train_sessions": train_sessions,
+        "test_sessions": test_sessions,
+        "label_horizon_sessions": label_horizon_sessions,
+        "embargo_sessions": embargo_sessions,
+        "holdout_sessions": holdout_sessions,
+        "fold_windows": [
+            [f.train_start, f.train_stop, f.test_start, f.test_stop]
+            for f in folds
+        ],
+    }
+    canonical = json.dumps(fingerprint_payload, sort_keys=True,
+                           separators=(",", ":"), ensure_ascii=True)
+    fingerprint = sha256(canonical.encode("ascii")).hexdigest()
+    if expected_input_fingerprint_sha256 is not None:
+        if (type(expected_input_fingerprint_sha256) is not str
+                or len(expected_input_fingerprint_sha256) != 64
+                or any(ch not in "0123456789abcdef"
+                       for ch in expected_input_fingerprint_sha256)):
+            raise ValueError("INVALID_WALK_FORWARD_FINGERPRINT")
+        if expected_input_fingerprint_sha256 != fingerprint:
+            raise ValueError("WALK_FORWARD_FINGERPRINT_MISMATCH")
     return WalkForwardCoverage(
         total_sessions=len(sessions),
         holdout_start_index=boundary,
@@ -182,4 +214,7 @@ def summarize_walk_forward_coverage(
         last_test_label_index=folds[-1].last_test_label_index,
         max_nonoverlapping_test_label_windows=max_nonoverlapping,
         overlap_excluded_test_label_windows=tested - max_nonoverlapping,
+        input_fingerprint_sha256=fingerprint,
+        expected_input_fingerprint_matched=(
+            expected_input_fingerprint_sha256 is not None),
     )
