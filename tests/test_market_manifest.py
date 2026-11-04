@@ -117,6 +117,25 @@ class MarketManifestTests(unittest.TestCase):
             with self.subTest(asset=asset), self.assertRaises(ValueError):
                 check(replace(m, instrument=asset))
 
+    def test_active_security_cannot_end_its_last_symbol_without_delisting(self):
+        m = fixture()
+        # Existing bars alone can look complete even when the security-master
+        # quietly stops reporting an active asset after the final supplied bar.
+        last_day = m.bar_days[-1]
+        incomplete = replace(m.instrument, symbols=(
+            m.instrument.symbols[0],
+            replace(m.instrument.symbols[1], end=last_day),
+        ))
+        with self.assertRaisesRegex(ValueError, "INVALID_SYMBOL_HISTORY"):
+            check(replace(m, instrument=incomplete))
+        # A genuinely delisted instrument has an explicit terminal date and
+        # matching last symbol period, so it remains representable.
+        settled = replace(incomplete, delisted_on=last_day)
+        self.assertEqual(
+            check(replace(m, instrument=settled)).manifest.instrument.delisted_on,
+            last_day,
+        )
+
     def test_future_dated_symbol_or_delisting_cannot_leak_into_snapshot(self):
         m = fixture()
         original = m.instrument.symbols
