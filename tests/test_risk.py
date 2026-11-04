@@ -41,6 +41,24 @@ class TestRisk(unittest.TestCase):
         self.assertEqual(self.decide(account=replace(self.account, halted=True)).reason,
                          "DAILY_LOSS_HALT")
 
+    def test_invalid_halt_state_fails_closed(self):
+        # A malformed persisted/reconciled kill-switch value must not be
+        # treated as False merely because it is falsey in Python.
+        for halted in (None, 0, 1, "", D("0")):
+            with self.subTest(halted=halted):
+                account = replace(self.account, halted=halted)
+                self.assertEqual(self.decide(account=account).reason,
+                                 "INVALID_ACCOUNT_STATE")
+        self.assertTrue(self.decide(account=replace(self.account, halted=False)).permitted)
+
+    def test_untyped_account_or_proposal_fails_closed(self):
+        self.assertEqual(validate_buy(None, self.buy,
+                                      expected_session_id="2026-11-02").reason,
+                         "INVALID_ACCOUNT_OR_ORDER")
+        self.assertEqual(validate_buy(self.account, None,
+                                      expected_session_id="2026-11-02").reason,
+                         "INVALID_ACCOUNT_OR_ORDER")
+
     def test_bad_session(self):
         self.assertEqual(validate_buy(self.account, self.buy, expected_session_id="wrong").reason,
                          "SESSION_MISMATCH")
