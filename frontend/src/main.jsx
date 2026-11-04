@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { APPROVED_POLICY, loadLocalReadOnlyStatus } from "./api.js";
 import { parseLocalDailySnapshot } from "./local-bars.js";
+import { normalizedVolumeHeights } from "./chart-scale.js";
 
 const WATCHLIST = [
   { symbol: "SPY", name: "S&P 500 ETF", base: 582.40, change: 0.82 },
@@ -38,7 +39,10 @@ function Candles({ symbol, timeframe, imported }) {
   const candles = useMemo(() => imported ? imported.bars.slice(-60) : syntheticCandles(symbol, timeframe), [symbol, timeframe, imported]);
   const low = Math.min(...candles.map(c => c.low)) - 2;
   const high = Math.max(...candles.map(c => c.high)) + 2;
-  const w = 960, h = 390, top = 23, bottom = 45, plotH = h - top - bottom, step = (w - 75) / candles.length;
+  // Keep a separate 40px relative-volume strip below the price pane.
+  // Raw daily volume can exceed millions; its magnitude is NOT an SVG pixel height.
+  const volumeHeights = useMemo(() => normalizedVolumeHeights(candles, 40), [candles]);
+  const w = 960, h = 390, top = 23, bottom = 76, plotH = h - top - bottom, step = (w - 75) / candles.length;
   const y = value => top + ((high - value) / (high - low)) * plotH;
   const levels = Array.from({ length: 5 }, (_, i) => low + (high - low) * i / 4);
   return (
@@ -49,7 +53,7 @@ function Candles({ symbol, timeframe, imported }) {
         return <g key={i} stroke={rising ? "#28c9a3" : "#ef657a"} fill={rising ? "#28c9a3" : "#ef657a"}>
           <line x1={x + step/2} x2={x + step/2} y1={y(c.high)} y2={y(c.low)} strokeWidth="1.5" />
           <rect x={x + step/2 - Math.max(2,step*.25)} y={Math.min(y(c.open),y(c.close))} width={Math.max(4,step*.5)} height={Math.max(1.5,Math.abs(y(c.open)-y(c.close)))} rx="1"/>
-          <rect x={x + step/2 - Math.max(2,step*.25)} y={h-17-c.volume*.55} width={Math.max(4,step*.5)} height={c.volume*.55} opacity=".24" />
+          <rect x={x + step/2 - Math.max(2,step*.25)} y={h-19-volumeHeights[i]} width={Math.max(4,step*.5)} height={volumeHeights[i]} opacity=".24" />
         </g>;
       })}
       {(imported ? candles.filter((_,i)=>i%Math.max(1,Math.floor(candles.length/7))===0).map(x=>x.day) : ["09:30","10:30","11:30","12:30","13:30","14:30","15:30"]).map((t,i)=><text key={t} x={20 + i*130} y={h-3} fill="#8092a9" fontSize="12">{t}</text>)}
