@@ -47,6 +47,13 @@ accidentally suppress a later stop with the same idempotency key.
 
 ## Limitations and mandatory future gates
 
+The entry/exit intent layer rejects untyped snapshots and handles Decimal
+arithmetic overflow fail-closed; an extreme or corrupted paper snapshot must
+never produce an affirmative entry or sell intent because an arithmetic
+exception escaped validation. These are regression-only synthetic tests,
+not verification of market data or broker execution.
+
+
 The trigger is not a guaranteed fill, stop, or net profit. Spread, slippage,
 market gaps, commissions, corporate actions, halts, half-days, concurrency,
 partial fills and broker-side state need independently validated accounting
