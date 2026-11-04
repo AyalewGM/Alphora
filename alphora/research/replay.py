@@ -78,6 +78,13 @@ def _checked(snapshot: DataSnapshot, *, expected_sha256: str) -> DataSnapshot:
     # has no split/dividend cash-flow engine. RAW remains research-only.
     if observed.price_basis != "RAW_UNADJUSTED":
         raise ValueError("UNSUPPORTED_PRICE_BASIS")
+    # A next-open fill is not economically possible on a session with zero
+    # traded shares. The base OHLCV validator legitimately allows halted or
+    # inactive sessions, but the simplified backtester does not model halts,
+    # tradability or opening-auction participation. Reject such replay inputs
+    # instead of silently granting an impossible synthetic execution.
+    if any(item.bar.volume == 0 for item in observed.observations):
+        raise ValueError("ZERO_VOLUME_RESEARCH_REPLAY_UNSUPPORTED")
     return observed
 
 
