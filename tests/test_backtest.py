@@ -19,6 +19,32 @@ class BacktestTests(unittest.TestCase):
                 for b in self.bars:w.writerow([b.day,b.open,b.high,b.low,b.close,b.volume])
             self.assertEqual(load_csv(path),self.bars)
 
+    def test_csv_rejects_extra_and_missing_columns(self):
+        header = "date,open,high,low,close,volume"
+        good = "2025-01-01,100,101,99,100,1000"
+        other = "2025-01-02,101,102,100,101,1000"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bars.csv"
+            for bad in (
+                good + ",unexpected",  # DictReader returns None: [extra]
+                "2025-01-01,100,101,99,100",  # Missing volume
+                "2025-01-01,100,101,99,100,",  # Blank volume
+            ):
+                with self.subTest(row=bad):
+                    path.write_text(header + "\n" + bad + "\n" + other + "\n",
+                                    encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "BAD_CSV_ROW"):
+                        load_csv(path)
+
+    def test_backtest_lookback_requires_strict_integer(self):
+        for bad in (True, 2.5, D("20"), "20", None, 0, -5):
+            with self.subTest(lookback=repr(bad)):
+                with self.assertRaisesRegex(ValueError, "INVALID_PARAMETERS"):
+                    backtest(self.bars, "trend", lookback=bad)
+                with self.assertRaisesRegex(ValueError, "STRATEGY_OR_LOOKBACK"):
+                    signal([b.close for b in self.bars], "trend", lookback=bad)
+        self.assertIsInstance(backtest(self.bars, "trend", lookback=2).final_equity, D)
+
     def test_duplicate_date_rejected(self):
         with self.assertRaises(ValueError):backtest([self.bars[0],self.bars[0]],"trend")
 
