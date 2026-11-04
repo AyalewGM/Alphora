@@ -120,6 +120,26 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(self.exit(quote=replace(self.quote,regular_session_verified=False)).action,'HOLD')
 
 
+    def test_entry_extreme_decimal_fails_closed_without_exception(self):
+        huge = D('1e1000000')
+        snapshot = replace(self.account, equity=huge, session_open_equity=huge, cash=huge)
+        self.assertEqual(self.entry(account=snapshot).reason, 'INVALID_ACCOUNT_OR_ORDER')
+        candidate = replace(self.candidate, existing_instrument_value=huge,
+                            pending_instrument_value=huge)
+        self.assertEqual(self.entry(candidate).reason, 'INVALID_ACCOUNT_OR_ORDER')
+        self.assertEqual(propose_entry(None, self.candidate, as_of=self.now,
+                      expected_session_id='2026-11-02', reserved_cash=D(0),
+                      reconciled=True).reason, 'INVALID_ACCOUNT_OR_ORDER')
+
+    def test_exit_extreme_decimal_fails_closed_without_exception(self):
+        position = replace(self.position, average_fill_price=D('1e1000000'))
+        quote = replace(self.quote, bid=D('100'), ask=D('100.01'))
+        result = self.exit(position=position, quote=quote)
+        self.assertEqual(result.action, 'HOLD')
+        self.assertEqual(result.reason, 'INVALID_POSITION_OR_QUOTE')
+        self.assertEqual(propose_exit(None, quote, as_of=self.now,
+                        take_profit_pct=D(3)).reason, 'INVALID_POSITION_OR_QUOTE')
+
     def test_daily_loss_from_equity_cannot_be_bypassed(self):
         account=replace(self.account,equity=D(95000),cash=D(95000),day_pnl=D(0))
         self.assertEqual(self.entry(account=account).reason,'DAILY_LOSS_HALT')
