@@ -6,10 +6,12 @@ TradingView-inspired **layout**, not TradingView proprietary chart code. This is
 
 From `frontend/`:
 ```sh
-npm install
+npm ci
 npm run dev
 ```
 Visit `http://127.0.0.1:5173`. Optionally run the FastAPI shell separately at `127.0.0.1:8000` to populate the displayed risk policy using `GET /v1/risk/policy` and `GET /v1/system/capabilities`; the development proxy is configured in `vite.config.js`.
+
+Dependencies are pinned in `package-lock.json` (npm lockfile v3) to make the complete installed tree reproducible. Use `npm ci` locally and in CI; changes to runtime dependencies require a reviewed lockfile diff. The lockfile constrains resolution but does not independently establish package trust or vulnerability freedom.
 
 Run `npm test` to execute dependency-free Node contract tests. The terminal marks the local backend verified only when **both** read-only endpoints return paper-only capabilities and the approved risk settings; otherwise it remains visibly offline. Even a verified local API does not mean historical or live market data are available.
 
@@ -45,6 +47,10 @@ Required JSON structure (all amounts decimal strings, times timezone-aware, date
 The example is **illustrative only**; its hash is a dummy placeholder and does not authenticate the bars. Client checks include bounded record counts/file size, strictly increasing days, exact decimal syntax, OHLC consistency, valid volumes, timezone-aware observation timestamps and conservative next-open lookahead screening (09:30 America/New_York). The daily chart draws volumes in a **separate fixed-height strip**, normalized relative to the largest displayed bar: this prevents realistic million-share totals from overflowing the SVG or obscuring prices. Volume heights are relative graphical proportions, **not** absolute volume counts, opening-auction liquidity, guaranteed fills or a paper-trading eligibility check. The exchange calendar, early closes, vendor attestations, file signatures, receipt integrity, corporate actions and historical universe membership remain **unverified**.
 
 For production-quality historical charts, use a separately reviewed API that exposes only authenticated, independently checked `DataSnapshot` exports. Do not convert this manual import into signal, sizing, or order eligibility.
+
+## Browser security boundary
+
+The local terminal declares a restrictive Content Security Policy in `index.html`: same-origin scripts and requests only, no plugin objects or form submissions, and limited local styles and images. The policy is defense-in-depth, not a substitute for sanitizing imported market data. It permits inline styles for chart rendering; this is an explicitly accepted limitation. The static meta policy cannot enforce `frame-ancestors`, and local Vite hot-reload connectivity must be verified separately if WebSocket policies change.
 
 ## Acceptance checks
 
