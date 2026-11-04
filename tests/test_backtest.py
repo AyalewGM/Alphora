@@ -86,6 +86,35 @@ class BacktestTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "BAD_CSV_ROW"):
                         load_csv(path)
 
+    def test_csv_requires_canonical_dates_and_volumes(self):
+        # Python date.fromisoformat and int accept alternative strings that
+        # silently change a vendor's source representation.
+        header = "date,open,high,low,close,volume"
+        second = "2025-01-02,101,102,100,101,1000"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bars.csv"
+            for day, volume in (
+                ("20250101", "1000"),    # Basic date silently normalized
+                ("2025-W01-3", "1000"),  # ISO week date silently normalized
+                ("2025-01-01", "1_000"), # Python's digit separator
+                ("2025-01-01", "+1000"),
+                ("2025-01-01", " 1000 "),
+                ("2025-01-01", "0001"),
+                ("2025-01-01", "-0"),
+            ):
+                with self.subTest(day=day, volume=volume):
+                    row = f"{day},100,101,99,100,{volume}"
+                    path.write_text(header + "\n" + row + "\n" + second + "\n",
+                                    encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "BAD_CSV_ROW"):
+                        load_csv(path)
+            # Zero trading volume is valid in the generic daily-bar model;
+            # research execution replay applies a separate fillability gate.
+            path.write_text(header + "\n" +
+                            "2025-01-01,100,101,99,100,0\n" + second + "\n",
+                            encoding="utf-8")
+            self.assertEqual(load_csv(path)[0].volume, 0)
+
     def test_duplicate_date_rejected(self):
         with self.assertRaises(ValueError):backtest([self.bars[0],self.bars[0]],"trend")
 
