@@ -140,8 +140,13 @@ class OfflineReservations:
                 raise ValueError("BOOK_STATE_CORRUPT")
             intents[ident] = (symbol, qty, limit, stop, budget, filled, paid)
             if status == "OPEN":
-                remaining = (qty - filled) * limit + budget - paid
-                reserved += remaining
+                try:
+                    with localcontext() as context:
+                        context.traps[Inexact] = True
+                        remaining = (qty - filled) * limit + budget - paid
+                        reserved += remaining
+                except DecimalException as exc:
+                    raise ValueError("BOOK_STATE_CORRUPT") from exc
                 active.append((ident, symbol, qty - filled, remaining))
         holdings = {}
         fill_totals = {}
@@ -156,16 +161,30 @@ class OfflineReservations:
                     or not intents[intent_id][3] < price <= intents[intent_id][2]):
                 raise ValueError("BOOK_STATE_CORRUPT")
             old_qty, old_fees = fill_totals.get(intent_id, (0, D(0)))
-            fill_totals[intent_id] = (old_qty + qty, old_fees + fee)
             symbol = intents[intent_id][0]
-            old_qty, old_cost = holdings.get(symbol, (0, D(0)))
-            holdings[symbol] = old_qty + qty, old_cost + qty * price + fee
-            spent_cash += qty * price + fee
-        if (reserved > cash or cash + spent_cash != INITIAL_EQUITY
+            held_qty, old_cost = holdings.get(symbol, (0, D(0)))
+            try:
+                with localcontext() as context:
+                    context.traps[Inexact] = True
+                    updated_fees = old_fees + fee
+                    updated_cost = old_cost + qty * price + fee
+                    spent_cash += qty * price + fee
+            except DecimalException as exc:
+                raise ValueError("BOOK_STATE_CORRUPT") from exc
+            fill_totals[intent_id] = (old_qty + qty, updated_fees)
+            holdings[symbol] = held_qty + qty, updated_cost
+        try:
+            with localcontext() as context:
+                context.traps[Inexact] = True
+                reconstructed_cash = cash + spent_cash
+                available_cash = cash - reserved
+        except DecimalException as exc:
+            raise ValueError("BOOK_STATE_CORRUPT") from exc
+        if (reserved > cash or reconstructed_cash != INITIAL_EQUITY
                 or any(fill_totals.get(ident, (0, D(0))) != (row[5], row[6])
                        for ident, row in intents.items())):
             raise ValueError("BOOK_STATE_CORRUPT")
-        return PaperBookSnapshot(cash, reserved, cash - reserved,
+        return PaperBookSnapshot(cash, reserved, available_cash,
                                  tuple((sym, *holdings[sym]) for sym in sorted(holdings)),
                                  tuple(active), halted == "1", self._meta("session_id"))
 
@@ -355,11 +374,22 @@ class OfflineReservations:
             if row is None or row[6] != "OPEN":
                 raise ValueError("NO_OPEN_INTENT")
             total, filled, limit, stop, fee_budget, fees_paid, _ = row
+            # Every synthetic receipt must preserve its full cash and fee
+            # liability. A subcent fee may otherwise round out of cost,
+            # reporting more virtual cash than is truly available.
+            try:
+                with localcontext() as context:
+                    context.traps[Inexact] = True
+                    updated_fees = D(fees_paid) + fee
+                    cost = qty * price + fee
+                    cash_before = D(self._meta("cash"))
+                    cash_after = cash_before - cost
+            except DecimalException as exc:
+                raise ValueError("UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc
             if (filled + qty > total or price > D(limit) or
-                    price <= D(stop) or fee + D(fees_paid) > D(fee_budget)):
+                    price <= D(stop) or updated_fees > D(fee_budget)):
                 raise ValueError("FILL_EXCEEDS_LIMITS")
-            cost = qty * price + fee
-            if cost > D(self._meta("cash")):
+            if cost > cash_before:
                 raise ValueError("INSUFFICIENT_CASH_AT_FILL")
             self._db.execute(
                 "INSERT INTO hypothetical_fills(id,intent_id,qty,price,fee) VALUES(?,?,?,?,?)",
@@ -367,11 +397,11 @@ class OfflineReservations:
             )
             self._db.execute(
                 "UPDATE book_meta SET value=? WHERE key='cash'",
-                (str(D(self._meta("cash")) - cost),),
+                (str(cash_after),),
             )
             self._db.execute(
                 "UPDATE buy_intents SET filled=?, fees_paid=?, status=? WHERE id=?",
-                (filled + qty, str(D(fees_paid) + fee),
+                (filled + qty, str(updated_fees),
                  "FILLED" if filled + qty == total else "OPEN", intent_id),
             )
             return self._snapshot()
