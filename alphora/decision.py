@@ -191,9 +191,9 @@ def propose_exit(position: FilledPosition, quote: ExitQuote, *,
         return hold("INVALID_POSITION_OR_QUOTE")
     if not isinstance(position.position_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", position.position_id):
         return hold("INVALID_POSITION_ID")
-    if (not position.symbol or not isinstance(position.symbol, str) or
-            not position.symbol.isascii() or
-            not all(c.isupper() or c.isdigit() or c in ".-" for c in position.symbol)):
+    # Apply the same bounded instrument identifier rule as the offline ledger.
+    # A punctuation-only or oversized symbol cannot become a sell intent.
+    if not isinstance(position.symbol, str) or not re.fullmatch(r"[A-Z][A-Z0-9.-]{0,9}", position.symbol):
         return hold("INVALID_SYMBOL")
     if not (_whole(position.filled_quantity) and
             _positive(position.average_fill_price) and
