@@ -47,6 +47,28 @@ class DecisionTests(unittest.TestCase):
                   pending_instrument_value=D(1000))
         self.assertEqual(self.entry(c).proposal.quantity, D(20))
 
+    def test_inexact_cash_reservation_fails_closed(self):
+        # Default 28-digit Decimal arithmetic would round a tiny but real
+        # reservation away from the $10,000 cash available for a full-cap buy.
+        account = replace(self.account, cash=D("10000"))
+        result = self.entry(account=account,
+                            reserved_cash=D("0.0000000000000000000000000001"))
+        self.assertFalse(result.permitted)
+        self.assertEqual(result.reason, "INVALID_ACCOUNT_OR_ORDER")
+
+    def test_inexact_pending_exposure_fails_closed(self):
+        # This pending exposure would round away when added to $1,000,
+        # otherwise permitting 180 shares at $50 and exceeding the cap.
+        candidate = replace(self.candidate,
+                            existing_instrument_value=D("1000"),
+                            pending_instrument_value=D("0.0000000000000000000000000001"))
+        result = self.entry(candidate)
+        self.assertFalse(result.permitted)
+        self.assertEqual(result.reason, "INVALID_ACCOUNT_OR_ORDER")
+        # Exact, normal-size reservations must still size deterministically.
+        self.assertEqual(self.entry(reserved_cash=D("97000")).proposal.quantity,
+                         D(60))
+
     def test_overcommitted_cash_rejected(self):
         self.assertEqual(self.entry(reserved_cash=D(100001)).reason, 'OVERCOMMITTED_CASH')
 
