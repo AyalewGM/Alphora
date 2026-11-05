@@ -202,6 +202,19 @@ class DecisionTests(unittest.TestCase):
         different=self.entry(replace(self.candidate,ask=D('50.01'))).intent_key
         self.assertNotEqual(self.entry().intent_key,different)
 
+    def test_entry_exit_reject_symbols_that_persistent_book_cannot_store(self):
+        for symbol in ("---", "...", "1SPY", "A" * 11):
+            with self.subTest(symbol=symbol):
+                candidate = replace(self.candidate, symbol=symbol, quote_symbol=symbol)
+                self.assertEqual(self.entry(candidate).reason, "INVALID_SYMBOL")
+                position = replace(self.position, symbol=symbol)
+                quote = replace(self.quote, symbol=symbol)
+                self.assertEqual(self.exit(position=position, quote=quote).reason,
+                                 "INVALID_SYMBOL")
+        self.assertEqual(self.exit(position=replace(self.position, symbol="BRK.B"),
+                                   quote=replace(self.quote, symbol="BRK.B")).reason,
+                         "TAKE_PROFIT")
+
     def test_exit_quote_bound_to_symbol(self):
         self.assertEqual(self.exit(quote=replace(self.quote,symbol='QQQ')).reason,
                          'QUOTE_SYMBOL_MISMATCH')
