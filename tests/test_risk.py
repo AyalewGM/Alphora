@@ -132,6 +132,15 @@ class TestRisk(unittest.TestCase):
         self.assertEqual(self.decide(proposal=replace(self.buy, symbol="SPY;DROP")).reason,
                          "INVALID_SYMBOL")
 
+    def test_direct_guard_symbol_matches_offline_book(self):
+        # Previously punctuation-only and oversized names passed the
+        # low-level risk veto, even though the durable ledger rejected them.
+        for symbol in ("---", "...", "1SPY", "A" * 11):
+            with self.subTest(symbol=symbol):
+                self.assertEqual(self.decide(proposal=replace(self.buy, symbol=symbol)).reason,
+                                 "INVALID_SYMBOL")
+        self.assertTrue(self.decide(proposal=replace(self.buy, symbol="BRK.B")).permitted)
+
     def test_cash_only(self):
         self.assertEqual(self.decide(account=replace(self.account, cash=D("-1"))).reason,
                          "INVALID_ACCOUNT_STATE")
