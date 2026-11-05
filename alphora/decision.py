@@ -217,19 +217,25 @@ def propose_exit(position: FilledPosition, quote: ExitQuote, *,
     if not (_positive(quote.bid) and _positive(quote.ask) and quote.bid <= quote.ask):
         return hold("INVALID_QUOTE")
     try:
-        available_quantity = position.filled_quantity - position.pending_exit_quantity
-        if not available_quantity:
-            return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
-        if quote.bid <= position.protective_stop_price:
-            reason = "PROTECTIVE_EXIT"
-        elif quote.bid >= position.average_fill_price * (D(1) + take_profit_pct / 100):
-            if position.pending_exit_quantity:
+        # An inexact target threshold can round a tiny positive profit
+        # percentage down to the fill price and falsely propose a sell at
+        # break-even. Reject unrepresentable thresholds, never round toward
+        # an earlier exit; protective stops retain priority.
+        with localcontext() as context:
+            context.traps[Inexact] = True
+            available_quantity = position.filled_quantity - position.pending_exit_quantity
+            if not available_quantity:
                 return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
-            reason = "TAKE_PROFIT"
-        else:
-            if position.pending_exit_quantity:
-                return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
-            return hold("TARGET_NOT_REACHED")
+            if quote.bid <= position.protective_stop_price:
+                reason = "PROTECTIVE_EXIT"
+            elif quote.bid >= position.average_fill_price * (D(1) + take_profit_pct / 100):
+                if position.pending_exit_quantity:
+                    return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
+                reason = "TAKE_PROFIT"
+            else:
+                if position.pending_exit_quantity:
+                    return ExitPlan("BLOCKED_REQUIRES_RECONCILIATION", "PENDING_EXIT_RECONCILIATION")
+                return hold("TARGET_NOT_REACHED")
     except DecimalException:
         return hold("INVALID_POSITION_OR_QUOTE")
     # Stable across repeated evaluation of the same position / exit decision.
