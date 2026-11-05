@@ -102,6 +102,16 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(plan.reason,'TAKE_PROFIT')
         self.assertEqual(plan.quantity,D(100))
 
+    def test_unrepresentable_positive_target_cannot_trigger_break_even_sale(self):
+        # With default 28-digit Decimal precision a tiny positive target
+        # rounds 1 + pct/100 back to 1. A $50 bid must never trigger it.
+        quote = replace(self.quote, bid=D("50"), ask=D("50.01"))
+        result = self.exit(quote=quote, take_profit_pct=D("1e-30"))
+        self.assertEqual(result.action, "HOLD")
+        self.assertEqual(result.reason, "INVALID_POSITION_OR_QUOTE")
+        # The ordinary exact 3% target remains valid.
+        self.assertEqual(self.exit().reason, "TAKE_PROFIT")
+
     def test_target_not_reached_on_ask_only(self):
         quote=replace(self.quote, bid=D('51.49'), ask=D('51.80'))
         self.assertEqual(self.exit(quote=quote).reason,'TARGET_NOT_REACHED')
