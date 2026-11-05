@@ -20,6 +20,12 @@ quantity is the floor of the minimum of 0.5% current equity divided by
 ask-to-stop risk, remaining 10% instrument allocation divided by ask, and
 unreserved cash divided by ask. The risk guard independently rechecks the
 proposal. Price improvement or worsening at actual fill is not guaranteed.
+Cash reservations and existing-plus-pending instrument exposure are added or
+subtracted with exact Decimal accounting: if context precision would round away
+even a small reserved amount, entry sizing vetoes the proposal rather than
+silently inflating buying power or understating instrument exposure. The caller
+must supply reconciled and representable balances; this is not an atomic
+reservation or a substitute for future OMS accounting.
 
 An entry intent key derives from session, ticker, timestamp, ask, stop and
 quantity. Repeated identical inputs give the same key, but new quotes can
