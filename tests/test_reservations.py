@@ -86,6 +86,21 @@ class OfflineReservationTests(unittest.TestCase):
             D("10000"),
         )
 
+    def test_subcent_fee_never_rounds_away_at_instrument_cap(self):
+        # A prior pending $9,000 position plus a new $1,000 proposed
+        # purchase reaches the exact 10% cap. Even a tiny positive fee
+        # must not disappear from the existing-exposure Decimal sum.
+        prior = self.reserve("first", self.proposal(qty="180", stop="49"))
+        self.assertEqual(prior.reserved_cash, D("9000"))
+        fee = D("0.0000000000000000000000001")
+        with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_LEDGER_ARITHMETIC"):
+            self.reserve("rounded-fee", self.proposal(qty="20", stop="49"),
+                         fee_budget=fee)
+        self.assertEqual(self.book.snapshot(), prior)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), prior)
+
     def test_fee_budget_is_included_in_per_trade_planned_loss(self):
         # A fee cap is potential loss in addition to the price-to-stop
         # distance. With 100 shares at 50 and a stop at 48 the initial
