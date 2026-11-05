@@ -5,7 +5,7 @@ returned plans are neither approvals nor executable instructions.
 """
 from dataclasses import dataclass, replace
 from datetime import datetime
-from decimal import Decimal as D, ROUND_FLOOR, DecimalException
+from decimal import Decimal as D, ROUND_FLOOR, DecimalException, Inexact, localcontext
 from hashlib import sha256
 import re
 
@@ -116,9 +116,14 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
     # Validate session, daily loss halt, symbol and account with an ordinary
     # one-share proposal before calculating the maximum feasible size.
     try:
-        reserved_instrument = (candidate.existing_instrument_value +
-                               candidate.pending_instrument_value)
-        available_cash = account.cash - reserved_cash
+        # Cash and existing/pending exposure are exact ledger quantities.
+        # An inexact Decimal sum/subtraction could round away a reservation
+        # and allow a full-cap paper proposal to overcommit the true balance.
+        with localcontext() as context:
+            context.traps[Inexact] = True
+            reserved_instrument = (candidate.existing_instrument_value +
+                                   candidate.pending_instrument_value)
+            available_cash = account.cash - reserved_cash
         account_available = replace(account, cash=available_cash)
         minimum = BuyProposal(candidate.symbol, D(1), candidate.ask,
                               candidate.stop_price, reserved_instrument)
