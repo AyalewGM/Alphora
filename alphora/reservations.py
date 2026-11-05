@@ -5,7 +5,7 @@ External account/position reconciliation and a fresh risk decision remain mandat
 """
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from decimal import Decimal as D
+from decimal import Decimal as D, DecimalException, Inexact, localcontext
 from pathlib import Path
 import re
 import sqlite3
@@ -260,21 +260,29 @@ class OfflineReservations:
                 if existing[5] == "CANCELLED":
                     raise ValueError("CANCELLED_INTENT_ID")
                 return self._snapshot()  # stable dedupe, no second reservation
-            pending_symbol = sum(
-                (row[3] for row in snapshot.pending if row[1] == proposal.symbol), D(0)
-            )
-            filled_cost = next((cost for sym, _, cost in snapshot.positions
-                                if sym == proposal.symbol), D(0))
             if not _money(proposal.existing_instrument_value):
                 raise ValueError("INVALID_POSITION_VALUE")
-            exposure = max(proposal.existing_instrument_value, filled_cost) + pending_symbol
+            # Never round away a tiny positive fee when existing pending
+            # exposure is near the 10% instrument cap.
+            try:
+                with localcontext() as context:
+                    context.traps[Inexact] = True
+                    pending_symbol = sum(
+                        (row[3] for row in snapshot.pending if row[1] == proposal.symbol), D(0)
+                    )
+                    filled_cost = next((cost for sym, _, cost in snapshot.positions
+                                        if sym == proposal.symbol), D(0))
+                    exposure = max(proposal.existing_instrument_value, filled_cost) + pending_symbol
+                    exposure_with_fees = exposure + fee_budget
+            except DecimalException as exc:
+                raise ValueError("RISK_VETO:UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc
             guard = validate_buy(
                 replace(account, cash=snapshot.available_cash),
                 # Reserve the *new* intent's fee budget against the
                 # instrument cap too. Earlier pending fees and filled fees
                 # are already included in exposure, but this intent's budget
                 # would otherwise be omitted from the 10% limit.
-                replace(proposal, existing_instrument_value=exposure + fee_budget),
+                replace(proposal, existing_instrument_value=exposure_with_fees),
                 expected_session_id=snapshot.session_id, mode="paper",
             )
             if not guard.permitted:
@@ -289,15 +297,22 @@ class OfflineReservations:
                 # A maximum synthetic fee is potential loss at the stop.
                 # The pre-trade guard checks price-to-stop risk alone, so
                 # including this budget prevents a fee-only risk-cap bypass.
-                if ((proposal.price - proposal.stop_price) * proposal.quantity
-                        + fee_budget > account.equity * RISK_FRACTION):
+                try:
+                    with localcontext() as context:
+                        context.traps[Inexact] = True
+                        loss_with_fees = ((proposal.price - proposal.stop_price) *
+                                          proposal.quantity + fee_budget)
+                        maximum_loss = account.equity * RISK_FRACTION
+                        reserve = proposal.quantity * proposal.price + fee_budget
+                except DecimalException as exc:
+                    raise ValueError("RISK_VETO:UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc
+                if loss_with_fees > maximum_loss:
                     raise ValueError("RISK_VETO:TRADE_RISK_EXCEEDED")
                 if proposal.quantity != proposal.quantity.to_integral_value():
                     raise ValueError("FRACTIONAL_SHARES")
                 quantity = int(proposal.quantity)
                 if not _integer_shares(quantity):
                     raise ValueError("INVALID_QUANTITY")
-                reserve = proposal.quantity * proposal.price + fee_budget
                 if reserve > snapshot.available_cash:
                     raise ValueError("INSUFFICIENT_UNRESERVED_CASH")
                 self._db.execute(
