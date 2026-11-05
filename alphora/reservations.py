@@ -225,14 +225,24 @@ class OfflineReservations:
                     or type(account.day_pnl) is not D or not account.day_pnl.is_finite()
                     or type(account.halted) is not bool):
                 raise ValueError("INVALID_ACCOUNT_STATE")
-            day_change = account.equity - INITIAL_EQUITY
             loss_floor = -(INITIAL_EQUITY * DAILY_LOSS_FRACTION)
+            # Compare absolute equity directly with the exact $98k limit
+            # before any subtraction could round a genuine daily loss away.
             if (account.halted or account.day_pnl <= loss_floor
-                    or day_change <= loss_floor):
+                    or account.equity <= INITIAL_EQUITY + loss_floor):
                 self._db.execute("UPDATE book_meta SET value='1' WHERE key='halted'")
                 return self._snapshot()
-            if (account.cash > account.equity
-                    or abs(day_change - account.day_pnl) > D("0.01")):
+            # A finite Decimal can still overflow the active arithmetic
+            # context, or round a near-boundary P&L comparison. Such marks
+            # are not a trustworthy reconciled snapshot: veto fail-closed.
+            try:
+                with localcontext() as context:
+                    context.traps[Inexact] = True
+                    day_change = account.equity - INITIAL_EQUITY
+                    pnl_gap = abs(day_change - account.day_pnl)
+            except DecimalException as exc:
+                raise ValueError("UNREPRESENTABLE_ACCOUNT_MARK") from exc
+            if account.cash > account.equity or pnl_gap > D("0.01"):
                 raise ValueError("INCONSISTENT_ACCOUNT_STATE")
             return snapshot
 
