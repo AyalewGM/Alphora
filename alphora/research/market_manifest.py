@@ -198,6 +198,12 @@ def inspect_market_manifest(manifest: MarketManifest, *,
                        for p in a.symbols) != 1):
             raise ValueError("MISSING_ASSET_HISTORY")
         previous_day = session.day
+    # An artifact claiming to contain all completed daily sessions cannot
+    # have been delivered before its final session closed. A purported early
+    # delivery would falsely make future closing prices available at that time.
+    # This chronological invariant is NOT vendor authentication.
+    if m.delivered_at < m.sessions[-1].closes_at:
+        raise ValueError("PREMATURE_ARTIFACT_DELIVERY")
     if (u.day > m.bar_days[0] or u.available_at >= m.sessions[0].opens_at
             or m.calendar_available_at >= m.sessions[0].opens_at
             or m.as_of < m.sessions[-1].closes_at):
