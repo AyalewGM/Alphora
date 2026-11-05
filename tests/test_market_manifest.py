@@ -84,6 +84,22 @@ class MarketManifestTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "UNAVAILABLE_REVISION"):
             check(replace(m, version_available_at=m.delivered_at + timedelta(seconds=1)))
 
+    def test_complete_daily_artifact_cannot_arrive_before_final_close(self):
+        m = fixture()
+        # Both a source version and a claimed delivery can predate the last
+        # day's completed OHLCV bar while still preceding the as_of cutoff.
+        # Such a receipt is chronologically impossible for a complete file.
+        early_delivery = m.sessions[-1].closes_at - timedelta(minutes=1)
+        candidate = replace(m, version_available_at=m.sessions[0].opens_at,
+                            delivered_at=early_delivery)
+        with self.assertRaisesRegex(ValueError, "PREMATURE_ARTIFACT_DELIVERY"):
+            check(candidate)
+        # An exact final close is the earliest chronologically possible
+        # delivery, but does not authenticate any vendor timing assertion.
+        on_close = replace(candidate, delivered_at=m.sessions[-1].closes_at)
+        self.assertEqual(check(on_close).manifest.delivered_at,
+                         m.sessions[-1].closes_at)
+
     def test_calendar_future_or_naive_rejected(self):
         m = fixture()
         for t in (m.as_of + timedelta(seconds=1), datetime(2025, 11, 25)):
