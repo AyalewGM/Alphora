@@ -4,12 +4,15 @@ This module never contacts a broker. Use Decimal for money calculations.
 """
 from dataclasses import dataclass
 from decimal import Decimal, DecimalException, Inexact, localcontext
+import re
 
 INITIAL_EQUITY = Decimal("100000")
 RISK_FRACTION = Decimal("0.005")
 MAX_INSTRUMENT_FRACTION = Decimal("0.10")
 DAILY_LOSS_FRACTION = Decimal("0.02")
 REBALANCE_FREQUENCY = "daily"
+# Keep the direct risk boundary aligned with the persisted offline book.
+_SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 
 
 @dataclass(frozen=True)
@@ -84,10 +87,7 @@ def validate_buy(
             not proposal.existing_instrument_value.is_finite()
             or proposal.existing_instrument_value < 0):
         return Decision(False, "INVALID_EXISTING_POSITION")
-    if (not isinstance(proposal.symbol, str) or not proposal.symbol
-            or not proposal.symbol.isascii() or not all(
-                c.isupper() or c.isdigit() or c in ".-" for c in proposal.symbol
-            )):
+    if not isinstance(proposal.symbol, str) or not _SYMBOL.fullmatch(proposal.symbol):
         return Decision(False, "INVALID_SYMBOL")
     # Malformed extreme Decimal values can overflow calculations despite
     # passing the finite-input test. Return a deterministic veto, never an
