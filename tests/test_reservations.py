@@ -101,6 +101,41 @@ class OfflineReservationTests(unittest.TestCase):
         self.book = OfflineReservations(self.path, session_id="2026-11-02")
         self.assertEqual(self.book.snapshot(), prior)
 
+    def test_subcent_synthetic_fill_fee_cannot_round_out_of_cash(self):
+        # A one-share $50 fill with a tiny positive fee must never post
+        # as exactly $50 of cash spent due to Decimal context precision.
+        before = self.reserve("micro-fill", self.proposal(qty="1", stop="49"),
+                              fee_budget=D("1"))
+        tiny_fee = D("0.0000000000000000000000000001")
+        with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_LEDGER_ARITHMETIC"):
+            self.book.record_hypothetical_fill("micro-fill", "fill-1", 1, D("50"),
+                                               fee=tiny_fee)
+        self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_replay_rejects_corrupt_fill_with_rounded_away_fee(self):
+        # A forged persisted fill may look cash-balanced under default
+        # Decimal precision even though a positive fee was not deducted.
+        self.reserve("micro-replay", self.proposal(qty="1", stop="49"),
+                     fee_budget=D("1"))
+        self.book.close()
+        tiny_fee = "0.0000000000000000000000000001"
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "INSERT INTO hypothetical_fills(id,intent_id,qty,price,fee) "
+                "VALUES(?,?,?,?,?)",
+                ("forged-fill", "micro-replay", 1, "50", tiny_fee),
+            )
+            db.execute(
+                "UPDATE buy_intents SET filled=1, fees_paid=?, status='FILLED' "
+                "WHERE id='micro-replay'", (tiny_fee,),
+            )
+            db.execute("UPDATE book_meta SET value='99950' WHERE key='cash'")
+        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+            OfflineReservations(self.path, session_id="2026-11-02")
+
     def test_fee_budget_is_included_in_per_trade_planned_loss(self):
         # A fee cap is potential loss in addition to the price-to-stop
         # distance. With 100 shares at 50 and a stop at 48 the initial
