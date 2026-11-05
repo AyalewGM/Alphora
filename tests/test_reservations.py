@@ -223,6 +223,30 @@ class OfflineReservationTests(unittest.TestCase):
         self.assertTrue(self.book.observe_daily_loss(
             self.account(halted=True), reconciled=True).halted)
 
+    def test_daily_loss_observer_rejects_unrepresentable_marks_without_mutation(self):
+        # A finite Decimal can overflow on subtraction. A just-above-limit
+        # equity can instead round to an apparent $2,000 loss at default
+        # precision; neither input may silently mutate the durable halt.
+        before = self.book.snapshot()
+        snapshots = (
+            (D("1e1000000"), D("0")),
+            (D("98000.00000000000000000000000001"),
+             D("-1999.99999999999999999999999999")),
+        )
+        for equity, day_pnl in snapshots:
+            with self.subTest(equity=str(equity)):
+                unrepresentable = self.account(equity=equity, day_pnl=day_pnl)
+                with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_ACCOUNT_MARK"):
+                    self.book.observe_daily_loss(unrepresentable, reconciled=True)
+                with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_ACCOUNT_MARK"):
+                    self.book.reserve_buy("bad-mark", unrepresentable,
+                                          self.proposal(qty="1"), reconciled=True)
+                self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+        self.reserve("valid-after-mark-rejection", self.proposal(qty="1"))
+
     def test_non_loss_risk_veto_does_not_trigger_permanent_halt(self):
         with self.assertRaisesRegex(ValueError, "TRADE_RISK_EXCEEDED"):
             self.reserve("bad", self.proposal(qty="100", stop="44"))
