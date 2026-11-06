@@ -60,6 +60,20 @@ comparisons. This validator does not reconcile fees, slippage, split/dividend
 accounting, Sharpe, out-of-sample windows, session alignment, strategy
 profitability, or deviations between LEAN and the reference simulator.
 
+## Two complete three-leg attempts
+
+`verify_repeated_suite(first_attempt, second_attempt)` combines the existing
+suite and per-leg repeat checks. Each argument must be a tuple containing one
+receipt for each of the three benchmark modes. It rejects missing/duplicated
+legs, differing declared engine/calendar/evaluation windows within an attempt,
+and changed input or output hashes between attempts for **any** leg. It returns
+three stable, mode-keyed receipt fingerprints only when all metadata agree.
+
+**This is not six-run proof:** copies of the same fabricated receipts pass. An
+independent human must witness two actual offline LEAN executions per leg,
+verify command logs/exit status, bind hashes to real off-repository artifacts,
+and reconcile dated financial output before declaring reproducibility.
+
 ## Test / merge boundary
 
 `python -m unittest discover -s tests -v` should pass without network or
