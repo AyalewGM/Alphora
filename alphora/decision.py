@@ -70,6 +70,8 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
     The caller must supply a consistent reconciled snapshot. Proposals do not
     reserve cash atomically; an OMS must recheck and reserve under a transaction.
     """
+    if not isinstance(account, PaperAccount) or not isinstance(candidate, EntryCandidate):
+        return EntryPlan(False, "INVALID_ACCOUNT_OR_CANDIDATE")
     if reconciled is not True:
         return EntryPlan(False, "UNRECONCILED_STATE")
     if not isinstance(candidate.symbol, str) or not candidate.symbol:
@@ -174,6 +176,8 @@ def propose_exit(position: FilledPosition, quote: ExitQuote, *,
     fills may differ. Protective stop has priority over take-profit.
     """
     hold = lambda reason: ExitPlan("HOLD", reason)
+    if not isinstance(position, FilledPosition) or not isinstance(quote, ExitQuote):
+        return hold("INVALID_POSITION_OR_QUOTE")
     if not isinstance(position.position_id, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", position.position_id):
         return hold("INVALID_POSITION_ID")
     if (not position.symbol or not isinstance(position.symbol, str) or
