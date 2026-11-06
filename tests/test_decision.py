@@ -187,5 +187,34 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(self.entry(max_age_seconds=10**9).reason,'INVALID_FRESHNESS_POLICY')
         self.assertEqual(self.exit(max_age_seconds=10**9).reason,'INVALID_FRESHNESS_POLICY')
 
+
+    def test_malformed_planner_snapshots_return_veto_instead_of_crashing(self):
+        entry_args = dict(as_of=self.now, expected_session_id='2026-11-02',
+                          reserved_cash=D(0), reconciled=True)
+        exit_args = dict(as_of=self.now, take_profit_pct=D(3))
+        # Unknown/deserialized shapes must not be dereferenced as trusted
+        # account, candidate, position, or quote objects.
+        for malformed in (None, {}, object()):
+            with self.subTest(kind='entry-account', value=type(malformed).__name__):
+                plan = propose_entry(malformed, self.candidate, **entry_args)
+                self.assertFalse(plan.permitted)
+                self.assertEqual(plan.reason, 'INVALID_ACCOUNT_OR_CANDIDATE')
+                self.assertIsNone(plan.proposal)
+            with self.subTest(kind='entry-candidate', value=type(malformed).__name__):
+                plan = propose_entry(self.account, malformed, **entry_args)
+                self.assertFalse(plan.permitted)
+                self.assertEqual(plan.reason, 'INVALID_ACCOUNT_OR_CANDIDATE')
+                self.assertIsNone(plan.proposal)
+            with self.subTest(kind='exit-position', value=type(malformed).__name__):
+                plan = propose_exit(malformed, self.quote, **exit_args)
+                self.assertEqual(plan.action, 'HOLD')
+                self.assertEqual(plan.reason, 'INVALID_POSITION_OR_QUOTE')
+                self.assertIsNone(plan.intent_key)
+            with self.subTest(kind='exit-quote', value=type(malformed).__name__):
+                plan = propose_exit(self.position, malformed, **exit_args)
+                self.assertEqual(plan.action, 'HOLD')
+                self.assertEqual(plan.reason, 'INVALID_POSITION_OR_QUOTE')
+                self.assertIsNone(plan.intent_key)
+
 if __name__ == '__main__':
     unittest.main()
