@@ -122,3 +122,21 @@ def verify_suite(receipts: tuple[LeanBacktestReceipt, ...]) -> dict[str, str]:
            for receipt in by_mode.values() for field in _SUITE_ALIGNMENT_FIELDS):
         raise ValueError("LEAN_BENCHMARK_METADATA_MISMATCH")
     return {mode: receipt_fingerprint(by_mode[mode]) for mode in sorted(_MODES)}
+
+
+def verify_repeated_suite(
+    first_attempt: tuple[LeanBacktestReceipt, ...],
+    second_attempt: tuple[LeanBacktestReceipt, ...],
+) -> dict[str, str]:
+    """Reject incomplete or inconsistent metadata across two three-leg attempts.
+
+    This checks six caller-supplied receipts, not whether six separate LEAN
+    runs occurred. Independent off-repository logs and hash binding are required.
+    """
+    fingerprints = verify_suite(first_attempt)
+    verify_suite(second_attempt)
+    first_by_mode = {receipt.benchmark_mode: receipt for receipt in first_attempt}
+    second_by_mode = {receipt.benchmark_mode: receipt for receipt in second_attempt}
+    for mode in sorted(_MODES):
+        verify_repeat(first_by_mode[mode], second_by_mode[mode])
+    return fingerprints
