@@ -40,6 +40,21 @@ output. LEAN outputs with run-specific timestamps may require independently
 specified deterministic normalization **before** hashing; do not silently
 accept or conceal a mismatch.
 
+## Cross-leg metadata preflight
+
+After obtaining one independently recorded receipt for each of the three legs,
+`verify_suite((strategy, full_spy, capped_spy))` rejects missing or duplicated
+legs and differing **declared** start/end sessions, calendar digests, LEAN CLI
+versions or engine image digests. It returns a per-leg metadata fingerprint,
+not an acceptance verdict. Algorithm, dataset, settings, and corporate-action
+hashes may differ for legitimate distinct strategies and benchmark exposure
+conventions; do not treat this preflight as proof of data equivalence.
+
+An independent reviewer **must still inspect actual dated output rows**, SPY
+price/total-return normalization, data coverage, fees, cash, dividends and
+corporate actions for all three legs. Identical calendar hashes or claimed
+session dates do not prove the output bars align or that LEAN executed.
+
 The two SPY exposure legs require distinct benchmark receipts and financial
 comparisons. This validator does not reconcile fees, slippage, split/dividend
 accounting, Sharpe, out-of-sample windows, session alignment, strategy

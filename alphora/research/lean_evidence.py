@@ -92,3 +92,33 @@ def verify_repeat(first: LeanBacktestReceipt, second: LeanBacktestReceipt) -> st
     if first.output_sha256 != second.output_sha256:
         raise ValueError("LEAN_RUN_OUTPUT_MISMATCH")
     return receipt_fingerprint(first)
+
+
+_SUITE_ALIGNMENT_FIELDS = (
+    "start_session", "end_session", "calendar_sha256",
+    "cli_version", "engine_image_digest",
+)
+
+
+def verify_suite(receipts: tuple[LeanBacktestReceipt, ...]) -> dict[str, str]:
+    """Check attested dates, calendar and engine identity across all three legs.
+
+    This is a metadata-only preflight, NOT verification that the legs actually
+    ran on identical sessions, market data, or financial accounting conventions.
+    Different strategy/benchmark inputs may legitimately have different hashes.
+    """
+    if type(receipts) is not tuple or len(receipts) != len(_MODES):
+        raise ValueError("INCOMPLETE_LEAN_BENCHMARK_SUITE")
+    by_mode = {}
+    for receipt in receipts:
+        validate_receipt(receipt)
+        if receipt.benchmark_mode in by_mode:
+            raise ValueError("INCOMPLETE_LEAN_BENCHMARK_SUITE")
+        by_mode[receipt.benchmark_mode] = receipt
+    if set(by_mode) != _MODES:
+        raise ValueError("INCOMPLETE_LEAN_BENCHMARK_SUITE")
+    reference = by_mode["strategy"]
+    if any(getattr(receipt, field) != getattr(reference, field)
+           for receipt in by_mode.values() for field in _SUITE_ALIGNMENT_FIELDS):
+        raise ValueError("LEAN_BENCHMARK_METADATA_MISMATCH")
+    return {mode: receipt_fingerprint(by_mode[mode]) for mode in sorted(_MODES)}

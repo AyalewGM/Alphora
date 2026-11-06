@@ -6,6 +6,7 @@ import unittest
 
 from alphora.research.lean_evidence import (
     LeanBacktestReceipt, receipt_fingerprint, validate_receipt, verify_repeat,
+    verify_suite,
 )
 
 
@@ -78,6 +79,39 @@ class LeanEvidenceTests(unittest.TestCase):
         for other in (None, {}, "fake", object()):
             with self.subTest(other=type(other)), self.assertRaisesRegex(ValueError, "INVALID_LEAN_RECEIPT"):
                 verify_repeat(self.r, other)
+
+    def test_suite_requires_three_distinct_legs(self):
+        strategy = replace(self.r, benchmark_mode="strategy")
+        full = replace(self.r, benchmark_mode="spy-fully-invested-total-return")
+        modes = verify_suite((strategy, full, self.r))
+        self.assertEqual(set(modes), {"strategy", "spy-fully-invested-total-return", "spy-10pct-and-cash"})
+        self.assertEqual(modes, verify_suite((self.r, strategy, full)))
+        for invalid in ((strategy, full), (strategy, strategy, self.r),
+                        [strategy, full, self.r], (strategy, full, None)):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                verify_suite(invalid)
+
+    def test_suite_fails_closed_on_declared_calendar_window_engine_mismatch(self):
+        strategy = replace(self.r, benchmark_mode="strategy")
+        full = replace(self.r, benchmark_mode="spy-fully-invested-total-return")
+        for field, value in (
+            ("start_session", date(2025, 1, 3)),
+            ("end_session", date(2025, 4, 2)),
+            ("calendar_sha256", "9" * 64),
+            ("cli_version", "1.2.4"),
+            ("engine_image_digest", "sha256:" + "9" * 64),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(
+                    ValueError, "LEAN_BENCHMARK_METADATA_MISMATCH"):
+                verify_suite((strategy, replace(full, **{field: value}), self.r))
+
+    def test_suite_permits_different_algorithm_and_settings_receipts(self):
+        strategy = replace(self.r, benchmark_mode="strategy", data_sha256="8" * 64)
+        full = replace(self.r, benchmark_mode="spy-fully-invested-total-return",
+                       algorithm_sha256="9" * 64, settings_sha256="7" * 64)
+        suite = verify_suite((strategy, full, self.r))
+        self.assertNotEqual(suite["strategy"], suite["spy-fully-invested-total-return"])
+
 
 
 if __name__ == "__main__":
