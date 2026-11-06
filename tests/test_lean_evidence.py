@@ -6,7 +6,7 @@ import unittest
 
 from alphora.research.lean_evidence import (
     LeanBacktestReceipt, receipt_fingerprint, validate_receipt, verify_repeat,
-    verify_suite,
+    verify_suite, verify_repeated_suite,
 )
 
 
@@ -113,6 +113,35 @@ class LeanEvidenceTests(unittest.TestCase):
         self.assertNotEqual(suite["strategy"], suite["spy-fully-invested-total-return"])
 
 
+
+    def test_repeated_suite_accepts_two_complete_matching_attestations(self):
+        strategy = replace(self.r, benchmark_mode="strategy", algorithm_sha256="a" * 64)
+        full = replace(self.r, benchmark_mode="spy-fully-invested-total-return",
+                       algorithm_sha256="9" * 64)
+        first = (strategy, full, self.r)
+        second = (replace(self.r), replace(strategy), replace(full))
+        self.assertEqual(verify_repeated_suite(first, second), verify_suite(first))
+
+    def test_repeated_suite_rejects_missing_or_duplicate_legs(self):
+        strategy = replace(self.r, benchmark_mode="strategy")
+        full = replace(self.r, benchmark_mode="spy-fully-invested-total-return")
+        first = (strategy, full, self.r)
+        for incomplete in ((strategy, full), (strategy, strategy, self.r),
+                           (strategy, full, None), [strategy, full, self.r]):
+            with self.subTest(attempt=incomplete), self.assertRaises(ValueError):
+                verify_repeated_suite(first, incomplete)
+
+    def test_repeated_suite_rejects_output_and_input_changes_for_any_leg(self):
+        strategy = replace(self.r, benchmark_mode="strategy")
+        full = replace(self.r, benchmark_mode="spy-fully-invested-total-return")
+        first = (strategy, full, self.r)
+        for field, value, error in (
+            ("output_sha256", "7" * 64, "LEAN_RUN_OUTPUT_MISMATCH"),
+            ("data_sha256", "8" * 64, "LEAN_RUN_INPUT_MISMATCH"),
+            ("settings_sha256", "9" * 64, "LEAN_RUN_INPUT_MISMATCH"),
+        ):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, error):
+                verify_repeated_suite(first, (strategy, replace(full, **{field: value}), self.r))
 
 if __name__ == "__main__":
     unittest.main()
