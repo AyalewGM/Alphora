@@ -152,6 +152,37 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(self.exit(quote=replace(self.quote,regular_session_verified=False)).action,'HOLD')
 
 
+    def test_planner_rejects_untyped_snapshots(self):
+        # The existing offline planner guards must veto all four top-level
+        # boundaries, not only missing accounts/positions. These are not
+        # broker orders and must not produce executable intent identifiers.
+        entry_args = dict(as_of=self.now, expected_session_id='2026-11-02',
+                          reserved_cash=D(0), reconciled=True)
+        exit_args = dict(as_of=self.now, take_profit_pct=D(3))
+        for malformed in (None, {}, object()):
+            with self.subTest(boundary='entry-account', kind=type(malformed).__name__):
+                plan = propose_entry(malformed, self.candidate, **entry_args)
+                self.assertFalse(plan.permitted)
+                self.assertEqual(plan.reason, 'INVALID_ACCOUNT_OR_ORDER')
+                self.assertIsNone(plan.proposal)
+                self.assertIsNone(plan.intent_key)
+            with self.subTest(boundary='entry-candidate', kind=type(malformed).__name__):
+                plan = propose_entry(self.account, malformed, **entry_args)
+                self.assertFalse(plan.permitted)
+                self.assertEqual(plan.reason, 'INVALID_ACCOUNT_OR_ORDER')
+                self.assertIsNone(plan.proposal)
+                self.assertIsNone(plan.intent_key)
+            with self.subTest(boundary='exit-position', kind=type(malformed).__name__):
+                plan = propose_exit(malformed, self.quote, **exit_args)
+                self.assertEqual(plan.action, 'HOLD')
+                self.assertEqual(plan.reason, 'INVALID_POSITION_OR_QUOTE')
+                self.assertIsNone(plan.intent_key)
+            with self.subTest(boundary='exit-quote', kind=type(malformed).__name__):
+                plan = propose_exit(self.position, malformed, **exit_args)
+                self.assertEqual(plan.action, 'HOLD')
+                self.assertEqual(plan.reason, 'INVALID_POSITION_OR_QUOTE')
+                self.assertIsNone(plan.intent_key)
+
     def test_entry_extreme_decimal_fails_closed_without_exception(self):
         huge = D('1e1000000')
         snapshot = replace(self.account, equity=huge, session_open_equity=huge, cash=huge)
