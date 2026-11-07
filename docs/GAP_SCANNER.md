@@ -30,6 +30,10 @@ or paper-order eligibility. Its sample data in tests are entirely synthetic.
 - Only NYSE/Nasdaq common shares are eligible for WATCHLIST. IEX-only
   coverage produces CAUTION; unknown source/unsupported listings excluded.
   SIP/full-market entitlements and data licensing must be separately verified.
+- Extreme but finite Decimal values that overflow the local arithmetic context
+  fail closed with explicit price, spread, or dollar-volume arithmetic reasons;
+  malformed market data must not crash an entire batch or become a top-ranked
+  symbol. Synthetic tests cover these pathological inputs.
 - The caller must attest to session-calendar validation and consistent
   corporate-action treatment. Only literal boolean True is accepted; other
   truthy values are excluded. The caller must also supply the exact verified
