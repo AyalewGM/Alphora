@@ -5,7 +5,7 @@ All inputs must be assembled from point-in-time vendor records by a future adapt
 """
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal as D, DecimalException
+from decimal import Decimal as D, DecimalException, ROUND_FLOOR, localcontext
 import re
 from zoneinfo import ZoneInfo
 
@@ -127,12 +127,19 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
     else:
         try:
             gap = (candidate.reference_price / candidate.previous_close - 1) * 100
+            # A rounded gap can equal a threshold even when the true ratio
+            # falls just below it; enforce a conservative lower bound.
+            with localcontext() as ctx:
+                ctx.rounding = ROUND_FLOOR
+                minimum_gap_bound = (
+                    candidate.reference_price / candidate.previous_close - 1
+                ) * 100
         except DecimalException:
             _append_once(excluded, "INVALID_PRICE_ARITHMETIC")
         else:
             if candidate.reference_price < policy.min_price:
                 _append_once(excluded, "PRICE_BELOW_MINIMUM")
-            if gap < policy.min_gap_pct:
+            if minimum_gap_bound < policy.min_gap_pct:
                 _append_once(excluded, "GAP_BELOW_MINIMUM")
             if gap >= policy.extreme_gap_pct:
                 _append_once(caution, "EXTREME_GAP_REVIEW")
@@ -198,10 +205,17 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
         else:
             try:
                 rvol = D(observed) / D(candidate.same_time_baseline_volume)
+                # Avoid promoting below-threshold comparable volume when the
+                # ordinary precision rounds its ratio up to the cutoff.
+                with localcontext() as ctx:
+                    ctx.rounding = ROUND_FLOOR
+                    minimum_rvol_bound = D(observed) / D(
+                        candidate.same_time_baseline_volume
+                    )
             except DecimalException:
                 _append_once(excluded, "INVALID_RVOL_ARITHMETIC")
             else:
-                if rvol < policy.min_rvol:
+                if minimum_rvol_bound < policy.min_rvol:
                     _append_once(excluded, "LOW_SAME_TIME_RVOL")
 
     if not (_positive(candidate.bid) and _positive(candidate.ask)
