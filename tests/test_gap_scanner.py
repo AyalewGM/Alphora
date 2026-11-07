@@ -224,6 +224,35 @@ class ScannerTests(unittest.TestCase):
                          on_boundary.symbol)
 
 
+    def test_source_identifier_requires_nonblank_text(self):
+        for source in ("", "  ", None, 42):
+            with self.subTest(source=source):
+                result = screen_one(fixture(source=source))
+                self.assertEqual(result.classification, "EXCLUDED")
+                self.assertIn("MISSING_MARKET_PROVENANCE", result.reasons)
+
+    def test_unknown_reversal_or_dilution_evidence_is_not_clean(self):
+        for field, reason in (
+            ("reversal_signal", "REVERSAL_EVIDENCE_UNKNOWN"),
+            ("dilution_signal", "DILUTION_EVIDENCE_UNKNOWN"),
+        ):
+            for value in (None, 0, "false"):
+                with self.subTest(field=field, value=value):
+                    result = screen_one(fixture(**{field: value}))
+                    self.assertEqual(result.classification, "CAUTION")
+                    self.assertIn(reason, result.reasons)
+
+        for field, reason in (
+            ("reversal_signal", "SHARP_REVERSAL_FLAG"),
+            ("dilution_signal", "RECENT_DILUTION_FLAG"),
+        ):
+            with self.subTest(field=field, value=True):
+                result = screen_one(fixture(**{field: True}))
+                self.assertEqual(result.classification, "CAUTION")
+                self.assertIn(reason, result.reasons)
+            self.assertEqual(screen_one(fixture(**{field: False})).classification,
+                             "WATCHLIST")
+
     def test_spread_just_above_limit_cannot_round_into_watchlist(self):
         # The true spread exceeds 1%, but normal Decimal precision rounds
         # the displayed ratio to precisely 1%, falsely permitting a watchlist.
