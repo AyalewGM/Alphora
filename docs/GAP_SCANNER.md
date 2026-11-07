@@ -37,8 +37,11 @@ or paper-order eligibility. Its sample data in tests are entirely synthetic.
 - At the gap and same-time RVOL minimums, eligibility uses a conservatively
   rounded-down Decimal bound, not the ordinary rounded display value. Values
   just below a policy threshold must remain EXCLUDED even when 28-digit
-  half-even rounding prints the cutoff itself. Displayed ratios are for
-  research only and are not precise financial acceptance evidence.
+  half-even rounding prints the cutoff itself. Conversely, the maximum quoted
+  spread is tested with a conservative upper bound (rounded-up numerator and
+  rounded-down denominator), so a spread just above 1% cannot be rounded down
+  to the cap and admitted. Exact boundary values remain valid. Displayed
+  ratios are for research only and are not precise financial acceptance evidence.
 - The caller must attest to session-calendar validation and consistent
   corporate-action treatment. Only literal boolean True is accepted; other
   truthy values are excluded. The caller must also supply the exact verified
