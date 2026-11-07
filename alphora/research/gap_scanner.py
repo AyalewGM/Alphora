@@ -5,7 +5,7 @@ All inputs must be assembled from point-in-time vendor records by a future adapt
 """
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal as D
+from decimal import Decimal as D, DecimalException
 import re
 from zoneinfo import ZoneInfo
 
@@ -125,13 +125,17 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
     if not (_positive(candidate.previous_close) and _positive(candidate.reference_price)):
         _append_once(excluded, "INVALID_PRICE")
     else:
-        gap = (candidate.reference_price / candidate.previous_close - 1) * 100
-        if candidate.reference_price < policy.min_price:
-            _append_once(excluded, "PRICE_BELOW_MINIMUM")
-        if gap < policy.min_gap_pct:
-            _append_once(excluded, "GAP_BELOW_MINIMUM")
-        if gap >= policy.extreme_gap_pct:
-            _append_once(caution, "EXTREME_GAP_REVIEW")
+        try:
+            gap = (candidate.reference_price / candidate.previous_close - 1) * 100
+        except DecimalException:
+            _append_once(excluded, "INVALID_PRICE_ARITHMETIC")
+        else:
+            if candidate.reference_price < policy.min_price:
+                _append_once(excluded, "PRICE_BELOW_MINIMUM")
+            if gap < policy.min_gap_pct:
+                _append_once(excluded, "GAP_BELOW_MINIMUM")
+            if gap >= policy.extreme_gap_pct:
+                _append_once(caution, "EXTREME_GAP_REVIEW")
 
     if (not _timestamp(candidate.as_of) or not _timestamp(candidate.reference_price_at)
             or not _timestamp(candidate.previous_close_at)
@@ -173,6 +177,13 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
     if (not _positive(candidate.avg_daily_dollar_volume20)
             or candidate.avg_daily_dollar_volume20 < policy.min_avg_daily_dollar_volume):
         _append_once(excluded, "LOW_OR_INVALID_DOLLAR_VOLUME")
+    else:
+        # A finite Decimal can exceed the active arithmetic context and
+        # crash batch ranking when its descending sort key is negated.
+        try:
+            -candidate.avg_daily_dollar_volume20
+        except DecimalException:
+            _append_once(excluded, "INVALID_DOLLAR_VOLUME_ARITHMETIC")
     if (not _whole_nonnegative(candidate.premarket_volume)
             or not _whole_nonnegative(candidate.regular_cumulative_volume)):
         _append_once(excluded, "INVALID_SESSION_VOLUME")
@@ -185,9 +196,13 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
                 or candidate.same_time_baseline_volume <= 0):
             _append_once(caution, "MISSING_SAME_TIME_BASELINE")
         else:
-            rvol = D(observed) / D(candidate.same_time_baseline_volume)
-            if rvol < policy.min_rvol:
-                _append_once(excluded, "LOW_SAME_TIME_RVOL")
+            try:
+                rvol = D(observed) / D(candidate.same_time_baseline_volume)
+            except DecimalException:
+                _append_once(excluded, "INVALID_RVOL_ARITHMETIC")
+            else:
+                if rvol < policy.min_rvol:
+                    _append_once(excluded, "LOW_SAME_TIME_RVOL")
 
     if not (_positive(candidate.bid) and _positive(candidate.ask)
             and candidate.bid <= candidate.ask and _timestamp(candidate.quote_at)):
@@ -197,9 +212,13 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
             age = candidate.as_of - candidate.quote_at
             if age < timedelta(0) or age > timedelta(seconds=policy.max_quote_age_seconds):
                 _append_once(excluded, "STALE_OR_FUTURE_QUOTE")
-        spread = (candidate.ask - candidate.bid) * 200 / (candidate.ask + candidate.bid)
-        if spread > policy.max_spread_pct:
-            _append_once(excluded, "WIDE_SPREAD")
+        try:
+            spread = (candidate.ask - candidate.bid) * 200 / (candidate.ask + candidate.bid)
+        except DecimalException:
+            _append_once(excluded, "INVALID_SPREAD_ARITHMETIC")
+        else:
+            if spread > policy.max_spread_pct:
+                _append_once(excluded, "WIDE_SPREAD")
 
     if candidate.credible_catalyst_at is None:
         _append_once(caution, "NO_VERIFIED_CATALYST")
@@ -237,10 +256,19 @@ def scan(candidates: list[GapCandidate], policy: ScannerPolicy = ScannerPolicy()
     """
     results = [(screen_one(candidate, policy), candidate) for candidate in candidates]
     priority = {"WATCHLIST": 0, "CAUTION": 1, "EXCLUDED": 2}
+
+    def descending_dollar_volume(value):
+        if not _positive(value):
+            return D(0)
+        try:
+            return -value
+        except DecimalException:
+            # screen_one has already excluded unrepresentable amounts.
+            return D(0)
+
     results.sort(key=lambda item: (
         priority[item[0].classification],
-        -item[1].avg_daily_dollar_volume20
-            if _positive(item[1].avg_daily_dollar_volume20) else D(0),
+        descending_dollar_volume(item[1].avg_daily_dollar_volume20),
         -(item[0].rvol or D(0)),
         str(item[0].symbol),
     ))
