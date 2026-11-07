@@ -224,5 +224,28 @@ class ScannerTests(unittest.TestCase):
                          on_boundary.symbol)
 
 
+    def test_spread_just_above_limit_cannot_round_into_watchlist(self):
+        # The true spread exceeds 1%, but normal Decimal precision rounds
+        # the displayed ratio to precisely 1%, falsely permitting a watchlist.
+        above = fixture(
+            previous_close=D("200"), reference_price=D("206"),
+            bid=D("199"), ask=D("201." + "0" * 27 + "1"),
+        )
+        self.assertEqual(
+            (above.ask - above.bid) * 200 / (above.ask + above.bid), D("1")
+        )
+        result = screen_one(above)
+        self.assertEqual(result.classification, "EXCLUDED")
+        self.assertIn("WIDE_SPREAD", result.reasons)
+
+        # Exact 1% remains eligible: conservative upper-bound arithmetic
+        # must not invent an exclusion at the actual limit.
+        exact = replace(above, ask=D("201"))
+        self.assertEqual(screen_one(exact).classification, "WATCHLIST")
+        self.assertEqual(
+            scan([above, exact])[0].classification, "WATCHLIST"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
