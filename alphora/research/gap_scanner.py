@@ -5,7 +5,7 @@ All inputs must be assembled from point-in-time vendor records by a future adapt
 """
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal as D, DecimalException, ROUND_FLOOR, localcontext
+from decimal import Decimal as D, DecimalException, ROUND_CEILING, ROUND_FLOOR, localcontext
 import re
 from zoneinfo import ZoneInfo
 
@@ -228,10 +228,22 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
                 _append_once(excluded, "STALE_OR_FUTURE_QUOTE")
         try:
             spread = (candidate.ask - candidate.bid) * 200 / (candidate.ask + candidate.bid)
+            # A near-limit spread can round down to the maximum. For the
+            # eligibility veto use an upper bound: numerator rounded up,
+            # denominator rounded down, and quotient rounded up.
+            with localcontext() as ctx:
+                ctx.rounding = ROUND_CEILING
+                numerator_upper = (candidate.ask - candidate.bid) * 200
+            with localcontext() as ctx:
+                ctx.rounding = ROUND_FLOOR
+                denominator_lower = candidate.ask + candidate.bid
+            with localcontext() as ctx:
+                ctx.rounding = ROUND_CEILING
+                maximum_spread_bound = numerator_upper / denominator_lower
         except DecimalException:
             _append_once(excluded, "INVALID_SPREAD_ARITHMETIC")
         else:
-            if spread > policy.max_spread_pct:
+            if maximum_spread_bound > policy.max_spread_pct:
                 _append_once(excluded, "WIDE_SPREAD")
 
     if candidate.credible_catalyst_at is None:
