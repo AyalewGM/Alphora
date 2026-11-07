@@ -56,6 +56,12 @@ or paper-order eligibility. Its sample data in tests are entirely synthetic.
   activity flag excludes from the top watchlist; it is **not** a factual legal
   determination that manipulation occurred.
 
+- Market source identifiers must be nonblank strings; whitespace or nontext
+  values do not count as provenance. Reversal and dilution evidence must be
+  literal booleans: a missing/nonboolean value yields CAUTION, never a clean
+  WATCHLIST signal. A true risk signal remains a caution flag. This protects
+  against falsey vendor placeholders being misread as investigated negatives.
+
 ## Implementation boundaries and pending work
 
 1. Add point-in-time vendor adapters with record provenance, SIP entitlements,
