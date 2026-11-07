@@ -113,7 +113,8 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
         _append_once(excluded, "UNSUPPORTED_SECURITY")
     if candidate.session not in ("PREMARKET", "OPEN"):
         _append_once(excluded, "UNSUPPORTED_SESSION")
-    if not candidate.source or candidate.feed not in ("SIP", "IEX"):
+    if (not isinstance(candidate.source, str) or not candidate.source.strip()
+            or candidate.feed not in ("SIP", "IEX")):
         _append_once(excluded, "MISSING_MARKET_PROVENANCE")
     elif candidate.feed != "SIP":
         _append_once(caution, "NON_CONSOLIDATED_FEED")
@@ -265,9 +266,13 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
         _append_once(excluded, "INVALID_FREE_FLOAT")
     elif candidate.free_float_shares < policy.small_float_shares:
         _append_once(caution, "SMALL_FREE_FLOAT")
-    if candidate.reversal_signal:
+    if type(candidate.reversal_signal) is not bool:
+        _append_once(caution, "REVERSAL_EVIDENCE_UNKNOWN")
+    elif candidate.reversal_signal:
         _append_once(caution, "SHARP_REVERSAL_FLAG")
-    if candidate.dilution_signal:
+    if type(candidate.dilution_signal) is not bool:
+        _append_once(caution, "DILUTION_EVIDENCE_UNKNOWN")
+    elif candidate.dilution_signal:
         _append_once(caution, "RECENT_DILUTION_FLAG")
 
     status = "EXCLUDED" if excluded else "CAUTION" if caution else "WATCHLIST"
