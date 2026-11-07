@@ -168,6 +168,25 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(all(x.classification=='EXCLUDED' for x in scan(items)))
 
 
+    def test_extreme_finite_decimal_inputs_fail_closed_without_batch_crash(self):
+        # Decimal.is_finite() is not sufficient for arithmetic safety:
+        # values beyond the active context can raise decimal.Overflow.
+        cases = (
+            ({"previous_close": D("1e-999999999")}, "INVALID_PRICE_ARITHMETIC"),
+            ({"ask": D("1e999999999")}, "INVALID_SPREAD_ARITHMETIC"),
+            ({"avg_daily_dollar_volume20": D("1e999999999")},
+             "INVALID_DOLLAR_VOLUME_ARITHMETIC"),
+        )
+        for changes, reason in cases:
+            with self.subTest(reason=reason):
+                result = screen_one(fixture(**changes))
+                self.assertEqual(result.classification, "EXCLUDED")
+                self.assertIn(reason, result.reasons)
+                self.assertEqual(
+                    scan([fixture(symbol="SAFE"), fixture(symbol="BAD", **changes)])[0].symbol,
+                    "SAFE",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
