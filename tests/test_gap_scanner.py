@@ -188,5 +188,41 @@ class ScannerTests(unittest.TestCase):
                 )
 
 
+    def test_decimal_rounding_cannot_promote_below_threshold_candidates(self):
+        # With default Decimal precision, ordinary half-even rounding makes
+        # the 2.999...% gap appear exactly 3% and wrongly pass the minimum.
+        below_gap = fixture(reference_price=D("10.299999999999999999999999999"))
+        self.assertEqual(
+            (below_gap.reference_price / below_gap.previous_close - 1) * 100, D("3")
+        )
+        result = screen_one(below_gap)
+        self.assertEqual(result.classification, "EXCLUDED")
+        self.assertIn("GAP_BELOW_MINIMUM", result.reasons)
+
+        # Extremely large, integer-only but untrusted feed volumes can also
+        # round a true sub-2x RVOL to exactly 2x without a Decimal exception.
+        baseline = 10 ** 34
+        below_rvol = fixture(
+            premarket_volume=2 * baseline - 1,
+            same_time_baseline_volume=baseline,
+        )
+        self.assertEqual(
+            D(below_rvol.premarket_volume) / D(below_rvol.same_time_baseline_volume),
+            D("2"),
+        )
+        result = screen_one(below_rvol)
+        self.assertEqual(result.classification, "EXCLUDED")
+        self.assertIn("LOW_SAME_TIME_RVOL", result.reasons)
+
+        # Exactly on the policy boundary must still pass.
+        on_boundary = fixture(
+            reference_price=D("10.30"), premarket_volume=300_000,
+            same_time_baseline_volume=150_000,
+        )
+        self.assertEqual(screen_one(on_boundary).classification, "WATCHLIST")
+        self.assertEqual(scan([below_gap, below_rvol, on_boundary])[0].symbol,
+                         on_boundary.symbol)
+
+
 if __name__ == "__main__":
     unittest.main()
