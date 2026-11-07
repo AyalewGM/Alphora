@@ -34,6 +34,11 @@ or paper-order eligibility. Its sample data in tests are entirely synthetic.
   fail closed with explicit price, spread, or dollar-volume arithmetic reasons;
   malformed market data must not crash an entire batch or become a top-ranked
   symbol. Synthetic tests cover these pathological inputs.
+- At the gap and same-time RVOL minimums, eligibility uses a conservatively
+  rounded-down Decimal bound, not the ordinary rounded display value. Values
+  just below a policy threshold must remain EXCLUDED even when 28-digit
+  half-even rounding prints the cutoff itself. Displayed ratios are for
+  research only and are not precise financial acceptance evidence.
 - The caller must attest to session-calendar validation and consistent
   corporate-action treatment. Only literal boolean True is accepted; other
   truthy values are excluded. The caller must also supply the exact verified
