@@ -137,6 +137,13 @@ must pin code SHA, environment lock, and independent vendor source receipts.
 
 ## Critical limitations
 
+- Next-open fills consume the same day's opening-price field, while the
+  currently supplied version receipts attest subsequent full-day records
+  (often at 16:00). The prior-close signal boundary does **not**
+  independently prove that the opening quote itself was immutable or
+  available at 09:30; a later same-day restatement could affect the
+  simulated fill price. Independently pin opening-auction/quote versions
+  before claiming point-in-time next-open fill correctness.
 - All first-seen and revision timestamps are **caller-supplied claims**; a
   reproducible SHA-256 is not a signature or proof of authentic vendor arrival.
   Pin hashes from independently stored vendor receipts before use.
