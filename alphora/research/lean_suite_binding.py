@@ -92,10 +92,21 @@ def bind_repeated_local_lean_suites(
     ):
         by_mode = {}
         for receipt, root, mapping in zip(receipts, dirs, names):
+            # Identity checks at preflight alone cannot detect replacing a
+            # root path after that check with a byte-identical directory.
+            # Refuse a replaced root immediately before and after binding.
+            # This reduces accidental/replayed run aliasing; it is NOT an
+            # atomic snapshot or proof that LEAN ran.
+            expected_identity = identities[len(attempts) * len(_MODES)
+                                           + len(by_mode)]
+            if _root_identity(root) != expected_identity:
+                raise ValueError("SUITE_ARTIFACT_DIRECTORY_CHANGED")
             binding: LocalArtifactBinding = bind_local_lean_artifacts(
                 receipt, root=root, filenames=mapping,
                 max_file_bytes=max_file_bytes,
             )
+            if _root_identity(root) != expected_identity:
+                raise ValueError("SUITE_ARTIFACT_DIRECTORY_CHANGED")
             by_mode[receipt.benchmark_mode] = binding.binding_sha256
         attempts.append(tuple((mode, by_mode[mode]) for mode in _MODES))
 
