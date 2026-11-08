@@ -188,6 +188,18 @@ class ScannerTests(unittest.TestCase):
                 )
 
 
+    def test_rvol_arithmetic_overflow_is_excluded(self):
+        # A finite integer feed volume can overflow a constrained Decimal
+        # context when computing same-time relative volume. Fail closed.
+        from decimal import localcontext
+        with localcontext() as context:
+            context.Emax = 9
+            result = screen_one(fixture(
+                premarket_volume=10 ** 12, same_time_baseline_volume=1
+            ))
+            self.assertEqual(result.classification, "EXCLUDED")
+            self.assertIn("INVALID_RVOL_ARITHMETIC", result.reasons)
+
     def test_decimal_rounding_cannot_promote_below_threshold_candidates(self):
         # With default Decimal precision, ordinary half-even rounding makes
         # the 2.999...% gap appear exactly 3% and wrongly pass the minimum.
