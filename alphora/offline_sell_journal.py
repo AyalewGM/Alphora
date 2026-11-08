@@ -12,6 +12,7 @@ import sqlite3
 from .offline_exit_projection import (
     PositionCost, SyntheticSellReceipt, project_synthetic_sells,
 )
+from .reservations import PaperBookSnapshot
 
 
 class OfflineSellJournal:
@@ -61,6 +62,39 @@ class OfflineSellJournal:
         except BaseException:
             self._db.close()
             raise
+
+    @classmethod
+    def from_buy_snapshot(cls, path, snapshot: PaperBookSnapshot, *,
+                          reconciled: bool = False):
+        """Seed a synthetic SELL replay from a fully settled offline BUY book.
+
+        Explicit reconciliation is caller asserted, never authenticated here.
+        This one-time *copy* is not an atomic transition between SQLite books.
+        Reject pending orders and a halted session: no unattended continuation
+        of buying/selling can be inferred from a partial or stopped book.
+        """
+        if (reconciled is not True
+                or not isinstance(snapshot, PaperBookSnapshot)
+                or type(snapshot.halted) is not bool or snapshot.halted
+                or not isinstance(snapshot.positions, tuple)
+                or snapshot.pending != ()
+                or type(snapshot.reserved_cash) is not D
+                or snapshot.reserved_cash != D(0)
+                or type(snapshot.cash) is not D
+                or type(snapshot.available_cash) is not D
+                or snapshot.available_cash != snapshot.cash):
+            raise ValueError("UNRECONCILED_BUY_BOOK")
+        try:
+            positions = tuple(PositionCost(symbol, shares, basis)
+                              for symbol, shares, basis in snapshot.positions)
+            # The projection validates session formatting, cent values,
+            # shares, duplicate symbols and total original $100k basis.
+            project_synthetic_sells(snapshot.session_id, snapshot.cash,
+                                    positions, ())
+        except (ValueError, TypeError, ArithmeticError) as exc:
+            raise ValueError("UNRECONCILED_BUY_BOOK") from exc
+        return cls(path, session_id=snapshot.session_id,
+                   opening_cash=snapshot.cash, opening_positions=positions)
 
     @contextmanager
     def _transaction(self):
