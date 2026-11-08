@@ -79,3 +79,27 @@ PRs #17 (offline replay), #19 (loader guards), #21 (manifest) and #26
 without independent qualified human financial and QA acceptance and
 current-head checks. No broker connections, paper orders, deployed
 services, real-money or automated merge.
+
+## Repeated three-leg suite binding (offline-only extension)
+
+`lean_suite_binding.bind_repeated_local_lean_suites(...)` composes the
+existing six-receipt metadata check with all **48** local file hash
+verifications (two attempts × three legs × eight artifacts). Supply
+`first_attempt` and `second_attempt` tuples of three matching receipt
+records each, and `roots` and `filenames` as two corresponding
+three-element tuples, positionally aligned with each attempt's receipts.
+Each root must be a distinct trusted absolute directory *inode*, not
+just a different path; reused directories, final-component symlinks,
+invalid modes, mismatched outputs, bad or missing bytes and bad shapes
+fail closed. Returned hashes are sorted by benchmark mode, independent
+of receipt input order and any absolute path spelling; they reveal
+neither source file bytes nor paths.
+
+**Critical limitation:** two directory copies can contain identical
+fabricated artifacts; metadata or file hashes cannot establish that six
+independent LEAN processes ran. This also cannot authenticate licensed
+sources, prevent all path/rename races, verify parent-directory safety,
+prove reproducible performance or reconcile engine numerical outputs.
+Independent human QA must examine actual engine logs and execution
+provenance in addition to these byte-level guards. Never commit real
+licensed input data or credentials to GitHub.
