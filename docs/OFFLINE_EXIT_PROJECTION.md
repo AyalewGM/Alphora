@@ -10,6 +10,29 @@ Synthetic sell receipts have contiguous sequence numbers and stable receipt IDs.
 
 SHA-256 covers the starting book and unique replayed receipts; an independently pinned expected hash can detect changes to the complete record. A self-computed digest does not authenticate a data source, protect against complete rewrite, or detect a missing tail without an independent checkpoint. No trustworthy live feed or timestamp evidence is established.
 
-**Still missing for an actual paper OMS:** durable sell intents and cancellation, atomic buy/sell ledger integration, partial-fill and rejection lifecycle, trusted marks, daily 2% equity-loss enforcement, settled cash restrictions, pending-order reconciliation, crash/restart recovery, session rollover, and operator approval. The authorized policy is unchanged: $100,000 initial simulated equity, 0.5% planned per-trade risk, 10% instrument allocation, 2% daily loss shutdown and daily rebalance. This research-only calculation does **not** enforce those trading protections.
+## Durable synthetic SELL journal (development-only)
+
+`alphora.offline_sell_journal.OfflineSellJournal` extends the pure projection
+with a local SQLite WAL journal. It requires a caller-reconciled, balanced
+opening $100,000 simulated book, a dated session ID, and a local file path.
+It pins an opening-book fingerprint and rejects an inconsistent reopening.
+`append()` validates the full projection before a single atomic receipt
+insert; duplicate receipt IDs with the exact same payload are idempotent
+across restarts. Gaps, conflicting duplicates, oversells, invalid money and
+tampered rows fail closed without a partial insert. `snapshot()` replays the
+stored receipt sequence to reconstruct cash, holdings and realized P&L.
+
+This journal **does not** generate, route, execute, timestamp, authorize or
+authenticate orders/fills. Receipt records are caller-invented. A full
+database rewrite is not detectable without an external protected checkpoint.
+The journal is separate from the BUY reservation database: neither has a
+joint atomic transaction, real mark-to-market, trusted data provenance,
+session rollover or automatic daily-loss evaluation. Therefore it is **not**
+an unattended paper OMS and must not be deployed or connected to Alpaca.
+The journal is for offline deterministic persistence and crash-recovery
+regressions only. Independent financial review and combined BUY/SELL
+integration tests are mandatory before any release assessment.
+
+**Still missing for an actual paper OMS:** durable sell intents and cancellation, atomic buy/sell ledger integration, partial-fill and rejection lifecycle, trusted marks, daily 2% equity-loss enforcement, settled cash restrictions, pending-order reconciliation, integrated crash/restart recovery, session rollover, and operator approval. The authorized policy is unchanged: $100,000 initial simulated equity, 0.5% planned per-trade risk, 10% instrument allocation, 2% daily loss shutdown and daily rebalance. This research-only calculation does **not** enforce those trading protections.
 
 Run the repository Python unittest discovery suite. Synthetic tests cover partial and final basis allocation, fees, losses, duplicate fills, gaps, oversells, malformed state, deterministic fingerprinting and hash mismatches. Independent financial review and combined CI checks are required prior to integration. No merge, deployment, trading or broker connectivity is authorized.
