@@ -3,6 +3,8 @@ from dataclasses import replace
 from datetime import date
 from hashlib import sha256
 import tempfile
+import shutil
+from unittest.mock import patch
 from pathlib import Path
 import unittest
 
@@ -105,6 +107,36 @@ class RepeatedLocalSuiteBindingTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "INVALID_SUITE_ARTIFACT_ROOT"):
             self.bind(roots=duplicate)
+
+    def test_root_replaced_with_identical_bytes_after_preflight_is_rejected(self):
+        # A renamed original plus a fresh directory containing the same
+        # bytes satisfies every receipt SHA-256 hash but NOT root identity.
+        # Simulate the swap deterministically just as a binding starts.
+        import alphora.research.lean_suite_binding as suite
+        original_bind = suite.bind_local_lean_artifacts
+        first_root = self.roots[0][0]
+        former_root = self.base / "preflight-original"
+        calls = []
+
+        def swap_once(receipt, *, root, filenames, max_file_bytes):
+            calls.append(root)
+            if len(calls) == 1:
+                first_root.rename(former_root)
+                shutil.copytree(former_root, first_root)
+                self.assertNotEqual(
+                    first_root.stat().st_ino, former_root.stat().st_ino
+                )
+            return original_bind(
+                receipt, root=root, filenames=filenames,
+                max_file_bytes=max_file_bytes,
+            )
+
+        with patch.object(suite, "bind_local_lean_artifacts", side_effect=swap_once):
+            with self.assertRaisesRegex(
+                ValueError, "SUITE_ARTIFACT_DIRECTORY_CHANGED"
+            ):
+                self.bind()
+        self.assertEqual(len(calls), 1)
 
     def test_same_receipt_with_tampered_local_bytes_is_rejected(self):
         root = self.roots[1][1]
