@@ -216,7 +216,9 @@ class OfflineReservations:
             try:
                 with localcontext() as context:
                     context.prec = 50
-                    context.traps[Inexact] = True
+                    # Partial cost basis is deliberately half-even cent
+                    # rounded; unlike cash arithmetic it may be inexact.
+                    context.traps[Inexact] = False
                     expected_basis = (old_cost if qty == old_qty else
                                       (old_cost * qty / old_qty).quantize(
                                           D("0.01"), rounding=ROUND_HALF_EVEN))
