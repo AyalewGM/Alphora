@@ -65,7 +65,7 @@ class OfflineReservations:
         # a running/reopened book without creating a new reviewed session.
         if not policy.fingerprint():
             raise ValueError("INVALID_PAPER_BOOK")
-         self._db = sqlite3.connect(str(path), timeout=5, isolation_level=None)
+        self._db = sqlite3.connect(str(path), timeout=5, isolation_level=None)
         try:
             self._db.execute("PRAGMA busy_timeout=5000")
             self._db.execute("PRAGMA foreign_keys=ON")
