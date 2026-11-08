@@ -29,10 +29,12 @@ def quote(*, bid=D("100"), ask=D("100.10"), observed_at=AS_OF,
 
 
 def marked(snapshot=None, quotes=None, **changes):
+    options = {"as_of": AS_OF, "session_verified": True}
+    options.update(changes)
     return mark_reconciled_paper_portfolio(
         snapshot if snapshot is not None else book(),
         quotes if quotes is not None else (quote(),),
-        as_of=AS_OF, session_verified=True, **changes,
+        **options,
     )
 
 
