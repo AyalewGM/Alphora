@@ -8,6 +8,8 @@ from pathlib import Path
 
 from alphora.offline_exit_projection import PositionCost, SyntheticSellReceipt
 from alphora.offline_sell_journal import OfflineSellJournal
+from alphora.reservations import OfflineReservations
+from alphora.risk import BuyProposal, PaperAccount
 
 SESSION = "2026-11-06"
 OPENING = (PositionCost("SPY", 100, D("5010")),
@@ -94,6 +96,77 @@ class SellJournalTests(unittest.TestCase):
                        ("synthetic-fill-1",))
         with self.assertRaisesRegex(ValueError, "SELL_JOURNAL_CORRUPT"):
             self.open()
+
+    def _completed_buy_book(self):
+        source = OfflineReservations(self.path.parent / "buy.sqlite",
+                                     session_id=SESSION)
+        account = PaperAccount(D("100000"), D("100000"),
+                               D("100000"), D("0"), SESSION)
+        proposal = BuyProposal("SPY", D("20"), D("50"), D("48"))
+        source.reserve_buy("buy-1", account, proposal, reconciled=True)
+        return source
+
+    def test_bridge_from_completed_buy_book_and_restart(self):
+        source = self._completed_buy_book()
+        try:
+            pending = source.snapshot()
+            with self.assertRaisesRegex(ValueError, "UNRECONCILED_BUY_BOOK"):
+                OfflineSellJournal.from_buy_snapshot(
+                    self.path, pending, reconciled=True)
+            self.assertFalse(self.path.exists())
+            filled = source.record_hypothetical_fill(
+                "buy-1", "buy-fill-1", 20, D("49"))
+            self.assertEqual(filled.cash, D("99020"))
+            self.assertEqual(filled.positions, (("SPY", 20, D("980")),))
+            with OfflineSellJournal.from_buy_snapshot(
+                    self.path, filled, reconciled=True) as sell_book:
+                initial = sell_book.snapshot()
+                self.assertEqual(initial.cash, D("99020"))
+                self.assertEqual(initial.positions,
+                                 (PositionCost("SPY", 20, D("980")),))
+                after = sell_book.append(SyntheticSellReceipt(
+                    "sell-fill-1", 1, "SPY", 10, D("50")))
+                self.assertEqual(after.cash, D("99520"))
+                self.assertEqual(after.realized_pnl, D("10"))
+                self.assertEqual(after.positions,
+                                 (PositionCost("SPY", 10, D("490")),))
+                self.assertEqual(source.snapshot(), filled)
+            with OfflineSellJournal.from_buy_snapshot(
+                    self.path, filled, reconciled=True) as recovered:
+                self.assertEqual(recovered.snapshot(), after)
+                self.assertEqual(recovered.append(SyntheticSellReceipt(
+                    "sell-fill-1", 1, "SPY", 10, D("50"))), after)
+        finally:
+            source.close()
+
+    def test_bridge_refuses_untrusted_or_inconsistent_buy_snapshot(self):
+        source = self._completed_buy_book()
+        try:
+            filled = source.record_hypothetical_fill(
+                "buy-1", "buy-fill-1", 20, D("49"))
+            variants = (
+                replace(filled, reserved_cash=D("1")),
+                replace(filled, available_cash=D("99019")),
+                replace(filled, halted=True),
+                replace(filled, pending=(("fake", "SPY", 1, D("50")),)),
+                replace(filled, positions=(("SPY", 20, D("979")),)),
+                replace(filled, positions=(("SPY", 20, D("980")),
+                                           ("SPY", 1, D("1")))),
+            )
+            for bad in variants:
+                with self.subTest(bad=bad), self.assertRaisesRegex(
+                        ValueError, "UNRECONCILED_BUY_BOOK"):
+                    OfflineSellJournal.from_buy_snapshot(
+                        self.path, bad, reconciled=True)
+            with self.assertRaisesRegex(ValueError, "UNRECONCILED_BUY_BOOK"):
+                OfflineSellJournal.from_buy_snapshot(
+                    self.path, filled, reconciled=False)
+            with self.assertRaisesRegex(ValueError, "UNRECONCILED_BUY_BOOK"):
+                OfflineSellJournal.from_buy_snapshot(
+                    self.path, None, reconciled=True)
+            self.assertFalse(self.path.exists())
+        finally:
+            source.close()
 
     def test_invalid_input_and_no_broker_surface(self):
         with self.assertRaisesRegex(ValueError, "INVALID_JOURNAL_PATH"):
