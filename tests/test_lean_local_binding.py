@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from alphora.research.lean_evidence import LeanBacktestReceipt
 from alphora.research.lean_local_binding import (
@@ -133,6 +134,30 @@ class LeanLocalBindingTests(unittest.TestCase):
             with self.subTest(mode=mode), self.assertRaisesRegex(
                     ValueError, "UNSAFE_LEAN_RUN_MODE"):
                 self.bind(receipt=replace(self.receipt, run_mode=mode))
+
+    def test_directory_entry_mutation_mid_binding_is_rejected(self):
+        # Even when all eight files and their bytes remain unchanged,
+        # an entry created by another writer between reads invalidates
+        # the claim that they were observed under a stable directory.
+        import alphora.research.lean_local_binding as module
+        underlying = module._hash_named_local_file
+        calls = [0]
+
+        def hash_and_change_root(fd, filename, *, max_file_bytes):
+            result = underlying(fd, filename, max_file_bytes=max_file_bytes)
+            calls[0] += 1
+            if calls[0] == 1:
+                (self.root / "new_unrelated_entry.tmp").write_bytes(b"race")
+                st = self.root.stat()
+                # Force a time change even on low-resolution filesystems.
+                os.utime(self.root, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+            return result
+
+        with patch.object(module, "_hash_named_local_file", side_effect=hash_and_change_root):
+            with self.assertRaisesRegex(ValueError, "LOCAL_ARTIFACT_DIRECTORY_CHANGED"):
+                self.bind()
+        self.assertEqual(calls[0], 8)
+        self.assertIsInstance(self.bind(), LocalArtifactBinding)
 
     def test_different_filenames_rebind_bytes_but_change_binding_identity(self):
         before = self.bind()
