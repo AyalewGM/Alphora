@@ -23,7 +23,7 @@ These digests are metadata asserted by the caller, not authenticated by this
 module. They must be generated and verified against off-repository files by a
 qualified, independent data owner; an arbitrary or duplicated 64-hex string
 provides no proof. Never commit vendor data, authorization documents or
-credentials to this public repository. Capture the official engine/CLI and
+credentials to this repository, including while it is private. Capture the official engine/CLI and
 actual local command/exit status in a separately secured run journal; this
 validator does **not** execute commands or validate those claims.
 
