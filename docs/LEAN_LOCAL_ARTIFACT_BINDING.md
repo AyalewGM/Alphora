@@ -44,8 +44,15 @@ fabricated, synthetic data for repository tests.
   default, and can be restricted further. Data exceeding this bound
   require a separately reviewed chunked manifest protocol, not silent
   truncation or an increased unbounded limit.
+- **Multi-file mutation guard**: capture directory inode and
+  mtime/ctime before and after hashing all eight files. Reject
+  `LOCAL_ARTIFACT_DIRECTORY_CHANGED` if entries or metadata changed during
+  the pass, even when individual file hashes match. This conservatively
+  blocks concurrent file-set changes (including unrelated entries).
+  It is **not** a transactional snapshot, file lock, source authentication,
+  or a guarantee that files will remain unchanged after the read.
 - **No hidden fallback**: unsupported operating systems/filesystems,
-  missing files, unsafe roots, concurrent edits, invalid metadata,
+  missing files, unsafe roots, detected concurrent edits, invalid metadata,
   mismatched bytes and anything other than `backtest` mode are rejected.
 - **Trusted local root is still required**: ancestor directory symlinks,
   hard-to-detect filesystem races, re-creation of identical fabricated
