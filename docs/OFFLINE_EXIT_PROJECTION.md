@@ -10,6 +10,26 @@ Synthetic sell receipts have contiguous sequence numbers and stable receipt IDs.
 
 SHA-256 covers the starting book and unique replayed receipts; an independently pinned expected hash can detect changes to the complete record. A self-computed digest does not authenticate a data source, protect against complete rewrite, or detect a missing tail without an independent checkpoint. No trustworthy live feed or timestamp evidence is established.
 
+### BUY snapshot handoff (offline-only)
+
+`OfflineSellJournal.from_buy_snapshot(path, snapshot, reconciled=True)`
+accepts a typed `PaperBookSnapshot` from the existing BUY reservations
+module, but **only** after all pending BUY reservations have been resolved
+and cash plus fee-inclusive acquisition basis reconciles to the initial
+$100,000 virtual book. It rejects absent reconciliation, halted sessions,
+pending orders, nonzero reservations, available-cash mismatch, malformed
+holdings, duplicate symbols and unbalanced inventory. It copies the opening
+state into the synthetic SELL journal's pinned fingerprint and supports
+deterministic restart replay; it does not mutate the originating BUY book.
+
+**Critical limitation:** The two SQLite databases have no shared
+transaction, lock or protected cross-book checkpoint. The BUY book could
+change after the snapshot was copied, so the handoff **cannot** serve as
+a trusted autonomous OMS reconciliation or an atomic order transition.
+A single durable buy/sell ledger, verified market marks, automated risk
+monitoring and independent QA remain required before any unattended
+paper simulation.
+
 ## Durable synthetic SELL journal (development-only)
 
 `alphora.offline_sell_journal.OfflineSellJournal` extends the pure projection
