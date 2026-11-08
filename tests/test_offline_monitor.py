@@ -79,6 +79,20 @@ class OfflineMonitorTests(unittest.TestCase):
                 self.assertTrue(blocked.positions_due)
                 self.assertFalse(blocked.regular_exit_evaluation_allowed)
 
+    def test_spread_above_limit_cannot_round_to_eligible(self):
+        now = instant(10)
+        exact = plan_monitor_tick(
+            now=now, session=session(), checkpoint=checkpoint(),
+            held_quote=quote(at=now, bid=D("199"), ask=D("201")))
+        self.assertTrue(exact.regular_exit_evaluation_allowed)
+        # Sub-cent precision beyond the arithmetic context must never
+        # round a strictly >1% spread back to the allowed 1% boundary.
+        too_wide = plan_monitor_tick(
+            now=now, session=session(), checkpoint=checkpoint(),
+            held_quote=quote(at=now, bid=D("199"),
+                             ask=D("201." + "0" * 52 + "1")))
+        self.assertFalse(too_wide.regular_exit_evaluation_allowed)
+
     def test_due_intervals_and_future_checkpoint_fail_closed(self):
         now = instant(10)
         c = checkpoint(position_at=now-timedelta(seconds=4),
