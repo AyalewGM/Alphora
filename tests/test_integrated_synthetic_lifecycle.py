@@ -106,6 +106,28 @@ class IntegratedSyntheticLifecycleTests(unittest.TestCase):
         self.book = OfflineReservations(self.path, session_id=SESSION)
         self.assertEqual(self.book.snapshot(), before)
 
+    def test_forced_sqlite_sell_cash_update_failure_rolls_back_receipt(self):
+        bought = self.buy()
+        with sqlite3.connect(self.path) as db:
+            db.execute("""CREATE TRIGGER reject_sell_cash
+                BEFORE UPDATE OF value ON book_meta
+                WHEN NEW.key='cash' AND EXISTS(SELECT 1 FROM hypothetical_sells)
+                BEGIN SELECT RAISE(ABORT, 'synthetic cash update failure'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.book.record_hypothetical_sell(
+                "sell-rollback", "SPY", 10, D("50"))
+        self.assertEqual(self.book.snapshot(), bought)
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(db.execute(
+                "SELECT COUNT(*) FROM hypothetical_sells").fetchone()[0], 0)
+            db.execute("DROP TRIGGER reject_sell_cash")
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id=SESSION)
+        self.assertEqual(self.book.snapshot(), bought)
+        recovered = self.book.record_hypothetical_sell(
+            "sell-rollback", "SPY", 10, D("50"))
+        self.assertEqual(recovered.cash, D("99520"))
+
     def test_halt_blocks_new_synthetic_sell_receipts(self):
         self.buy()
         self.book.halt()
