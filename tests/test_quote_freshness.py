@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
+from zoneinfo import ZoneInfo
 import unittest
 
 from alphora.quote_freshness import QuoteObservation, assess_quote
@@ -119,6 +120,22 @@ class QuoteFreshnessTests(unittest.TestCase):
         self.assertFalse(result.usable)
         self.assertEqual(result.reason, "INVALID_MONITOR_PURPOSE")
         self.assertEqual(result.suggested_poll_seconds, 5)
+
+    def test_dst_fallback_uses_absolute_timeline(self):
+        # At the fall-back, local clock time moves from 01:59:55 EDT
+        # to 01:00:05 EST while only ten real seconds elapse.
+        tz = ZoneInfo("America/New_York")
+        market_at = datetime(2026, 11, 1, 1, 59, 55, tzinfo=tz, fold=0)
+        received_at = datetime(2026, 11, 1, 1, 0, 3, tzinfo=tz, fold=1)
+        checked_at = datetime(2026, 11, 1, 1, 0, 5, tzinfo=tz, fold=1)
+        sample = replace(quote(), market_at=market_at,
+                         received_at=received_at)
+        decision = assess_quote(sample, expected_symbol="SPY",
+                                evaluated_at=checked_at,
+                                market_session="REGULAR")
+        self.assertTrue(decision.usable)
+        self.assertEqual(decision.quote_age_seconds, D("10"))
+        self.assertEqual(decision.suggested_poll_seconds, 5)
 
     def test_cross_timezone_consistency(self):
         newyork = timezone(timedelta(hours=-5))
