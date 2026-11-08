@@ -10,7 +10,8 @@ from pathlib import Path
 import re
 import sqlite3
 
-from .risk import BuyProposal, PaperAccount, INITIAL_EQUITY, DAILY_LOSS_FRACTION, RISK_FRACTION, validate_buy
+from .risk import (BuyProposal, PaperAccount, RiskPolicy, DEFAULT_RISK_POLICY,
+                   INITIAL_EQUITY, DAILY_LOSS_FRACTION, validate_buy)
 
 _ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
@@ -50,14 +51,21 @@ class OfflineReservations:
     corporate actions, costs beyond caller-budgeted fees or session rollover.
     """
 
-    def __init__(self, path, *, session_id: str, starting_cash: D = INITIAL_EQUITY):
+    def __init__(self, path, *, session_id: str, starting_cash: D = INITIAL_EQUITY,
+                 policy: RiskPolicy = DEFAULT_RISK_POLICY):
         if (not isinstance(path, (str, Path)) or not str(path).strip()
                 or str(path).lower().startswith("file:")
                 or str(path) == ":memory:" or "\x00" in str(path)
                 or not isinstance(session_id, str) or not _ID.fullmatch(session_id)
-                or type(starting_cash) is not D or starting_cash != INITIAL_EQUITY):
+                or type(starting_cash) is not D or starting_cash != INITIAL_EQUITY
+                or not isinstance(policy, RiskPolicy)):
             raise ValueError("INVALID_PAPER_BOOK")
-        self._db = sqlite3.connect(str(path), timeout=5, isolation_level=None)
+        self._policy = policy
+        # Policy identity is pinned to a session; it cannot be loosened during
+        # a running/reopened book without creating a new reviewed session.
+        if not policy.fingerprint():
+            raise ValueError("INVALID_PAPER_BOOK")
+         self._db = sqlite3.connect(str(path), timeout=5, isolation_level=None)
         try:
             self._db.execute("PRAGMA busy_timeout=5000")
             self._db.execute("PRAGMA foreign_keys=ON")
@@ -83,10 +91,12 @@ class OfflineReservations:
                     self._db.executemany("INSERT INTO book_meta(key,value) VALUES(?,?)", [
                         ("session_id", session_id), ("starting_cash", str(starting_cash)),
                         ("cash", str(starting_cash)), ("halted", "0"),
+                        ("risk_policy", policy.fingerprint()),
                     ])
                 elif (meta.get("session_id") != session_id or
                       _decimal(meta.get("starting_cash", "0")) != starting_cash or
-                      set(meta) != {"session_id", "starting_cash", "cash", "halted"}):
+                      (set(meta) != {"session_id", "starting_cash", "cash", "halted", "risk_policy"}
+                       or meta.get("risk_policy") != policy.fingerprint())):
                     raise ValueError("BOOK_REOPEN_MISMATCH")
                 # Reopening a corrupted persisted book must fail before any
                 # new reservations or hypothetical fills can be recorded.
@@ -313,6 +323,7 @@ class OfflineReservations:
                 # would otherwise be omitted from the 10% limit.
                 replace(proposal, existing_instrument_value=exposure_with_fees),
                 expected_session_id=snapshot.session_id, mode="paper",
+                policy=self._policy,
             )
             if not guard.permitted:
                 if guard.reason != "DAILY_LOSS_HALT":
@@ -331,7 +342,7 @@ class OfflineReservations:
                         context.traps[Inexact] = True
                         loss_with_fees = ((proposal.price - proposal.stop_price) *
                                           proposal.quantity + fee_budget)
-                        maximum_loss = account.equity * RISK_FRACTION
+                        maximum_loss = account.equity * self._policy.risk_per_trade_fraction
                         reserve = proposal.quantity * proposal.price + fee_budget
                 except DecimalException as exc:
                     raise ValueError("RISK_VETO:UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc
