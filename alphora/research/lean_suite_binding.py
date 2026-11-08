@@ -30,7 +30,7 @@ class RepeatedLocalSuiteBinding:
 
 def _root_identity(root) -> tuple[int, int]:
     """Reject alias directories, including separate paths to the same inode."""
-    if (type(root) is not str and type(root) is not Path
+    if (not isinstance(root, (str, Path))
             or not Path(root).is_absolute()
             or not getattr(os, "O_NOFOLLOW", 0)
             or not getattr(os, "O_DIRECTORY", 0)
