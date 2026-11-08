@@ -16,6 +16,7 @@ from .risk import INITIAL_EQUITY
 _CENT = D("0.01")
 _MAX_MONEY = D("1000000000000000")
 _MAX_SHARES = 1_000_000_000
+_MAX_POSITIONS = 10000
 _MAX_RECEIPTS = 10000
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 _ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
@@ -93,7 +94,9 @@ def project_synthetic_sells(session_id: str, opening_cash: D,
     """
     if (not _session(session_id) or not _money(opening_cash)
             or not isinstance(opening_positions, tuple)
-            or not isinstance(receipts, tuple) or len(receipts) > _MAX_RECEIPTS
+            or not isinstance(receipts, tuple)
+            or len(opening_positions) > _MAX_POSITIONS
+            or len(receipts) > _MAX_RECEIPTS
             or (expected_sha256 is not None and
                 (not isinstance(expected_sha256, str) or not _HASH.fullmatch(expected_sha256)))):
         raise ValueError("INVALID_EXIT_REPLAY_INPUT")
