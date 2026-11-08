@@ -9,8 +9,8 @@ from decimal import Decimal as D, ROUND_FLOOR, DecimalException, Inexact, localc
 from hashlib import sha256
 import re
 
-from .risk import (BuyProposal, PaperAccount, RISK_FRACTION,
-                   MAX_INSTRUMENT_FRACTION, DAILY_LOSS_FRACTION, validate_buy)
+from .risk import (BuyProposal, PaperAccount, RiskPolicy, DEFAULT_RISK_POLICY,
+                   DAILY_LOSS_FRACTION, validate_buy)
 
 MAX_QUOTE_AGE_SECONDS = 120
 
@@ -64,7 +64,8 @@ class EntryPlan:
 def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
                   as_of: datetime, expected_session_id: str,
                   reserved_cash: D, reconciled: bool,
-                  max_age_seconds: int = 120) -> EntryPlan:
+                  max_age_seconds: int = 120,
+                  policy: RiskPolicy = DEFAULT_RISK_POLICY) -> EntryPlan:
     """Plan long-only *whole-share* purchases from unreserved virtual cash.
 
     The caller must supply a consistent reconciled snapshot. Proposals do not
@@ -72,6 +73,8 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
     """
     if reconciled is not True:
         return EntryPlan(False, "UNRECONCILED_STATE")
+    if not isinstance(policy, RiskPolicy):
+        return EntryPlan(False, "INVALID_RISK_POLICY")
     if not isinstance(account, PaperAccount) or not isinstance(candidate, EntryCandidate):
         return EntryPlan(False, "INVALID_ACCOUNT_OR_ORDER")
     if not isinstance(candidate.symbol, str) or not candidate.symbol:
@@ -128,11 +131,11 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
         minimum = BuyProposal(candidate.symbol, D(1), candidate.ask,
                               candidate.stop_price, reserved_instrument)
         precheck = validate_buy(account_available, minimum,
-                                expected_session_id=expected_session_id)
+                                expected_session_id=expected_session_id, policy=policy)
         if not precheck.permitted:
             return EntryPlan(False, precheck.reason)
-        by_risk = account.equity * RISK_FRACTION / (candidate.ask - candidate.stop_price)
-        by_instrument = (account.equity * MAX_INSTRUMENT_FRACTION - reserved_instrument) / candidate.ask
+        by_risk = account.equity * policy.risk_per_trade_fraction / (candidate.ask - candidate.stop_price)
+        by_instrument = (account.equity * policy.max_instrument_fraction - reserved_instrument) / candidate.ask
         by_cash = available_cash / candidate.ask
         quantity = min(by_risk, by_instrument, by_cash).to_integral_value(rounding=ROUND_FLOOR)
     except DecimalException:
@@ -141,7 +144,7 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
         return EntryPlan(False, "ZERO_AFFORDABLE_SHARES")
     proposal = replace(minimum, quantity=quantity)
     checked = validate_buy(account_available, proposal,
-                            expected_session_id=expected_session_id)
+                            expected_session_id=expected_session_id, policy=policy)
     if not checked.permitted:
         return EntryPlan(False, checked.reason)
     key = sha256((f"PAPER|ENTRY|{expected_session_id}|{candidate.symbol}|"
