@@ -91,7 +91,13 @@ three-element tuples, positionally aligned with each attempt's receipts.
 Each root must be a distinct trusted absolute directory *inode*, not
 just a different path; reused directories, final-component symlinks,
 invalid modes, mismatched outputs, bad or missing bytes and bad shapes
-fail closed. Returned hashes are sorted by benchmark mode, independent
+fail closed. Each of the six root directory identities is now rechecked
+immediately before **and after** its eight-file binding, rejecting a
+byte-identical directory replaced after the initial distinct-root
+preflight (`SUITE_ARTIFACT_DIRECTORY_CHANGED`). This is a bounded
+rename-race detection guard, **not** a filesystem snapshot or an
+adversarial race-proof guarantee. Returned hashes are sorted by benchmark
+mode, independent
 of receipt input order and any absolute path spelling; they reveal
 neither source file bytes nor paths.
 
