@@ -6,7 +6,7 @@ current instant, source-verified quote and persisted scheduling checkpoint.
 """
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone, timedelta
-from decimal import Decimal as D, DecimalException, localcontext
+from decimal import Decimal as D, DecimalException, Inexact, localcontext
 import re
 from zoneinfo import ZoneInfo
 
@@ -124,9 +124,13 @@ def _quote_fresh(quote: MonitorQuote, now: datetime):
     try:
         with localcontext() as ctx:
             ctx.prec = 50
-            # No optimistic rounding: reject if exact spread exceeds 1%.
-            spread = (quote.ask - quote.bid) * 200 / (quote.ask + quote.bid)
-            return spread <= MAX_SPREAD_PCT
+            # A rounded ratio could conceal a tiny violation of the 1%
+            # limit. Trap any inexact intermediate and veto rather than
+            # asserting liquidity based on rounded arithmetic.
+            ctx.traps[Inexact] = True
+            numerator = (quote.ask - quote.bid) * 200
+            denominator = quote.ask + quote.bid
+            return numerator <= MAX_SPREAD_PCT * denominator
     except DecimalException:
         return False
 
