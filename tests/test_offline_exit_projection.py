@@ -74,6 +74,13 @@ class OfflineExitProjectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SYNTHETIC_OVERSELL"):
             project(receipt(shares=60), receipt(receipt_id="fill-2", sequence=2, shares=41))
 
+    def test_oversized_opening_inventory_fails_before_scan(self):
+        # Reject an oversized caller-attested snapshot before iterating or
+        # hashing repeated positions; this is a bounded reference replay.
+        oversized = (PositionCost("SPY", 1, D("0.01")),) * 10001
+        with self.assertRaisesRegex(ValueError, "INVALID_EXIT_REPLAY_INPUT"):
+            project(opening=oversized)
+
     def test_unbalanced_book_and_invalid_positions_rejected(self):
         for positions in ((PositionCost("SPY", 100, D("5010")),),
                           OPENING + (OPENING[0],),
