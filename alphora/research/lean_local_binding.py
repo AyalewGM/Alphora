@@ -109,6 +109,11 @@ def bind_local_lean_artifacts(
     except OSError as exc:
         raise ValueError("UNSAFE_LOCAL_ARTIFACT_ROOT") from exc
     try:
+        # A directory-handle pins the root inode, but does not by itself
+        # detect entry replacement between individually opened artifacts.
+        # A conservative directory metadata check rejects a changed set
+        # during this multi-file read. It is not an atomic filesystem snapshot.
+        root_before = os.fstat(dir_fd)
         observed = []
         for field in _ARTIFACT_FIELDS:
             actual_hash = _hash_named_local_file(
@@ -117,6 +122,12 @@ def bind_local_lean_artifacts(
             if actual_hash != getattr(receipt, field):
                 raise ValueError("LOCAL_ARTIFACT_HASH_MISMATCH")
             observed.append((field, actual_hash))
+        root_after = os.fstat(dir_fd)
+        identity = lambda st: (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns)
+        if identity(root_before) != identity(root_after):
+            raise ValueError("LOCAL_ARTIFACT_DIRECTORY_CHANGED")
+    except OSError as exc:
+        raise ValueError("UNSAFE_LOCAL_ARTIFACT_ROOT") from exc
     finally:
         os.close(dir_fd)
     canonical = {
