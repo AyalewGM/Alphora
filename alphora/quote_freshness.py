@@ -6,7 +6,7 @@ A positive result means only that a supplied quote passed validation;
 it NEVER authorizes an order, simulates a fill, or proves market provenance.
 """
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 import re
 
@@ -99,9 +99,14 @@ def assess_quote(
     if not _aware(quote.market_at) or not _aware(quote.received_at):
         return reject("INVALID_QUOTE_TIMES")
     try:
-        market_lag = _seconds(quote.received_at - quote.market_at)
-        receive_lag = _seconds(evaluated_at - quote.received_at)
-        age = _seconds(evaluated_at - quote.market_at)
+        # Normalize BEFORE subtraction: Python skips offset conversion for
+        # datetimes sharing a ZoneInfo object, even across DST folds.
+        market_at = quote.market_at.astimezone(timezone.utc)
+        received_at = quote.received_at.astimezone(timezone.utc)
+        checked_at = evaluated_at.astimezone(timezone.utc)
+        market_lag = _seconds(received_at - market_at)
+        receive_lag = _seconds(checked_at - received_at)
+        age = _seconds(checked_at - market_at)
     except (OverflowError, ValueError):
         return reject("INVALID_QUOTE_TIMES")
     # A delayed or future-dated feed is not equivalent to a fresh quote.
