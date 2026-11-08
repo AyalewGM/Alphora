@@ -14,6 +14,29 @@ REBALANCE_FREQUENCY = "daily"
 # Keep the direct risk boundary aligned with the persisted offline book.
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 
+# Bounded operator-configurable PAPER risk parameters. Defaults unchanged.
+# The 2% daily-loss shutdown is independently enforced and is not configurable here.
+@dataclass(frozen=True)
+class RiskPolicy:
+    risk_per_trade_fraction: Decimal = RISK_FRACTION
+    max_instrument_fraction: Decimal = MAX_INSTRUMENT_FRACTION
+
+    def __post_init__(self):
+        if (type(self.risk_per_trade_fraction) is not Decimal
+                or not self.risk_per_trade_fraction.is_finite()
+                or not Decimal("0") < self.risk_per_trade_fraction <= DAILY_LOSS_FRACTION
+                or type(self.max_instrument_fraction) is not Decimal
+                or not self.max_instrument_fraction.is_finite()
+                or not Decimal("0") < self.max_instrument_fraction <= Decimal("1")):
+            raise ValueError("INVALID_RISK_POLICY")
+
+    def fingerprint(self) -> str:
+        return (format(self.risk_per_trade_fraction.normalize(), "f") + "|"
+                + format(self.max_instrument_fraction.normalize(), "f"))
+
+
+DEFAULT_RISK_POLICY = RiskPolicy()
+
 
 @dataclass(frozen=True)
 class PaperAccount:
@@ -50,6 +73,7 @@ def validate_buy(
     *,
     expected_session_id: str,
     mode: str = "paper",
+    policy: RiskPolicy = DEFAULT_RISK_POLICY,
 ) -> Decision:
     """Reject unsafe long-only purchases; must be called again just before order simulation.
 
@@ -57,6 +81,8 @@ def validate_buy(
     """
     if mode != "paper":
         return Decision(False, "REAL_TRADING_DISABLED")
+    if not isinstance(policy, RiskPolicy):
+        return Decision(False, "INVALID_RISK_POLICY")
     # Invalid/untyped paper snapshots must never be interpreted as an
     # affirmative risk decision. In particular, `0`/None are not a valid
     # representation of a cleared persistent kill switch.
@@ -112,9 +138,9 @@ def validate_buy(
             # active decimal context; never treat that as a free, safe purchase.
             if notional <= 0 or planned_risk <= 0:
                 return Decision(False, "INVALID_ACCOUNT_OR_ORDER")
-            if planned_risk > account.equity * RISK_FRACTION:
+            if planned_risk > account.equity * policy.risk_per_trade_fraction:
                 return Decision(False, "TRADE_RISK_EXCEEDED")
-            if proposal.existing_instrument_value + notional > account.equity * MAX_INSTRUMENT_FRACTION:
+            if proposal.existing_instrument_value + notional > account.equity * policy.max_instrument_fraction:
                 return Decision(False, "INSTRUMENT_ALLOCATION_EXCEEDED")
             if notional > account.cash:
                 return Decision(False, "INSUFFICIENT_CASH")
