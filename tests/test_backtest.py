@@ -165,6 +165,22 @@ class BacktestTests(unittest.TestCase):
                 ):
                     compare_with_spy(empty, self.bars, "buy_hold")
 
+    def test_spy_zero_volume_in_lookback_warmup_is_not_sliced_away(self):
+        # For a non-buy-hold strategy, comparison starts after warm-up.
+        # Every supplied SPY session must still pass the volume gate.
+        from alphora.research.benchmarks import compare_with_spy
+        for index in (3, 25):
+            with self.subTest(spy_zero_index=index):
+                spy = list(self.bars)
+                spy[index] = replace(spy[index], volume=0)
+                with self.assertRaisesRegex(
+                    ValueError, "ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED"
+                ):
+                    compare_with_spy(self.bars, spy, "trend", lookback=20)
+        self.assertIsNotNone(
+            compare_with_spy(self.bars, self.bars, "trend", lookback=20)
+        )
+
     def test_duplicate_date_rejected(self):
         with self.assertRaises(ValueError):backtest([self.bars[0],self.bars[0]],"trend")
 
