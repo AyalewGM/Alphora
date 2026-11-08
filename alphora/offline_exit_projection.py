@@ -88,8 +88,8 @@ def project_synthetic_sells(session_id: str, opening_cash: D,
 
     Requires all pending BUYs to be resolved externally; cannot change the
     existing SQLite BUY reservation ledger. Rejects oversells, missing receipt
-    sequences and conflicting duplicate IDs. Never allows another session's
-    hypothetical receipts to be silently joined into this projection.
+    sequences and conflicting duplicate IDs. The supplied session ID is only
+    fingerprint context, not a trusted per-receipt session attestation.
     """
     if (not _session(session_id) or not _money(opening_cash)
             or not isinstance(opening_positions, tuple)
