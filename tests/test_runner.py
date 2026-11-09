@@ -101,6 +101,19 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(any(a.startswith("ENTRY_VETO:SPY")
                             for a in d.actions), d.actions)
 
+    def test_missing_held_symbol_mark_is_never_treated_as_break_even(self):
+        self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        previous = self.book.snapshot()
+        missing = SessionDay(
+            "2026-11-03", mt(3),
+            {"QQQ": bar(3, "25", "25", "25", "25")}, {})
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            self.runner.run((missing,))
+        self.assertEqual(self.book.snapshot(), previous)
+        # A subsequent genuine lower quote must reveal the drawdown.
+        result = self.runner.run((day(3, "40"),))
+        self.assertTrue(result.days[0].halted)
+
     def test_day_and_config_validation(self):
         for kw in ({"mark_price": "mid"}, {"take_profit_pct": D("-1")},
                    {"stop_fraction": D("nan")}, {"fee_budget": D("-1")}):
