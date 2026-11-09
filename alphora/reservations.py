@@ -1,11 +1,11 @@
-"""Durable *offline* reservation accounting for hypothetical paper BUY intents.
+"""Durable *offline* BUY reservations and bounded hypothetical SELL receipts.
 
-No brokers, orders, networks, quotes, strategy execution or sell accounting exist.
-External account/position reconciliation and a fresh risk decision remain mandatory.
+No brokers, network, quotes, automated strategies or authenticated fills exist.
+External reconciliation and independently verified market marks remain mandatory.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from decimal import Decimal as D, DecimalException, Inexact, localcontext
+from decimal import Decimal as D, DecimalException, Inexact, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 import re
 import sqlite3
@@ -41,6 +41,7 @@ class PaperBookSnapshot:
     pending: tuple[tuple[str, str, int, D], ...]
     halted: bool
     session_id: str
+    realized_pnl: D = D("0")
 
 
 class OfflineReservations:
@@ -83,10 +84,17 @@ class OfflineReservations:
                     id TEXT PRIMARY KEY, intent_id TEXT NOT NULL REFERENCES buy_intents(id),
                     qty INTEGER NOT NULL CHECK(qty>0), price TEXT NOT NULL, fee TEXT NOT NULL
                 )""")
+                self._db.execute("""CREATE TABLE IF NOT EXISTS hypothetical_sells (
+                    id TEXT PRIMARY KEY, sequence INTEGER NOT NULL UNIQUE,
+                    symbol TEXT NOT NULL, qty INTEGER NOT NULL CHECK(qty>0),
+                    price TEXT NOT NULL, fee TEXT NOT NULL,
+                    basis_retired TEXT NOT NULL
+                )""")
                 meta = dict(self._db.execute("SELECT key,value FROM book_meta"))
                 if not meta:
                     if (self._db.execute("SELECT 1 FROM buy_intents LIMIT 1").fetchone()
-                            or self._db.execute("SELECT 1 FROM hypothetical_fills LIMIT 1").fetchone()):
+                            or self._db.execute("SELECT 1 FROM hypothetical_fills LIMIT 1").fetchone()
+                            or self._db.execute("SELECT 1 FROM hypothetical_sells LIMIT 1").fetchone()):
                         raise ValueError("BOOK_STATE_CORRUPT")
                     self._db.executemany("INSERT INTO book_meta(key,value) VALUES(?,?)", [
                         ("session_id", session_id), ("starting_cash", str(starting_cash)),
@@ -183,10 +191,55 @@ class OfflineReservations:
                 raise ValueError("BOOK_STATE_CORRUPT") from exc
             fill_totals[intent_id] = (old_qty + qty, updated_fees)
             holdings[symbol] = held_qty + qty, updated_cost
+        # Replay SELLs in sequence after all BUYs. New BUYs are forbidden
+        # after the first SELL in this bounded phase, so chronological order
+        # cannot be reordered to create synthetic short exposure.
+        sold_cash = D(0)
+        realized = D(0)
+        sell_sequence = 0
+        rows = self._db.execute(
+            "SELECT id,sequence,symbol,qty,price,fee,basis_retired "
+            "FROM hypothetical_sells ORDER BY sequence").fetchall()
+        if rows and active:
+            raise ValueError("BOOK_STATE_CORRUPT")
+        for sell_id, sequence, symbol, qty, price_raw, fee_raw, basis_raw in rows:
+            price, fee, basis_retired = map(_decimal, (price_raw, fee_raw, basis_raw))
+            old_qty, old_cost = holdings.get(symbol, (0, D(0)))
+            if (not isinstance(sell_id, str) or not _ID.fullmatch(sell_id)
+                    or type(sequence) is not int or sequence != sell_sequence + 1
+                    or not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
+                    or not _integer_shares(qty) or qty > old_qty
+                    or not _money(price, positive=True) or not _money(fee)
+                    or not _money(basis_retired, positive=True)
+                    or fee > price * qty or old_qty < 1):
+                raise ValueError("BOOK_STATE_CORRUPT")
+            try:
+                with localcontext() as context:
+                    context.prec = 50
+                    # Partial cost basis is deliberately half-even cent
+                    # rounded; unlike cash arithmetic it may be inexact.
+                    context.traps[Inexact] = False
+                    expected_basis = (old_cost if qty == old_qty else
+                                      (old_cost * qty / old_qty).quantize(
+                                          D("0.01"), rounding=ROUND_HALF_EVEN))
+                    proceeds = qty * price - fee
+                    sold_cash += proceeds
+                    realized += proceeds - expected_basis
+                    remaining_cost = old_cost - expected_basis
+            except DecimalException as exc:
+                raise ValueError("BOOK_STATE_CORRUPT") from exc
+            if (expected_basis != basis_retired or remaining_cost < 0
+                    or (qty != old_qty and remaining_cost <= 0)):
+                raise ValueError("BOOK_STATE_CORRUPT")
+            if qty == old_qty:
+                del holdings[symbol]
+            else:
+                holdings[symbol] = (old_qty - qty, remaining_cost)
+            sell_sequence += 1
         try:
             with localcontext() as context:
                 context.traps[Inexact] = True
-                reconstructed_cash = cash + spent_cash
+                reconstructed_cash = cash + spent_cash - sold_cash
                 available_cash = cash - reserved
         except DecimalException as exc:
             raise ValueError("BOOK_STATE_CORRUPT") from exc
@@ -196,7 +249,8 @@ class OfflineReservations:
             raise ValueError("BOOK_STATE_CORRUPT")
         return PaperBookSnapshot(cash, reserved, available_cash,
                                  tuple((sym, *holdings[sym]) for sym in sorted(holdings)),
-                                 tuple(active), halted == "1", self._meta("session_id"))
+                                 tuple(active), halted == "1", self._meta("session_id"),
+                                 realized)
 
     def snapshot(self):
         self._db.execute("BEGIN")
@@ -277,6 +331,8 @@ class OfflineReservations:
             snapshot = self._snapshot()
             if snapshot.halted:
                 raise ValueError("PAPER_BOOK_HALTED")
+            if self._db.execute("SELECT 1 FROM hypothetical_sells LIMIT 1").fetchone():
+                raise ValueError("BUY_AFTER_SELL_UNSUPPORTED")
             if (account.session_id != snapshot.session_id or
                     account.session_open_equity != INITIAL_EQUITY or
                     account.cash != snapshot.cash or account.halted):
@@ -388,6 +444,8 @@ class OfflineReservations:
                 return self._snapshot()
             if self._meta("halted") == "1":
                 raise ValueError("PAPER_BOOK_HALTED")
+            if self._db.execute("SELECT 1 FROM hypothetical_sells LIMIT 1").fetchone():
+                raise ValueError("BUY_AFTER_SELL_UNSUPPORTED")
             row = self._db.execute(
                 "SELECT qty,filled,limit_price,stop_price,fee_budget,fees_paid,status "
                 "FROM buy_intents WHERE id=?", (intent_id,),
@@ -425,6 +483,73 @@ class OfflineReservations:
                 (filled + qty, str(updated_fees),
                  "FILLED" if filled + qty == total else "OPEN", intent_id),
             )
+            return self._snapshot()
+
+
+    def record_hypothetical_sell(self, fill_id: str, symbol: str,
+                                 qty: int, price: D, *, fee: D = D(0)):
+        """Atomically record a caller-invented SELL receipt in the BUY book.
+
+        This is deliberately NOT a sell order/authorization API. It has no
+        quote, timestamp, external fill provenance or automated executor.
+        SELLs require a fully resolved BUY book; after the first SELL, no
+        additional BUY may be reserved in this limited accounting phase.
+        """
+        if (not isinstance(fill_id, str) or not _ID.fullmatch(fill_id)
+                or not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
+                or not _integer_shares(qty)
+                or type(price) is not D or not _money(price, positive=True)
+                or type(fee) is not D or not _money(fee)):
+            raise ValueError("INVALID_SYNTHETIC_SELL")
+        with self._write():
+            state = self._snapshot()
+            existing = self._db.execute(
+                "SELECT symbol,qty,price,fee FROM hypothetical_sells WHERE id=?",
+                (fill_id,)).fetchone()
+            if existing:
+                if (existing[0] != symbol or existing[1] != qty
+                        or _decimal(existing[2]) != price
+                        or _decimal(existing[3]) != fee):
+                    raise ValueError("CONFLICTING_SELL_FILL_ID")
+                return state
+            if state.halted:
+                raise ValueError("PAPER_BOOK_HALTED")
+            if state.pending:
+                raise ValueError("PENDING_BUY_RECONCILIATION")
+            found = next(((held, basis) for name, held, basis in state.positions
+                          if name == symbol), None)
+            if found is None or qty > found[0]:
+                raise ValueError("SYNTHETIC_OVERSELL")
+            held, basis = found
+            try:
+                with localcontext() as context:
+                    context.prec = 50
+                    gross = price * qty
+                    if fee > gross:
+                        raise ValueError("SELL_FEE_EXCEEDS_PROCEEDS")
+                    retired = (basis if qty == held else
+                               (basis * qty / held).quantize(
+                                   D("0.01"), rounding=ROUND_HALF_EVEN))
+                    proceeds = gross - fee
+                    new_cash = state.cash + proceeds
+                    # No fractional-cent cash or corrupted basis.
+                    if (not new_cash.is_finite() or new_cash < 0
+                            or retired <= 0
+                            or new_cash != new_cash.quantize(D("0.01"))):
+                        raise ValueError("INVALID_SELL_ACCOUNTING")
+                next_sequence = self._db.execute(
+                    "SELECT COUNT(*) FROM hypothetical_sells").fetchone()[0] + 1
+            except DecimalException as exc:
+                raise ValueError("INVALID_SELL_ACCOUNTING") from exc
+            self._db.execute(
+                "INSERT INTO hypothetical_sells"
+                "(id,sequence,symbol,qty,price,fee,basis_retired) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (fill_id, next_sequence, symbol, qty, str(price),
+                 str(fee), str(retired)))
+            self._db.execute(
+                "UPDATE book_meta SET value=? WHERE key='cash'",
+                (str(new_cash),))
             return self._snapshot()
 
     def cancel_remaining(self, intent_id: str):
