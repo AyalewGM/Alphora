@@ -3,7 +3,7 @@ import csv
 import re
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal as D
+from decimal import Decimal as D, DecimalException, Inexact, localcontext
 from math import sqrt
 
 @dataclass(frozen=True)
@@ -88,6 +88,20 @@ class Result:
     transactions: int
     equity_curve: tuple[D,...]
 
+def _exact_ledger(operation):
+    """Reject rounded/overflowing simulated cash and market-value arithmetic.
+
+    Fractional sizing and performance ratios may be rounded for research, but
+    the cash ledger must not silently lose dollars or small positions.
+    """
+    try:
+        with localcontext() as context:
+            context.traps[Inexact] = True
+            return operation()
+    except DecimalException as exc:
+        raise ValueError("UNREPRESENTABLE_BACKTEST_LEDGER_ARITHMETIC") from exc
+
+
 def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=D("0.10"),lookback=20):
     validate(bars)
     # A positive open price on a zero-volume session does not establish a
@@ -103,7 +117,7 @@ def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=
         raise ValueError("INVALID_PARAMETERS")
     cash=initial
     shares=0
-    costs=cost_bps/D(10000)
+    costs=_exact_ledger(lambda: cost_bps/D(10000))
     equity=[initial]
     transactions=0
     for i in range(1,len(bars)):
@@ -111,16 +125,18 @@ def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=
         want=signal([b.close for b in bars[:i]],strategy,lookback)
         opening=bars[i].open
         if shares and not want:
-            cash+=shares*opening*(1-costs)
+            cash=_exact_ledger(lambda: cash+shares*opening*(1-costs))
             shares=0
             transactions+=1
         elif want and not shares:
-            quantity=int(min(cash,cash*max_allocation)/(opening*(1+costs)))
+            budget=_exact_ledger(lambda: min(cash,cash*max_allocation))
+            unit_cost=_exact_ledger(lambda: opening*(1+costs))
+            quantity=int(budget/unit_cost)
             if quantity>0:
-                cash-=quantity*opening*(1+costs)
+                cash=_exact_ledger(lambda: cash-quantity*unit_cost)
                 shares=quantity
                 transactions+=1
-        equity.append(cash+shares*bars[i].close)
+        equity.append(_exact_ledger(lambda: cash+shares*bars[i].close))
     peak=equity[0]
     drawdown=D(0)
     returns=[]
