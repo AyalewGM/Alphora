@@ -8,3 +8,18 @@
 .filebutton input{position:absolute;width:1px;height:1px;opacity:0}
 .clearbutton{background:#222f40;border-color:#354559}
 .import-panel .import-error{flex-basis:100%;color:#f2a3ac;margin:0}
+
+.risk-draft-panel{margin-bottom:16px;padding:18px;display:grid;gap:12px}
+.risk-draft-panel h2{font-size:15px;margin:0 0 7px}
+.risk-draft-panel p{font-size:11px;line-height:1.6;color:#a6b7ca;margin:0}
+.risk-draft-panel form{display:flex;flex-wrap:wrap;align-items:end;gap:12px}
+.risk-draft-panel label{display:flex;flex-direction:column;gap:7px;font-size:11px;color:#c3d3e8;min-width:170px;flex:1}
+.risk-draft-panel input{border:1px solid #425b79;border-radius:6px;background:#0b1522;color:#eaf3ff;padding:10px;width:100%;font-size:13px}
+.risk-draft-panel input:focus-visible,.draft-actions button:focus-visible{outline:2px solid #87b6ff;outline-offset:2px}
+.draft-actions{display:flex;gap:8px;flex-wrap:wrap}
+.draft-actions button{border-radius:6px;border:1px solid #3b608c;background:#1c3d64;color:#edf4ff;padding:10px 12px;font-size:11px}
+.draft-actions button:last-child{background:#1b2737;border-color:#425068}
+.risk-draft-panel .draft-error{color:#ff9da9}
+.draft-result{padding:12px;border:1px solid #517095;border-radius:6px;background:#17293e}
+.draft-result strong{color:#b9d8ff;font-size:12px}
+.draft-result p{margin-top:6px}
