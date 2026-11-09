@@ -142,6 +142,37 @@ class BacktestTests(unittest.TestCase):
                                     "\n" + good_later + "\n", encoding="utf-8")
                     self.assertEqual(load_csv(path)[0].open, D(price))
 
+    def test_inexact_cash_ledger_fails_closed(self):
+        # At default Decimal precision, subtracting one dollar from 1e30
+        # silently produces 1e30 again. Never count the share without paying.
+        tiny = [
+            Bar(date(2025, 1, 2), D("1"), D("1"), D("1"), D("1"), 1000),
+            Bar(date(2025, 1, 3), D("1"), D("1"), D("1"), D("1"), 1000),
+        ]
+        with self.assertRaisesRegex(
+            ValueError, "UNREPRESENTABLE_BACKTEST_LEDGER_ARITHMETIC"
+        ):
+            backtest(tiny, "buy_hold", initial=D("1e30"),
+                     max_allocation=D("1e-30"), cost_bps=D(0))
+        # Normal owner-approved capital and allocation remain usable.
+        ordinary = backtest(tiny, "buy_hold", initial=D("100000"),
+                            max_allocation=D("0.10"), cost_bps=D(0))
+        self.assertEqual(ordinary.equity_curve, (D("100000"), D("100000")))
+        self.assertEqual(ordinary.transactions, 1)
+
+    def test_inexact_market_valuation_fails_closed(self):
+        # High-precision but finite marks can silently round a held
+        # position value. Reject rather than report an invented equity.
+        tiny = [
+            Bar(date(2025, 1, 2), D("1"), D("1"), D("1"), D("1"), 1000),
+            Bar(date(2025, 1, 3), D("1"), D("1.000000000000000000000000001"),
+                D("1"), D("1.000000000000000000000000001"), 1000),
+        ]
+        with self.assertRaisesRegex(
+            ValueError, "UNREPRESENTABLE_BACKTEST_LEDGER_ARITHMETIC"
+        ):
+            backtest(tiny, "buy_hold", cost_bps=D(0))
+
     def test_zero_volume_rejected_before_hypothetical_fills(self):
         # The primitive simulator is also callable without the pinned replay
         # wrapper. Never fabricate an open fill on a no-trade session.
