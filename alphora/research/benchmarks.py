@@ -47,7 +47,10 @@ def _aligned_metrics(equity_curve) -> AlignedWindowMetrics:
     sharpe = None
     if len(returns) > 1:
         mean = sum(returns) / len(returns)
-        variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+        try:
+            variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+        except OverflowError as exc:
+            raise ValueError("NONFINITE_RESEARCH_REPORT") from exc
         if not isfinite(mean) or not isfinite(variance):
             raise ValueError("NONFINITE_RESEARCH_REPORT")
         if variance > 0:
