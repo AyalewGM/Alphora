@@ -61,6 +61,27 @@ class MarketManifestTests(unittest.TestCase):
             with self.subTest(v=v), self.assertRaisesRegex(ValueError, "INCOMPLETE_SESSION_COVERAGE"):
                 check(v)
 
+    def test_saturday_and_sunday_sessions_are_not_trading_days(self):
+        m = fixture()
+        # A self-attested calendar could otherwise claim plausible 09:30-
+        # 16:00 bars on weekends, silently changing replay/benchmark dates.
+        # Keep every other point-in-time condition valid to isolate the gate.
+        for weekend in (date(2025, 11, 22), date(2025, 11, 23)):
+            with self.subTest(day=weekend):
+                known_on = datetime(2025, 11, 21, 15, tzinfo=timezone.utc)
+                candidate = replace(
+                    m,
+                    membership=replace(m.membership, day=date(2025, 11, 21),
+                                       available_at=known_on),
+                    calendar_available_at=known_on,
+                    sessions=(session(weekend), m.sessions[-1]),
+                    bar_days=(weekend, m.bar_days[-1]),
+                )
+                with self.assertRaisesRegex(ValueError, "UNSUPPORTED_SESSION"):
+                    check(candidate)
+        # A declared normal weekday plus an explicit early close still passes.
+        self.assertEqual(len(check(m).manifest.sessions), 2)
+
     def test_early_close_must_be_explicitly_declared(self):
         m = fixture()
         wrong = replace(m.sessions[-1], kind="REGULAR")
