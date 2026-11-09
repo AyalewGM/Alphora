@@ -60,5 +60,7 @@ Ratios and Sharpe remain finite-precision descriptive research estimates,
 not audited returns; the inputs are still price-only, without verified
 vendor provenance, corporate actions or a true LEAN engine run.
 
+If a finite Decimal aligned equity series would overflow a float daily return or variance (or yield non-finite Sharpe), aligned metrics fail closed with `NONFINITE_RESEARCH_REPORT` instead of reporting an infinite/NaN or misleading zero statistic. This bound concerns synthetic numerical representability, not real-market data validation.
+
 All comparisons are deterministic offline research, not broker simulation.
 No Alpaca connectivity, credentials, orders, deployment or live trading.
