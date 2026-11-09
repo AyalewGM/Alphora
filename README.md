@@ -29,6 +29,6 @@ Original FinRL source is MIT-licensed © 2020 AI4Finance Foundation. Future opti
 ## Next milestones
 1. Historical OHLCV and corporate action data with point-in-time reproducibility.
 2. Long-only momentum, trend and mean-reversion baselines; walk-forward backtests with costs.
-3. Paper-only broker adapter, persistent order ledger, broker reconciliation, kill switch and sessions.
+3. Paper-only broker adapter, persistent order ledger, broker reconciliation, kill switch and sessions. See [broker adapter design](docs/BROKER_ADAPTER.md); the order ledger (`alphora/orders.py`), paper venue and order manager (`alphora/broker/`), reconciliation (`alphora/reconcile.py`), kill switch (`alphora/killswitch.py`) and offline session runner (`alphora/runner.py`) are implemented.
 4. Research: FinRL deep RL, gradient boosting, news event classification and regime-aware evaluation.
 5. Forward paper-trading review against SPY and simple baselines. No claim of guaranteed returns.

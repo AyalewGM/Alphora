@@ -1,7 +1,9 @@
-"""Durable *offline* reservation accounting for hypothetical paper BUY intents.
+"""Durable *offline* reservation accounting for hypothetical paper order intents.
 
-No brokers, orders, networks, quotes, strategy execution or sell accounting exist.
-External account/position reconciliation and a fresh risk decision remain mandatory.
+No brokers, orders, networks, quotes or strategy execution exist. BUY intents
+still require an external reconciled account and a fresh risk decision; SELL
+intents only consume internally tracked positions (they reduce exposure, so no
+risk-gate call is needed) and remain blocked while the book is halted.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -38,6 +40,7 @@ class PaperBookSnapshot:
     available_cash: D
     positions: tuple[tuple[str, int, D], ...]
     pending: tuple[tuple[str, str, int, D], ...]
+    pending_sells: tuple[tuple[str, str, int], ...]
     halted: bool
     session_id: str
 
@@ -75,10 +78,22 @@ class OfflineReservations:
                     id TEXT PRIMARY KEY, intent_id TEXT NOT NULL REFERENCES buy_intents(id),
                     qty INTEGER NOT NULL CHECK(qty>0), price TEXT NOT NULL, fee TEXT NOT NULL
                 )""")
+                self._db.execute("""CREATE TABLE IF NOT EXISTS sell_intents (
+                    id TEXT PRIMARY KEY, symbol TEXT NOT NULL, qty INTEGER NOT NULL CHECK(qty>0),
+                    limit_price TEXT NOT NULL, fee_budget TEXT NOT NULL,
+                    filled INTEGER NOT NULL DEFAULT 0,
+                    fees_paid TEXT NOT NULL DEFAULT '0', status TEXT NOT NULL DEFAULT 'OPEN'
+                )""")
+                self._db.execute("""CREATE TABLE IF NOT EXISTS hypothetical_sell_fills (
+                    id TEXT PRIMARY KEY, intent_id TEXT NOT NULL REFERENCES sell_intents(id),
+                    qty INTEGER NOT NULL CHECK(qty>0), price TEXT NOT NULL, fee TEXT NOT NULL
+                )""")
                 meta = dict(self._db.execute("SELECT key,value FROM book_meta"))
                 if not meta:
                     if (self._db.execute("SELECT 1 FROM buy_intents LIMIT 1").fetchone()
-                            or self._db.execute("SELECT 1 FROM hypothetical_fills LIMIT 1").fetchone()):
+                            or self._db.execute("SELECT 1 FROM hypothetical_fills LIMIT 1").fetchone()
+                            or self._db.execute("SELECT 1 FROM sell_intents LIMIT 1").fetchone()
+                            or self._db.execute("SELECT 1 FROM hypothetical_sell_fills LIMIT 1").fetchone()):
                         raise ValueError("BOOK_STATE_CORRUPT")
                     self._db.executemany("INSERT INTO book_meta(key,value) VALUES(?,?)", [
                         ("session_id", session_id), ("starting_cash", str(starting_cash)),
@@ -143,7 +158,7 @@ class OfflineReservations:
                 remaining = (qty - filled) * limit + budget - paid
                 reserved += remaining
                 active.append((ident, symbol, qty - filled, remaining))
-        holdings = {}
+        bought = {}
         fill_totals = {}
         spent_cash = D(0)
         for fill_id, intent_id, qty, price, fee in self._db.execute(
@@ -158,16 +173,74 @@ class OfflineReservations:
             old_qty, old_fees = fill_totals.get(intent_id, (0, D(0)))
             fill_totals[intent_id] = (old_qty + qty, old_fees + fee)
             symbol = intents[intent_id][0]
-            old_qty, old_cost = holdings.get(symbol, (0, D(0)))
-            holdings[symbol] = old_qty + qty, old_cost + qty * price + fee
+            old_qty, old_cost = bought.get(symbol, (0, D(0)))
+            bought[symbol] = old_qty + qty, old_cost + qty * price + fee
             spent_cash += qty * price + fee
-        if (reserved > cash or cash + spent_cash != INITIAL_EQUITY
-                or any(fill_totals.get(ident, (0, D(0))) != (row[5], row[6])
-                       for ident, row in intents.items())):
+        sell_intents = {}
+        pending_sells = []
+        for ident, symbol, qty, limit, budget, filled, paid, status in self._db.execute(
+            "SELECT id,symbol,qty,limit_price,fee_budget,filled,fees_paid,status "
+            "FROM sell_intents ORDER BY id"
+        ):
+            limit, budget, paid = map(_decimal, (limit, budget, paid))
+            if (not isinstance(ident, str) or not _ID.fullmatch(ident)
+                    or not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
+                    or not _integer_shares(qty) or type(filled) is not int
+                    or not 0 <= filled <= qty
+                    or not _money(limit, positive=True) or not _money(budget)
+                    or not _money(paid) or paid > budget
+                    or status not in ("OPEN", "FILLED", "CANCELLED")
+                    or (status == "FILLED") != (filled == qty)
+                    or (status == "OPEN" and filled == qty)):
+                raise ValueError("BOOK_STATE_CORRUPT")
+            sell_intents[ident] = (symbol, limit, filled, paid)
+            if status == "OPEN":
+                pending_sells.append((ident, symbol, qty - filled))
+        sell_totals = {}
+        sold = {}
+        earned_cash = D(0)
+        for fill_id, intent_id, qty, price, fee in self._db.execute(
+            "SELECT id,intent_id,qty,price,fee FROM hypothetical_sell_fills"
+        ):
+            price, fee = _decimal(price), _decimal(fee)
+            intent = sell_intents.get(intent_id)
+            if (not isinstance(fill_id, str) or not _ID.fullmatch(fill_id)
+                    or intent is None or not _integer_shares(qty)
+                    or not _money(price, positive=True) or not _money(fee)
+                    or price < intent[1]):
+                raise ValueError("BOOK_STATE_CORRUPT")
+            old_qty, old_fees = sell_totals.get(intent_id, (0, D(0)))
+            sell_totals[intent_id] = (old_qty + qty, old_fees + fee)
+            symbol = intent[0]
+            old_qty, old_proceeds = sold.get(symbol, (0, D(0)))
+            sold[symbol] = old_qty + qty, old_proceeds + qty * price - fee
+            earned_cash += qty * price - fee
+        positions = {}
+        for symbol, (bought_qty, cost) in bought.items():
+            sold_qty = sold.get(symbol, (0, D(0)))[0]
+            remaining = bought_qty - sold_qty
+            if remaining < 0:
+                raise ValueError("BOOK_STATE_CORRUPT")
+            if remaining:
+                positions[symbol] = (remaining, cost * remaining / bought_qty)
+        pending_sell_qty = {}
+        for _ident, symbol, remaining_qty in pending_sells:
+            pending_sell_qty[symbol] = pending_sell_qty.get(symbol, 0) + remaining_qty
+        if (any(symbol not in bought for symbol in sold)
+                or any(pending > positions.get(symbol, (0, D(0)))[0]
+                       for symbol, pending in pending_sell_qty.items())):
             raise ValueError("BOOK_STATE_CORRUPT")
-        return PaperBookSnapshot(cash, reserved, cash - reserved,
-                                 tuple((sym, *holdings[sym]) for sym in sorted(holdings)),
-                                 tuple(active), halted == "1", self._meta("session_id"))
+        if (reserved > cash or cash + spent_cash - earned_cash != INITIAL_EQUITY
+                or any(fill_totals.get(ident, (0, D(0))) != (row[5], row[6])
+                       for ident, row in intents.items())
+                or any(sell_totals.get(ident, (0, D(0))) != (row[2], row[3])
+                       for ident, row in sell_intents.items())):
+            raise ValueError("BOOK_STATE_CORRUPT")
+        return PaperBookSnapshot(
+            cash, reserved, cash - reserved,
+            tuple((sym, *positions[sym]) for sym in sorted(positions)),
+            tuple(active), tuple(pending_sells), halted == "1",
+            self._meta("session_id"))
 
     def snapshot(self):
         self._db.execute("BEGIN")
@@ -371,4 +444,112 @@ class OfflineReservations:
                 raise ValueError("UNKNOWN_INTENT")
             if row[0] == "OPEN":
                 self._db.execute("UPDATE buy_intents SET status='CANCELLED' WHERE id=?", (intent_id,))
+            return self._snapshot()
+
+    def reserve_sell(self, intent_id: str, symbol: str, qty: int,
+                     limit_price: D, *, fee_budget: D = D(0)):
+        """Reserve held shares for a hypothetical SELL intent; never routed.
+
+        Sells only consume internally tracked positions, so no external
+        account assertion or risk-gate call applies — but the book-wide halt
+        still blocks new intents and new fills.
+        """
+        if (not isinstance(intent_id, str) or not _ID.fullmatch(intent_id)
+                or not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
+                or not _integer_shares(qty)
+                or not _money(limit_price, positive=True) or not _money(fee_budget)):
+            raise ValueError("INVALID_SELL_INTENT")
+        if self.snapshot().halted:
+            raise ValueError("PAPER_BOOK_HALTED")
+        with self._write():
+            snapshot = self._snapshot()
+            if snapshot.halted:
+                raise ValueError("PAPER_BOOK_HALTED")
+            existing = self._db.execute(
+                "SELECT symbol,qty,limit_price,fee_budget,status "
+                "FROM sell_intents WHERE id=?", (intent_id,)).fetchone()
+            if existing is not None:
+                fields = (existing[0], existing[1], _decimal(existing[2]),
+                          _decimal(existing[3]))
+                if fields != (symbol, qty, limit_price, fee_budget):
+                    raise ValueError("CONFLICTING_INTENT_ID")
+                if existing[4] == "CANCELLED":
+                    raise ValueError("CANCELLED_INTENT_ID")
+                return self._snapshot()
+            held = next((q for sym, q, _cost in snapshot.positions
+                         if sym == symbol), 0)
+            pending = sum((remaining for _i, sym, remaining
+                           in snapshot.pending_sells if sym == symbol), 0)
+            if qty > held - pending:
+                raise ValueError("INSUFFICIENT_POSITION")
+            self._db.execute(
+                "INSERT INTO sell_intents(id,symbol,qty,limit_price,fee_budget) "
+                "VALUES(?,?,?,?,?)",
+                (intent_id, symbol, qty, str(limit_price), str(fee_budget)))
+            return self._snapshot()
+
+    def record_sell_fill(self, intent_id: str, fill_id: str,
+                         qty: int, price: D, *, fee: D = D(0)):
+        """Record an *invented offline* SELL fill, crediting net proceeds.
+
+        Sell fills must respect the stored minimum limit price, stay within
+        quantity and fee budgets, and never exceed recorded holdings.
+        """
+        if (not isinstance(intent_id, str) or not _ID.fullmatch(intent_id)
+                or not isinstance(fill_id, str) or not _ID.fullmatch(fill_id)
+                or not _integer_shares(qty) or not _money(price, positive=True)
+                or not _money(fee)):
+            raise ValueError("INVALID_SYNTHETIC_FILL")
+        with self._write():
+            existing = self._db.execute(
+                "SELECT intent_id,qty,price,fee FROM hypothetical_sell_fills "
+                "WHERE id=?", (fill_id,)).fetchone()
+            if existing:
+                if existing != (intent_id, qty, str(price), str(fee)):
+                    if (existing[0] != intent_id or existing[1] != qty or
+                            D(existing[2]) != price or D(existing[3]) != fee):
+                        raise ValueError("CONFLICTING_FILL_ID")
+                return self._snapshot()
+            if self._meta("halted") == "1":
+                raise ValueError("PAPER_BOOK_HALTED")
+            row = self._db.execute(
+                "SELECT symbol,qty,filled,limit_price,fee_budget,fees_paid,status "
+                "FROM sell_intents WHERE id=?", (intent_id,)).fetchone()
+            if row is None or row[6] != "OPEN":
+                raise ValueError("NO_OPEN_INTENT")
+            symbol, total, filled, limit, budget, paid, _open = row
+            if (filled + qty > total or price < D(limit)
+                    or fee + D(paid) > D(budget)):
+                raise ValueError("FILL_EXCEEDS_LIMITS")
+            snapshot = self._snapshot()
+            held = next((q for sym, q, _cost in snapshot.positions
+                         if sym == symbol), 0)
+            if qty > held:
+                raise ValueError("FILL_EXCEEDS_POSITION")
+            self._db.execute(
+                "INSERT INTO hypothetical_sell_fills(id,intent_id,qty,price,fee) "
+                "VALUES(?,?,?,?,?)",
+                (fill_id, intent_id, qty, str(price), str(fee)))
+            self._db.execute(
+                "UPDATE book_meta SET value=? WHERE key='cash'",
+                (str(D(self._meta("cash")) + qty * price - fee),))
+            self._db.execute(
+                "UPDATE sell_intents SET filled=?, fees_paid=?, status=? WHERE id=?",
+                (filled + qty, str(D(paid) + fee),
+                 "FILLED" if filled + qty == total else "OPEN", intent_id))
+            return self._snapshot()
+
+    def cancel_sell(self, intent_id: str):
+        """Release the un-filled share reservation of a sell intent."""
+        if not isinstance(intent_id, str) or not _ID.fullmatch(intent_id):
+            raise ValueError("INVALID_INTENT_ID")
+        with self._write():
+            row = self._db.execute(
+                "SELECT status FROM sell_intents WHERE id=?", (intent_id,)).fetchone()
+            if row is None:
+                raise ValueError("UNKNOWN_INTENT")
+            if row[0] == "OPEN":
+                self._db.execute(
+                    "UPDATE sell_intents SET status='CANCELLED' WHERE id=?",
+                    (intent_id,))
             return self._snapshot()

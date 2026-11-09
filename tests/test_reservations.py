@@ -470,5 +470,129 @@ os._exit(24)  # No close or normal interpreter shutdown.
         self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
 
 
+class SellReservationTests(unittest.TestCase):
+    """Offline sell-intent coverage, fill bounds, cash credit and durability."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "paper.sqlite"
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        account = PaperAccount(D("100000"), D("100000"), D("100000"),
+                               D("0"), "2026-11-02")
+        self.book.reserve_buy("b1", account,
+                              BuyProposal("SPY", D("100"), D("50"), D("48")),
+                              fee_budget=D("10"), reconciled=True)
+        self.book.record_hypothetical_fill("b1", "bf1", 100, D("50"),
+                                           fee=D("2"))
+        self.account = account
+
+    def tearDown(self):
+        self.book.close()
+        self.tmp.cleanup()
+
+    def sell(self, ident="s1", qty=60, limit="49", **kw):
+        return self.book.reserve_sell(ident, "SPY", qty, D(limit), **kw)
+
+    def test_reserve_sell_validation_dedupe_conflict(self):
+        state = self.sell()
+        self.assertEqual(state.pending_sells, (("s1", "SPY", 60),))
+        self.assertEqual(self.sell(), state)
+        with self.assertRaisesRegex(ValueError, "CONFLICTING_INTENT_ID"):
+            self.sell(qty=50)
+        for bad in (("x y", "SPY", 1, D("1")), ("i", "spy", 1, D("1")),
+                    ("i", "SPY", 0, D("1")), ("i", "SPY", 1.5, D("1")),
+                    ("i", "SPY", 1, D("0")), ("i", "SPY", 1, D("nan"))):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(ValueError, "INVALID_SELL_INTENT"):
+                    self.book.reserve_sell(*bad)
+
+    def test_pending_sell_coverage_uses_held_minus_pending(self):
+        self.sell("s1", 60)
+        with self.assertRaisesRegex(ValueError, "INSUFFICIENT_POSITION"):
+            self.sell("s2", 41)
+        self.sell("s2", 40)
+        with self.assertRaisesRegex(ValueError, "INSUFFICIENT_POSITION"):
+            self.sell("s3", 1)
+        self.assertEqual(len(self.book.snapshot().pending_sells), 2)
+
+    def test_sell_never_available_without_holdings(self):
+        with self.assertRaisesRegex(ValueError, "INSUFFICIENT_POSITION"):
+            self.book.reserve_sell("s-qqq", "QQQ", 1, D("10"))
+
+    def test_sell_fill_credits_proceeds_and_reduces_position(self):
+        self.sell(qty=60, fee_budget=D("10"))
+        state = self.book.record_sell_fill("s1", "sf1", 60, D("52"),
+                                           fee=D("3"))
+        self.assertEqual(state.cash, D("98115"))  # 94998 + 60*52 - 3
+        self.assertEqual(state.positions, (("SPY", 40, D("2000.8")),))
+        self.assertEqual(state.pending_sells, ())
+        self.assertEqual(self.book.record_sell_fill("s1", "sf1", 60, D("52"),
+                                                    fee=D("3")), state)
+        with self.assertRaisesRegex(ValueError, "CONFLICTING_FILL_ID"):
+            self.book.record_sell_fill("s1", "sf1", 60, D("51"), fee=D("3"))
+
+    def test_sell_fill_bounds(self):
+        self.sell(qty=60, limit="50")
+        for qty, price, fee in ((61, D("50"), D(0)), (1, D("49.99"), D(0)),
+                                (1, D("50"), D("11"))):
+            with self.subTest(qty=qty, price=price, fee=fee):
+                with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS"):
+                    self.book.record_sell_fill("s1", "sx", qty, price, fee=fee)
+        for args in (("s1", "f x", 1, D("50")), ("s1", "f", 0, D("50")),
+                     ("s1", "f", 1, D("0")), ("s1", "f", 1, D("50"),)):
+            with self.subTest(args=args):
+                with self.assertRaisesRegex(ValueError, "INVALID_SYNTHETIC_FILL"):
+                    self.book.record_sell_fill(*args, fee=D("-1"))
+        with self.assertRaisesRegex(ValueError, "NO_OPEN_INTENT"):
+            self.book.record_sell_fill("unknown", "f", 1, D("50"))
+
+    def test_cancel_sell_releases_and_terminal_idempotent(self):
+        self.sell()
+        state = self.book.cancel_sell("s1")
+        self.assertEqual(state.pending_sells, ())
+        self.assertEqual(self.book.cancel_sell("s1"), state)
+        with self.assertRaisesRegex(ValueError, "CANCELLED_INTENT_ID"):
+            self.sell()
+        with self.assertRaisesRegex(ValueError, "NO_OPEN_INTENT"):
+            self.book.record_sell_fill("s1", "sf", 1, D("50"))
+        with self.assertRaisesRegex(ValueError, "UNKNOWN_INTENT"):
+            self.book.cancel_sell("nope")
+
+    def test_halt_blocks_sell_reservations_and_fills(self):
+        self.sell()
+        self.book.halt()
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.sell("s2", 10)
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.book.record_sell_fill("s1", "sf", 1, D("52"))
+        # Cancellation remains available while halted.
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.cancel_sell("s1").pending_sells, ())
+
+    def test_sell_state_survives_restart_and_corruption_fails_closed(self):
+        self.sell(qty=60, fee_budget=D("5"))
+        self.book.record_sell_fill("s1", "sf1", 20, D("52"), fee=D("1"))
+        before = self.book.snapshot()
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("UPDATE book_meta SET value='99999' WHERE key='cash'")
+        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+            OfflineReservations(self.path, session_id="2026-11-02")
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("UPDATE book_meta SET value=? WHERE key='cash'",
+                         (str(before.cash),))
+            conn.execute("UPDATE sell_intents SET filled=99 WHERE id='s1'")
+        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+            OfflineReservations(self.path, session_id="2026-11-02")
+        with sqlite3.connect(self.path) as conn:
+            conn.execute("UPDATE sell_intents SET filled=20 WHERE id='s1'")
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
+
 if __name__ == "__main__":
     unittest.main()
