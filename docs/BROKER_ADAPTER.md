@@ -3,9 +3,8 @@
 This is the design for a **paper-only** order-execution layer plus its later
 (separately authorized) live extension. Nothing in this layer is an exchange
 order, broker OMS, trading engine, market data feed, or authorization for
-Alpaca or any other brokerage connectivity. The only implemented component so
-far is `alphora/orders.py`: a durable, offline **order-lifecycle ledger** that
-records hypothetical paper order intents and their claimed state transitions.
+Alpaca or any other brokerage connectivity. The draft contains a local-only venue, lifecycle ledger, manager and session
+runner. They require merged-accounting regression acceptance before integration.
 
 ## Authorization boundary (must NOT be bypassed)
 
@@ -33,13 +32,13 @@ Consequences, by design:
 
 ```
 EntryPlan / ExitPlan (decision.py — read-only proposals, intent keys)
-  -> OfflineReservations.reserve_buy / future sell accounting (cash hold)
+  -> OfflineReservations.reserve_buy / record_hypothetical_sell
   -> OrderLedger (orders.py — durable lifecycle record)         [IMPLEMENTED]
   -> risk.validate_buy re-check immediately before dispatch (TOCTOU guard)
-  -> KillSwitch.assert_clear                                    [PLANNED]
-  -> BrokerAdapter.dispatch                                     [PLANNED]
+  -> manual KillSwitch guard (no automatic broker access)       [DRAFT]
+  -> offline BrokerAdapter.dispatch                             [DRAFT]
   -> fills recorded -> reservation settled or released
-  -> Reconcile (internal ledger vs venue truth) -> halt on FATAL [PLANNED]
+  -> Reconcile internal book/ledger and simulated venue         [DRAFT]
 ```
 
 Planned modules: `alphora/broker/base.py` (protocol + types)
@@ -107,7 +106,8 @@ adapter assertions, not verified venue facts.
   `qty*price + fee`; cancel/session-expiry releases the hold. A SELL reserves
   shares (long-only: dispatch rejects beyond unreserved holdings) and credits
   `qty*price - fee`, reducing cost basis at average cost. `account_snapshot`
-  marks positions at the last supplied marks, falling back to cost basis.
+  rejects any held position missing a mark from the latest advance. Never
+  assume cost basis or previous-session price is a current valuation.
 - Dispatch dedupes by `client_order_id` (identical retry returns the same
   ack; conflicting reuse is rejected) — matching the ledger's idempotency-key
   convention so the manager can retry safely across crashes.
@@ -132,11 +132,13 @@ path:
   `mark_acked`. A venue rejection lands `REJECTED` and releases the cash
   reservation; a local veto or halt never reaches the venue.
 - `execute_exit(plan, *, symbol, limit_price, fee_budget, now)`: new
-  `book.reserve_sell` consumes internally tracked positions (sells reduce
-  exposure, so no risk gate, but the book halt still blocks them) → same
-  ledger/dispatch path. `reservations.py` gained `sell_intents`,
-  `hypothetical_sell_fills`, `record_sell_fill` and `cancel_sell`; positions
-  reduce at average-cost basis and proceeds net of fees credit cash.
+  checks reconciled long inventory, excludes any other working SELL quantity,
+  then dispatches without creating a competing cash/position ledger. The
+  merged #30 `record_hypothetical_sell` is the **sole** authoritative cash,
+  basis and position update on a SELL fill. A daily-loss book halt permits a
+  verified reducing SELL, while a manual kill file blocks all dispatch.
+  The bounded #30 book refuses new BUY reservations after its first SELL;
+  this prototype is not yet a full multi-session OMS.
 - `sync(now)` is the crash-recovery path and is safe to re-run: `SENT`
   orders are resolved via `order_by_client` — for the paper venue, absence is
   confirmed absence (`CANCELLED` + reservation released); fills apply to
@@ -253,3 +255,27 @@ rejection boundaries, limit/slippage/fee fill behaviour, reservation release
 on fill/cancel/expiry, position basis and equity marking, deterministic
 broker ids and fill ordering, and the absence of execution-vocabulary
 attributes.
+
+## Integration correction — 2026-11-08
+
+This draft merges latest `main` while preserving #30's unified BUY/SELL
+bookkeeping. The former alternative sell reservation code was discarded.
+No independent live broker is present or authorized. Cent rounding policy:
+Decimal `ROUND_HALF_EVEN` at `0.01` for venue-executed prices, simulated
+cash changes and proportional average-cost retirement; a full sell retires
+remaining cost basis to avoid stranded subcent residues. Venue fees and
+order limit prices must be whole cents, and incoming synthetic marks are
+normalized to cents before use. Receipt prices and cash are never allowed
+to retain fractional cents.
+
+Current-day holdings require a fresh mark from the most recent advance,
+and runner days missing any held symbol are rejected before ledger writes.
+No source/quote authentication, vendor timestamps, market feed or exchange
+calendar is established by this offline module. Do not treat a stale-price
+error as evidence that a 2% halt was correctly evaluated; it is an unknown
+valuation requiring no new BUYs and operator reconciliation.
+
+**Halt decisions:** loss-triggered book halt blocks new buys but may permit
+independently reconciled reduce-only long exits with fresh marks; a manual
+halt file blocks all dispatch until explicit operator reset. Neither
+condition authorizes real-money trading.
