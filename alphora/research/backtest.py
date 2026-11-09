@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Context, Decimal as D, DecimalException, Inexact, localcontext
-from math import sqrt
+from math import isfinite, sqrt
 
 # Research signal arithmetic must not vary with a caller's Decimal context.
 # This context does not trap rounded averages (e.g. mean of three prices);
@@ -168,11 +168,21 @@ def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=
         for a,b in zip(equity,equity[1:]):
             peak=max(peak,b)
             drawdown=max(drawdown,(peak-b)/peak)
-            returns.append(float(b/a-1))
+            period_return = float(b/a-1)
+            if not isfinite(period_return):
+                raise ValueError("NONFINITE_RESEARCH_REPORT")
+            returns.append(period_return)
         total_return=equity[-1]/initial-1
     sharpe=None
     if len(returns)>1:
         mean=sum(returns)/len(returns)
         variance=sum((x-mean)**2 for x in returns)/(len(returns)-1)
-        if variance>0: sharpe=sqrt(252)*mean/sqrt(variance)
+        # Even finite float returns can overflow squared deviations.
+        # Never return an invented zero/NaN/Inf Sharpe from overflow.
+        if not isfinite(mean) or not isfinite(variance):
+            raise ValueError("NONFINITE_RESEARCH_REPORT")
+        if variance>0:
+            sharpe=sqrt(252)*mean/sqrt(variance)
+            if not isfinite(sharpe):
+                raise ValueError("NONFINITE_RESEARCH_REPORT")
     return Result(strategy,equity[-1],total_return,drawdown,sharpe,transactions,tuple(equity))
