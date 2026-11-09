@@ -3,7 +3,7 @@ import csv
 import re
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal as D, DecimalException, Inexact, localcontext
+from decimal import Context, Decimal as D, DecimalException, Inexact, localcontext
 from math import sqrt
 
 @dataclass(frozen=True)
@@ -88,6 +88,12 @@ class Result:
     transactions: int
     equity_curve: tuple[D,...]
 
+# Fix ledger precision independent of caller-global Decimal context. The
+# default 28 significant digits remain the conservative accounting boundary.
+_LEDGER_CONTEXT = Context(prec=28)
+_LEDGER_CONTEXT.traps[Inexact] = True
+
+
 def _exact_ledger(operation):
     """Reject rounded/overflowing simulated cash and market-value arithmetic.
 
@@ -95,8 +101,7 @@ def _exact_ledger(operation):
     the cash ledger must not silently lose dollars or small positions.
     """
     try:
-        with localcontext() as context:
-            context.traps[Inexact] = True
+        with localcontext(_LEDGER_CONTEXT):
             return operation()
     except DecimalException as exc:
         raise ValueError("UNREPRESENTABLE_BACKTEST_LEDGER_ARITHMETIC") from exc

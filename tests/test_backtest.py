@@ -3,7 +3,7 @@ import csv
 import tempfile
 from dataclasses import replace
 from datetime import date,datetime,timedelta
-from decimal import Decimal as D
+from decimal import Decimal as D, localcontext
 from pathlib import Path
 from alphora.research.backtest import Bar,load_csv,signal,backtest
 
@@ -159,6 +159,24 @@ class BacktestTests(unittest.TestCase):
                             max_allocation=D("0.10"), cost_bps=D(0))
         self.assertEqual(ordinary.equity_curve, (D("100000"), D("100000")))
         self.assertEqual(ordinary.transactions, 1)
+
+    def test_exact_ledger_independent_of_caller_decimal_precision(self):
+        # Without a pinned context, this input fails at precision 28 but
+        # silently succeeds at 80. The same offline artifact must never have
+        # context-dependent cash-ledger acceptance or rejection.
+        tiny = [
+            Bar(date(2025, 1, 2), D("1"), D("1"), D("1"), D("1"), 1000),
+            Bar(date(2025, 1, 3), D("1"), D("1"), D("1"), D("1"), 1000),
+        ]
+        for precision in (6, 28, 80):
+            with self.subTest(precision=precision):
+                with localcontext() as context:
+                    context.prec = precision
+                    with self.assertRaisesRegex(
+                        ValueError, "UNREPRESENTABLE_BACKTEST_LEDGER_ARITHMETIC"
+                    ):
+                        backtest(tiny, "buy_hold", initial=D("1e30"),
+                                 max_allocation=D("1e-30"), cost_bps=D(0))
 
     def test_inexact_market_valuation_fails_closed(self):
         # High-precision but finite marks can silently round a held
