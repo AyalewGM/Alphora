@@ -194,6 +194,52 @@ class MarketManifestTests(unittest.TestCase):
         self.assertNotEqual(check(m).sha256,
                             check(replace(m, instrument=replace(m.instrument, asset_id="new-id"))).sha256)
 
+    def test_long_research_ticker_is_not_paper_ledger_compatible(self):
+        m = fixture()
+        plain = check(m)
+        self.assertEqual(plain.paper_symbol, "NEW")
+        self.assertEqual(plain.paper_symbol_reason,
+                         "PAPER_SYMBOL_REPRESENTABLE_ONLY")
+        for name in ("ABCDEFGHIJK", "ABCDEFGHIJKLMNO"):
+            with self.subTest(symbol=name):
+                instrument = replace(m.instrument, symbols=(
+                    m.instrument.symbols[0],
+                    replace(m.instrument.symbols[1], symbol=name)))
+                new_m = replace(m, instrument=instrument)
+                receipt = check(new_m)
+                self.assertEqual(receipt.manifest.instrument.symbols[-1].symbol, name)
+                self.assertIsNone(receipt.paper_symbol)
+                self.assertEqual(receipt.paper_symbol_reason,
+                                 "PAPER_SYMBOL_UNSUPPORTED_FORMAT")
+                self.assertNotEqual(receipt.sha256, plain.sha256)
+                self.assertEqual(check(
+                    new_m, expected_manifest_sha256=receipt.sha256), receipt)
+        # Longer than the manifest's 15-character security-master bound
+        # is invalid research evidence; it is not normalized or truncated.
+        bad = replace(m.instrument, symbols=(m.instrument.symbols[0],
+                       replace(m.instrument.symbols[1],
+                               symbol="ABCDEFGHIJKLMNOP")))
+        with self.assertRaisesRegex(ValueError, "INVALID_SYMBOL_HISTORY"):
+            check(replace(m, instrument=bad))
+
+    def test_exclusion_and_delisting_do_not_emit_paper_symbol(self):
+        m = fixture()
+        excluded = replace(m, membership=replace(m.membership,
+                           included=False, exclusion_reason="not_in_universe"))
+        excluded_receipt = check(excluded)
+        self.assertIsNone(excluded_receipt.paper_symbol)
+        self.assertEqual(excluded_receipt.paper_symbol_reason,
+                         "PAPER_UNIVERSE_EXCLUDED")
+        last_day = m.bar_days[-1]
+        delisted = replace(m.instrument, delisted_on=last_day,
+                    symbols=(m.instrument.symbols[0],
+                             replace(m.instrument.symbols[1], end=last_day)))
+        receipt = check(replace(m, instrument=delisted))
+        self.assertEqual(receipt.manifest.instrument.delisted_on, last_day)
+        self.assertIsNone(receipt.paper_symbol)
+        self.assertEqual(receipt.paper_symbol_reason,
+                         "PAPER_INSTRUMENT_DELISTED")
+
     def test_receipt_does_not_offer_trading_capabilities(self):
         receipt = check(fixture())
         for name in ("place_order", "trade_eligible", "load_broker", "buy"):
