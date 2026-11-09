@@ -50,5 +50,15 @@ standard deviation; a flat return series yields `None`. Matching dates does
 or corporate-action-adjusted returns. Neither aligned Sharpe nor excess
 constitutes statistical evidence of skill or financial performance.
 
+Aligned ratio, drawdown and daily-return calculations now use a pinned
+28-significant-digit Decimal reporting context, matching the synthetic
+backtest reporting policy. The displayed excess versus the capped SPY
+reference is computed in that context as well. Thus the same synthetic bars
+produce identical comparison figures when called from Decimal precisions 6,
+28 or 80, rather than silently rounding a small excess return to zero.
+Ratios and Sharpe remain finite-precision descriptive research estimates,
+not audited returns; the inputs are still price-only, without verified
+vendor provenance, corporate actions or a true LEAN engine run.
+
 All comparisons are deterministic offline research, not broker simulation.
 No Alpaca connectivity, credentials, orders, deployment or live trading.
