@@ -221,6 +221,31 @@ class BacktestTests(unittest.TestCase):
                     self.assertFalse(signal(trend, "trend", lookback=2))
                     self.assertTrue(signal(reversion, "mean_reversion", lookback=2))
 
+    def test_backtest_reports_ignore_caller_decimal_precision(self):
+        # Identical exact cash/marks must not give zero daily returns or a
+        # missing Sharpe merely because the caller uses 6-digit precision.
+        days = (date(2025, 1, 2), date(2025, 1, 3),
+                date(2025, 1, 6), date(2025, 1, 7))
+        closes = ("1", "1.0000002", "1.0000001", "1.0000003")
+        bars = [
+            Bar(day, D("1"), D("1.0000005"), D("0.9999995"),
+                D(close), 1000000)
+            for day, close in zip(days, closes)
+        ]
+        results = []
+        for precision in (6, 28, 80):
+            with self.subTest(precision=precision):
+                with localcontext() as context:
+                    context.prec = precision
+                    result = backtest(bars, "buy_hold", cost_bps=D(0))
+                self.assertEqual(result.final_equity, D("100000.003"))
+                self.assertEqual(result.total_return, D("0.00000003"))
+                self.assertGreater(result.max_drawdown, D(0))
+                self.assertIsNotNone(result.sharpe)
+                results.append(result)
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[1], results[2])
+
     def test_zero_volume_rejected_before_hypothetical_fills(self):
         # The primitive simulator is also callable without the pinned replay
         # wrapper. Never fabricate an open fill on a no-trade session.

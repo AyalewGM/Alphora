@@ -10,6 +10,9 @@ from math import sqrt
 # This context does not trap rounded averages (e.g. mean of three prices);
 # it provides deterministic, bounded-precision comparisons, not exact math.
 _SIGNAL_CONTEXT = Context(prec=28)
+# Performance statistics are research approximations, but must be identical
+# for identical inputs regardless of the caller's ambient Decimal precision.
+_REPORT_CONTEXT = Context(prec=28)
 
 @dataclass(frozen=True)
 class Bar:
@@ -159,13 +162,17 @@ def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=
     peak=equity[0]
     drawdown=D(0)
     returns=[]
-    for a,b in zip(equity,equity[1:]):
-        peak=max(peak,b)
-        drawdown=max(drawdown,(peak-b)/peak)
-        returns.append(float(b/a-1))
+    # A low-precision caller previously rounded tiny returns to zero, making
+    # the same P&L appear to have no Sharpe ratio or a different drawdown.
+    with localcontext(_REPORT_CONTEXT):
+        for a,b in zip(equity,equity[1:]):
+            peak=max(peak,b)
+            drawdown=max(drawdown,(peak-b)/peak)
+            returns.append(float(b/a-1))
+        total_return=equity[-1]/initial-1
     sharpe=None
     if len(returns)>1:
         mean=sum(returns)/len(returns)
         variance=sum((x-mean)**2 for x in returns)/(len(returns)-1)
         if variance>0: sharpe=sqrt(252)*mean/sqrt(variance)
-    return Result(strategy,equity[-1],equity[-1]/initial-1,drawdown,sharpe,transactions,tuple(equity))
+    return Result(strategy,equity[-1],total_return,drawdown,sharpe,transactions,tuple(equity))
