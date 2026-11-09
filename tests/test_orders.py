@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
+from threading import Barrier
 from unittest.mock import patch
 
 from alphora.orders import OrderLedger, LedgerIntegrityError, _configure_wal
@@ -419,8 +420,13 @@ os._exit(23)
         try:
             for wave in range(3):
                 path = Path(self.tmp.name) / f"concurrent-{wave}.sqlite"
+                # Release the first eight tasks together, rather than relying
+                # on thread scheduling to exercise a simultaneous WAL setup.
+                gate = Barrier(8)
 
-                def attempt(_):
+                def attempt(index):
+                    if index < 8:
+                        gate.wait(timeout=15)
                     ledger = OrderLedger(path, session_id="2026-11-02")
                     try:
                         return ledger.create(
