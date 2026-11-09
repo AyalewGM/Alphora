@@ -73,9 +73,15 @@ class PaperOrderManager:
                 any(d.kind == "LOST_ACK" for d in recon.diffs)):
             raise ValueError("STALE_OR_UNCLEAN_RECONCILIATION")
 
-    def _assert_dispatchable(self):
+    def _assert_dispatchable(self, *, reduce_only=False):
         if self._switch is not None:
-            self._switch.assert_clear()
+            # A manual kill is stronger than the 2% loss halt.
+            if self._switch.file_engaged():
+                raise ValueError("KILL_SWITCH_ENGAGED:HALT_FILE")
+            if not reduce_only:
+                self._switch.assert_clear()
+        if self._book.snapshot().halted and not reduce_only:
+            raise ValueError("PAPER_BOOK_HALTED")
 
     # ---- order entry -----------------------------------------------------
 
@@ -130,9 +136,12 @@ class PaperOrderManager:
     def execute_exit(self, plan: ExitPlan, *, symbol, limit_price, recon,
                      fee_budget=D(0), now,
                      max_recon_age_seconds=MAX_RECON_AGE_SECONDS):
-        """Reserve shares, journal and dispatch a SELL intent (no risk gate:
+        """Dispatch a verified reduce-only synthetic SELL.
 
-        exits reduce exposure, but the book halt still blocks them).
+        Merged #30 is the sole position/cash ledger; its recorded synthetic
+        SELL receipt is authoritative. No competing sell reservation ledger.
+        A daily-loss book halt allows reduce-only exits; a manual file halt
+        blocks all orders. The venue reserves shares against overcommit.
         """
         if (not isinstance(plan, ExitPlan)
                 or plan.action != "PROPOSE_PAPER_SELL"
@@ -145,18 +154,23 @@ class PaperOrderManager:
         if not _aware(now):
             raise ValueError("INVALID_TIMESTAMP")
         self._require_clean_recon(recon, now, max_recon_age_seconds)
-        self._assert_dispatchable()
-        if self._book.snapshot().halted:
-            raise ValueError("PAPER_BOOK_HALTED")
+        self._assert_dispatchable(reduce_only=True)
         qty = int(plan.quantity)
-        self._book.reserve_sell(plan.intent_key, symbol, qty, limit_price,
-                                fee_budget=fee_budget)
+        snap = self._book.snapshot()
+        if snap.pending:
+            raise ValueError("PENDING_BUY_RECONCILIATION")
+        held = next((shares for name, shares, _cost in snap.positions
+                     if name == symbol), 0)
+        working = sum(max(0, order.qty - order.filled)
+                      for order in self._ledger.open_orders()
+                      if order.side == "SELL" and order.symbol == symbol
+                      and order.client_order_id != plan.intent_key)
+        if qty > held - working:
+            raise ValueError("INSUFFICIENT_UNRESERVED_SHARES")
         view = self._ledger.create(
             plan.intent_key, symbol=symbol, side="SELL", qty=qty,
             limit_price=limit_price, stop_price=None, now=now)
-        if self._book.snapshot().halted:
-            self._settle_local_reject(view, "PAPER_BOOK_HALTED", now)
-            raise ValueError("PAPER_BOOK_HALTED")
+        self._assert_dispatchable(reduce_only=True)
         return self._send(view, now=now)
 
     # ---- shared send path --------------------------------------------------
@@ -176,7 +190,7 @@ class PaperOrderManager:
             return self._ledger.get(view.client_order_id)
         # The halt file is checked immediately before venue exposure too —
         # it may have appeared between the entry checks and this dispatch.
-        self._assert_dispatchable()
+        self._assert_dispatchable(reduce_only=(view.side == "SELL"))
         ack = self._adapter.dispatch(
             DispatchRequest(view.symbol, view.side, view.qty,
                             view.limit_price),
@@ -199,7 +213,9 @@ class PaperOrderManager:
         if view.side == "BUY":
             self._book.cancel_remaining(view.client_order_id)
         else:
-            self._book.cancel_sell(view.client_order_id)
+            # Merged #30 has no independent sell hold to release.
+            # Venue/ledger open-sell quantities guard share overcommit.
+            return
 
     # ---- cancel -------------------------------------------------------------
 
@@ -304,5 +320,6 @@ class PaperOrderManager:
                                                 fill.fill_id, fill.qty,
                                                 fill.price, fee=fill.fee)
         else:
-            self._book.record_sell_fill(view.client_order_id, fill.fill_id,
-                                        fill.qty, fill.price, fee=fill.fee)
+            self._book.record_hypothetical_sell(fill.fill_id, fill.symbol,
+                                                fill.qty, fill.price,
+                                                fee=fill.fee, allow_halted=True)
