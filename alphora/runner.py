@@ -150,8 +150,9 @@ class PaperSessionRunner:
                 if sym not in marks:
                     continue
                 self._versions[sym] = self._versions.get(sym, 0) + 1
-                pending = sum((r for _i, s, r in snap.pending_sells
-                               if s == sym), 0)
+                pending = sum((max(0, order.qty - order.filled)
+                               for order in self._ledger.open_orders()
+                               if order.side == "SELL" and order.symbol == sym), 0)
                 plan = propose_exit(
                     FilledPosition(sym, sym, D(qty), cost / qty,
                                    self._stop_of(sym) or D(0),
