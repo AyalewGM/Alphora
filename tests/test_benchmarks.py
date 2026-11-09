@@ -131,6 +131,18 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(comparisons[0], comparisons[1])
         self.assertEqual(comparisons[1], comparisons[2])
 
+    def test_extreme_finite_aligned_equity_rejects_float_overflow(self):
+        # Decimal equity remains finite but float reporting overflows:
+        # the first series produces an infinite period return, the second
+        # produces finite period returns with infinite sample variance.
+        for curve in (
+            (D("100000"), D("1e314")),
+            (D("100000"), D("1e205"), D("1e205")),
+        ):
+            with self.subTest(curve=curve):
+                with self.assertRaisesRegex(ValueError, "NONFINITE_RESEARCH_REPORT"):
+                    _aligned_metrics(curve)
+
     def test_flat_strategy_sharpe_is_none_not_fabricated(self):
         falling = [Bar(date(2025, 1, 1) + timedelta(days=i),
                        D(200 - i), D(201 - i), D(199 - i),
