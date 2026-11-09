@@ -8,8 +8,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
+from threading import Barrier
+from unittest.mock import patch
 
-from alphora.orders import OrderLedger, LedgerIntegrityError
+from alphora.orders import OrderLedger, LedgerIntegrityError, _configure_wal
 
 T0 = datetime(2026, 11, 2, 15, 0, tzinfo=timezone.utc)
 
@@ -323,28 +325,132 @@ os._exit(23)
         self.ledger = OrderLedger(self.path, session_id="2026-11-02")
         self.assertEqual(self.ledger.get(self.oid), before)
 
+    def test_wal_setup_retries_only_transient_sqlite_lock_errors(self):
+        class FakeDb:
+            calls = 0
+            error_code = sqlite3.SQLITE_BUSY
+
+            def execute(self, sql):
+                self.calls += 1
+                self.last_sql = sql
+                if self.calls == 1:
+                    error = sqlite3.OperationalError("database is locked")
+                    error.sqlite_errorcode = self.error_code
+                    raise error
+                return self
+
+            def fetchone(self):
+                return ("wal",)
+
+        for code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            with self.subTest(code=code):
+                db = FakeDb()
+                db.error_code = code
+                _configure_wal(db)
+                self.assertEqual(db.calls, 2)
+                self.assertEqual(db.last_sql, "PRAGMA journal_mode=WAL")
+
+        # Other database failures must not be retried or misclassified.
+        db = FakeDb()
+        db.error_code = sqlite3.SQLITE_IOERR
+        with self.assertRaises(sqlite3.OperationalError):
+            _configure_wal(db)
+        self.assertEqual(db.calls, 1)
+
+        # A successful PRAGMA that did not enable WAL must fail closed.
+        db = FakeDb()
+        db.calls = 1
+        db.fetchone = lambda: ("delete",)
+        with self.assertRaisesRegex(LedgerIntegrityError, "WAL_MODE_REQUIRED"):
+            _configure_wal(db)
+
+    def test_wal_retry_deadline_and_malformed_pragma_fail_closed(self):
+        class AlwaysBusy:
+            calls = 0
+
+            def execute(self, sql):
+                self.calls += 1
+                self.last_sql = sql
+                error = sqlite3.OperationalError("database is locked")
+                # Extended codes must be classified by their base SQLite code.
+                error.sqlite_errorcode = sqlite3.SQLITE_BUSY | (1 << 8)
+                raise error
+
+        db = AlwaysBusy()
+        with patch("alphora.orders.monotonic", side_effect=[10.0, 16.0]):
+            with patch("alphora.orders.sleep") as pause:
+                with self.assertRaises(sqlite3.OperationalError):
+                    _configure_wal(db)
+                pause.assert_not_called()
+        self.assertEqual(db.calls, 1)
+
+        # Bound the final backoff to the time remaining in the retry window.
+        db = AlwaysBusy()
+        with patch("alphora.orders.monotonic", side_effect=[10.0, 14.995, 16.0]):
+            with patch("alphora.orders.sleep") as pause:
+                with self.assertRaises(sqlite3.OperationalError):
+                    _configure_wal(db)
+                pause.assert_called_once()
+                self.assertAlmostEqual(pause.call_args.args[0], 0.005, places=6)
+        self.assertEqual(db.calls, 2)
+
+        class MalformedPragma:
+            def __init__(self, result):
+                self.result = result
+                self.calls = 0
+
+            def execute(self, sql):
+                self.calls += 1
+                return self
+
+            def fetchone(self):
+                return self.result
+
+        for result in (None, (), (None,), (1,), ("delete",), ("wal", "extra")):
+            with self.subTest(result=result):
+                db = MalformedPragma(result)
+                with self.assertRaisesRegex(LedgerIntegrityError, "WAL_MODE_REQUIRED"):
+                    _configure_wal(db)
+                self.assertEqual(db.calls, 1)
+
     def test_concurrent_create_serializes_to_one_record(self):
+        # Repeat on fresh databases to exercise simultaneous WAL initialization
+        # and idempotent order creation across independent connection waves.
         self.ledger.close()
-        path = Path(self.tmp.name) / "concurrent.sqlite"
-        def attempt(_):
-            ledger = OrderLedger(path, session_id="2026-11-02")
-            try:
-                return ledger.create("f" * 64, symbol="SPY", side="BUY", qty=10,
-                                     limit_price=D("50"), now=at()).status
-            finally:
-                ledger.close()
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            statuses = list(pool.map(attempt, range(12)))
-        self.assertEqual(statuses.count("CREATED"), 12)
-        ledger = OrderLedger(path, session_id="2026-11-02")
         try:
-            self.assertEqual(len(ledger.orders()), 1)
-            with sqlite3.connect(path) as conn:
-                self.assertEqual(conn.execute(
-                    "SELECT COUNT(*) FROM order_events").fetchone()[0], 1)
+            for wave in range(3):
+                path = Path(self.tmp.name) / f"concurrent-{wave}.sqlite"
+                # Release the first eight tasks together, rather than relying
+                # on thread scheduling to exercise a simultaneous WAL setup.
+                gate = Barrier(8)
+
+                def attempt(index):
+                    if index < 8:
+                        gate.wait(timeout=15)
+                    ledger = OrderLedger(path, session_id="2026-11-02")
+                    try:
+                        return ledger.create(
+                            "f" * 64, symbol="SPY", side="BUY", qty=10,
+                            limit_price=D("50"), now=at()
+                        ).status
+                    finally:
+                        ledger.close()
+
+                with self.subTest(wave=wave):
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        statuses = list(pool.map(attempt, range(12)))
+                    self.assertEqual(statuses.count("CREATED"), 12)
+                    ledger = OrderLedger(path, session_id="2026-11-02")
+                    try:
+                        self.assertEqual(len(ledger.orders()), 1)
+                        with sqlite3.connect(path) as conn:
+                            self.assertEqual(conn.execute(
+                                "SELECT COUNT(*) FROM order_events"
+                            ).fetchone()[0], 1)
+                    finally:
+                        ledger.close()
         finally:
-            ledger.close()
-        self.ledger = OrderLedger(self.path, session_id="2026-11-02")
+            self.ledger = OrderLedger(self.path, session_id="2026-11-02")
 
 
 if __name__ == "__main__":
