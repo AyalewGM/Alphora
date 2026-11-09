@@ -208,6 +208,19 @@ class BacktestTests(unittest.TestCase):
         ):
             backtest(tiny, "buy_hold", cost_bps=D(0))
 
+    def test_signal_decisions_are_independent_of_decimal_precision(self):
+        # Previously a precision-6 caller could buy a falling close while a
+        # precision-28 caller correctly rejected the same trend signal.
+        trend = [D("1.0000000"), D("1.0000011"), D("1.0000010")]
+        # The opposite precision-sensitive boundary occurs for mean reversion.
+        reversion = [D("1.0000000"), D("1.0000011"), D("1.0000005")]
+        for precision in (6, 28, 80):
+            with self.subTest(precision=precision):
+                with localcontext() as context:
+                    context.prec = precision
+                    self.assertFalse(signal(trend, "trend", lookback=2))
+                    self.assertTrue(signal(reversion, "mean_reversion", lookback=2))
+
     def test_zero_volume_rejected_before_hypothetical_fills(self):
         # The primitive simulator is also callable without the pinned replay
         # wrapper. Never fabricate an open fill on a no-trade session.
