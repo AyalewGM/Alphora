@@ -104,8 +104,11 @@ class PaperSessionRunner:
                 for sym, bar in day.bars.items()}
 
     def _account(self, snap, marks):
-        marked = sum(qty * marks.get(sym, cost / qty)
-                     for sym, qty, cost in snap.positions)
+        held = {sym for sym, qty, _cost in snap.positions if qty}
+        if not held.issubset(marks):
+            raise ValueError("UNVERIFIED_OR_STALE_MARK")
+        marked = sum(qty * marks[sym]
+                     for sym, qty, _cost in snap.positions)
         equity = snap.cash + marked
         return PaperAccount(equity, INITIAL_EQUITY, snap.cash,
                             equity - INITIAL_EQUITY, snap.session_id)
@@ -126,6 +129,11 @@ class PaperSessionRunner:
                         and day.day <= self._last_day)):
                 raise ValueError("INVALID_SESSION_DAY")
             marks = self._marks(day)
+            # Missing held-position marks cannot be replaced by cost basis.
+            held = {sym for sym, qty, _cost in self._book.snapshot().positions
+                    if qty}
+            if not held.issubset(marks):
+                raise ValueError("UNVERIFIED_OR_STALE_MARK")
             for bar in day.bars.values():
                 if bar.day.isoformat() != day.day:
                     raise ValueError("INVALID_SESSION_DAY")
