@@ -53,22 +53,26 @@ def _configure_wal(db):
 
     SQLite's busy_timeout does not guarantee that a simultaneous journal-mode
     PRAGMA will wait. Retry *only* SQLite BUSY/LOCKED, never disk or integrity
-    errors; the five-second budget fails closed on a persistent lock.
+    errors. The five-second retry window fails closed on persistent locks;
+    each individual SQLite statement may also wait for its busy timeout.
     """
     deadline = monotonic() + 5.0
     while True:
         try:
             row = db.execute("PRAGMA journal_mode=WAL").fetchone()
-            if row is None or row[0].lower() != "wal":
+            if (row is None or len(row) != 1
+                    or not isinstance(row[0], str) or row[0].lower() != "wal"):
                 raise LedgerIntegrityError("WAL_MODE_REQUIRED")
             return
         except sqlite3.OperationalError as exc:
             error_code = getattr(exc, "sqlite_errorcode", None)
             if (type(error_code) is not int
-                    or (error_code & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-                    or monotonic() >= deadline):
+                    or (error_code & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)):
                 raise
-            sleep(0.02)
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise
+            sleep(min(0.02, remaining))
 
 
 class LedgerIntegrityError(RuntimeError):
