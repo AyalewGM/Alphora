@@ -154,6 +154,8 @@ class PaperOrderManager:
         if not _aware(now):
             raise ValueError("INVALID_TIMESTAMP")
         self._require_clean_recon(recon, now, max_recon_age_seconds)
+        if recon.status != "CLEAN":
+            raise ValueError("STALE_OR_UNCLEAN_RECONCILIATION")
         self._assert_dispatchable(reduce_only=True)
         qty = int(plan.quantity)
         snap = self._book.snapshot()
@@ -167,6 +169,12 @@ class PaperOrderManager:
                       and order.client_order_id != plan.intent_key)
         if qty > held - working:
             raise ValueError("INSUFFICIENT_POSITION")
+        # The paper venue must attest that the held ticker was marked in the
+        # latest batch within five seconds. No cost-basis or stale quote exit.
+        checker = getattr(self._adapter, "require_fresh_mark", None)
+        if not callable(checker):
+            raise ValueError("UNVERIFIED_OR_STALE_MARK")
+        checker(symbol, at=now)
         view = self._ledger.create(
             plan.intent_key, symbol=symbol, side="SELL", qty=qty,
             limit_price=limit_price, stop_price=None, now=now)
