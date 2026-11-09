@@ -201,6 +201,9 @@ def inspect_market_manifest(manifest: MarketManifest, *,
                 or session.opens_at >= session.closes_at or
                 session.opens_at.astimezone(_ET).date() != session.day or
                 session.closes_at.astimezone(_ET).date() != session.day or
+                # No Saturday/Sunday regular US equity/ETF sessions.
+                # This check does not authenticate holidays or early closes.
+                session.day.weekday() >= 5 or
                 session.opens_at.astimezone(_ET).time() != time(9, 30) or
                 session.kind not in ("REGULAR", "EARLY_CLOSE") or
                 (session.kind == "REGULAR" and
