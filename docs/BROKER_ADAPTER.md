@@ -279,3 +279,13 @@ valuation requiring no new BUYs and operator reconciliation.
 independently reconciled reduce-only long exits with fresh marks; a manual
 halt file blocks all dispatch until explicit operator reset. Neither
 condition authorizes real-money trading.
+
+### Reduce-only SELL provenance gate
+
+The manager requires a `CLEAN` reconciliation certificate and a ticker mark
+from the paper venue's latest simulated batch, no more than five seconds old
+relative to the decision time. A missing or stale mark raises
+`UNVERIFIED_OR_STALE_MARK` and no new SELL is dispatched. This is a *freshness
+contract for caller-attested synthetic data*, not a vendor authentication or
+authorization to connect a live market feed. A manual file kill takes
+precedence over the loss-halt allowance.
