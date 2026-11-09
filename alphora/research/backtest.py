@@ -176,7 +176,10 @@ def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=
     sharpe=None
     if len(returns)>1:
         mean=sum(returns)/len(returns)
-        variance=sum((x-mean)**2 for x in returns)/(len(returns)-1)
+        try:
+            variance=sum((x-mean)**2 for x in returns)/(len(returns)-1)
+        except OverflowError as exc:
+            raise ValueError("NONFINITE_RESEARCH_REPORT") from exc
         # Even finite float returns can overflow squared deviations.
         # Never return an invented zero/NaN/Inf Sharpe from overflow.
         if not isfinite(mean) or not isfinite(variance):
