@@ -487,19 +487,26 @@ class OfflineReservations:
 
 
     def record_hypothetical_sell(self, fill_id: str, symbol: str,
-                                 qty: int, price: D, *, fee: D = D(0)):
+                                 qty: int, price: D, *, fee: D = D(0),
+                                 allow_halted: bool = False):
         """Atomically record a caller-invented SELL receipt in the BUY book.
 
         This is deliberately NOT a sell order/authorization API. It has no
         quote, timestamp, external fill provenance or automated executor.
         SELLs require a fully resolved BUY book; after the first SELL, no
         additional BUY may be reserved in this limited accounting phase.
+        With allow_halted=True, a trusted, independently reconciled reduce-only
+        paper manager may settle an existing long position during a persistent
+        DAILY_LOSS_HALT. Manual kill files are checked by that manager and
+        must never be bypassed by this bookkeeping option. Default denies it.
+
         """
         if (not isinstance(fill_id, str) or not _ID.fullmatch(fill_id)
                 or not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
                 or not _integer_shares(qty)
                 or type(price) is not D or not _money(price, positive=True)
-                or type(fee) is not D or not _money(fee)):
+                or type(fee) is not D or not _money(fee)
+                or type(allow_halted) is not bool):
             raise ValueError("INVALID_SYNTHETIC_SELL")
         with self._write():
             state = self._snapshot()
@@ -512,7 +519,7 @@ class OfflineReservations:
                         or _decimal(existing[3]) != fee):
                     raise ValueError("CONFLICTING_SELL_FILL_ID")
                 return state
-            if state.halted:
+            if state.halted and not allow_halted:
                 raise ValueError("PAPER_BOOK_HALTED")
             if state.pending:
                 raise ValueError("PENDING_BUY_RECONCILIATION")
