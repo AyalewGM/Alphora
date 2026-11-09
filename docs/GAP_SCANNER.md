@@ -30,6 +30,18 @@ or paper-order eligibility. Its sample data in tests are entirely synthetic.
 - Only NYSE/Nasdaq common shares are eligible for WATCHLIST. IEX-only
   coverage produces CAUTION; unknown source/unsupported listings excluded.
   SIP/full-market entitlements and data licensing must be separately verified.
+- Extreme but finite Decimal values that overflow the local arithmetic context
+  fail closed with explicit price, spread, or dollar-volume arithmetic reasons;
+  malformed market data must not crash an entire batch or become a top-ranked
+  symbol. Synthetic tests cover these pathological inputs.
+- At the gap and same-time RVOL minimums, eligibility uses a conservatively
+  rounded-down Decimal bound, not the ordinary rounded display value. Values
+  just below a policy threshold must remain EXCLUDED even when 28-digit
+  half-even rounding prints the cutoff itself. Conversely, the maximum quoted
+  spread is tested with a conservative upper bound (rounded-up numerator and
+  rounded-down denominator), so a spread just above 1% cannot be rounded down
+  to the cap and admitted. Exact boundary values remain valid. Displayed
+  ratios are for research only and are not precise financial acceptance evidence.
 - The caller must attest to session-calendar validation and consistent
   corporate-action treatment. Only literal boolean True is accepted; other
   truthy values are excluded. The caller must also supply the exact verified
@@ -43,6 +55,12 @@ or paper-order eligibility. Its sample data in tests are entirely synthetic.
   or unknown promotional/float evidence require caution. Positive promotional
   activity flag excludes from the top watchlist; it is **not** a factual legal
   determination that manipulation occurred.
+
+- Market source identifiers must be nonblank strings; whitespace or nontext
+  values do not count as provenance. Reversal and dilution evidence must be
+  literal booleans: a missing/nonboolean value yields CAUTION, never a clean
+  WATCHLIST signal. A true risk signal remains a caution flag. This protects
+  against falsey vendor placeholders being misread as investigated negatives.
 
 ## Implementation boundaries and pending work
 
