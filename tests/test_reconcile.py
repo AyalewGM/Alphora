@@ -135,7 +135,9 @@ class ReconcileTests(unittest.TestCase):
         # Venue gains a position the book never recorded.
         self.venue.dispatch(DispatchRequest("QQQ", "BUY", 10, D("10")),
                             client_order_id="z" * 64)
-        self.venue.advance({"QQQ": D("10")}, at=at(2))
+        # Keep SPY freshly marked too: missing held marks are now a hard
+        # valuation error, not a valid reconciliation certificate.
+        self.venue.advance({"QQQ": D("10"), "SPY": D("49")}, at=at(2))
         recon = self.recon()
         self.assertEqual(recon.status, "FATAL")
         self.assertIn("POSITION_MISMATCH", kinds(recon))
