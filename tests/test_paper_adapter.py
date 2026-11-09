@@ -145,7 +145,7 @@ class PaperAdapterTests(unittest.TestCase):
         self.assertEqual(venue.advance({"SPY": D("50")}, at=at()), ())
         events = venue.advance({"SPY": D("49.95")}, at=at(1))
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].price, D("49.95") * D("1.001"))
+        self.assertEqual(events[0].price, D("50.00"))  # half-even cents
 
     def test_fee_debited_on_fill_and_reserved_at_dispatch(self):
         venue = PaperBrokerAdapter(fee_per_order=D("7.50"))
@@ -227,6 +227,33 @@ class PaperAdapterTests(unittest.TestCase):
         self.assertEqual(snap.equity, D("99500"))
         self.assertEqual(snap.day_pnl, D("-500"))
 
+    def test_missing_fresh_position_mark_never_uses_cost_or_old_price(self):
+        self.dispatch_buy(qty=1000, limit="50")
+        self.venue.advance({"SPY": D("50")}, at=at(1))
+        self.assertEqual(self.venue.account_snapshot().equity, D("100000"))
+        self.venue.advance({"QQQ": D("20")}, at=at(2))
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            self.venue.account_snapshot()
+        self.venue.advance({"SPY": D("47")}, at=at(3))
+        self.assertEqual(self.venue.account_snapshot().equity, D("97000"))
+
+    def test_slippage_cash_and_average_basis_are_cent_quantized(self):
+        venue = PaperBrokerAdapter(slippage_bps=D("37"))
+        venue.dispatch(buy(qty=33, limit="50"), client_order_id="b")
+        fills = venue.advance({"SPY": D("49.70")}, at=at())
+        self.assertEqual(len(fills), 1)
+        price = fills[0].price
+        self.assertEqual(price, price.quantize(D("0.01")))
+        self.assertEqual(venue.account_snapshot().cash,
+                         D("100000") - price * 33)
+        assert venue.account_snapshot().cash == venue.account_snapshot().cash.quantize(D("0.01"))
+        venue.dispatch(sell(qty=11, limit="49"), client_order_id="s")
+        sale = venue.advance({"SPY": D("49.80")}, at=at(1))
+        self.assertEqual(len(sale), 1)
+        self.assertEqual(sale[0].price, sale[0].price.quantize(D("0.01")))
+        self.assertEqual(venue.positions()[0].avg_price,
+                         venue.positions()[0].avg_price.quantize(D("0.01")))
+
     def test_dispatch_order_processing_is_deterministic(self):
         first = self.venue.dispatch(buy(symbol="AAA", qty=1, limit="5"),
                                     client_order_id="a")
@@ -250,7 +277,7 @@ class PaperAdapterTests(unittest.TestCase):
         self.assertEqual(venue.advance({"SPY": D("10")}, at=at(1)), ())
         events = venue.advance({"SPY": D("10.11")}, at=at(2))
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0].price, D("10.11") * D("0.99"))
+        self.assertEqual(events[0].price, D("10.01"))  # rounded cent
 
 
 if __name__ == "__main__":
