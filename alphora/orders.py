@@ -17,6 +17,7 @@ from pathlib import Path
 import json
 import re
 import sqlite3
+from time import monotonic, sleep
 
 _ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _ORDER_ID = re.compile(r"[0-9a-f]{64}\Z")
@@ -45,6 +46,33 @@ _EVENT_KINDS = frozenset({"CREATED", "SENT", "ACKED", "FILL",
                           "CANCEL_REQUESTED", "CANCELLED", "REJECTED", "EXPIRED"})
 _GENESIS = "0" * 64
 _MAX_DETAIL_BYTES = 8192
+
+
+def _configure_wal(db):
+    """Require WAL with bounded retry when concurrent openers hold SQLite locks.
+
+    SQLite's busy_timeout does not guarantee that a simultaneous journal-mode
+    PRAGMA will wait. Retry *only* SQLite BUSY/LOCKED, never disk or integrity
+    errors. The five-second retry window fails closed on persistent locks;
+    each individual SQLite statement may also wait for its busy timeout.
+    """
+    deadline = monotonic() + 5.0
+    while True:
+        try:
+            row = db.execute("PRAGMA journal_mode=WAL").fetchone()
+            if (row is None or len(row) != 1
+                    or not isinstance(row[0], str) or row[0].lower() != "wal"):
+                raise LedgerIntegrityError("WAL_MODE_REQUIRED")
+            return
+        except sqlite3.OperationalError as exc:
+            error_code = getattr(exc, "sqlite_errorcode", None)
+            if (type(error_code) is not int
+                    or (error_code & 0xff) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)):
+                raise
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise
+            sleep(min(0.02, remaining))
 
 
 class LedgerIntegrityError(RuntimeError):
@@ -176,7 +204,7 @@ class OrderLedger:
         try:
             self._db.execute("PRAGMA busy_timeout=5000")
             self._db.execute("PRAGMA foreign_keys=ON")
-            self._db.execute("PRAGMA journal_mode=WAL")
+            _configure_wal(self._db)
             self._db.execute("PRAGMA synchronous=FULL")
             with self._write():
                 self._db.execute(
