@@ -5,12 +5,13 @@ External account/position reconciliation and a fresh risk decision remain mandat
 """
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from decimal import Decimal as D
+from decimal import Decimal as D, DecimalException, Inexact, localcontext
 from pathlib import Path
 import re
 import sqlite3
 
-from .risk import BuyProposal, PaperAccount, INITIAL_EQUITY, DAILY_LOSS_FRACTION, RISK_FRACTION, validate_buy
+from .risk import (BuyProposal, PaperAccount, RiskPolicy, DEFAULT_RISK_POLICY,
+                   INITIAL_EQUITY, DAILY_LOSS_FRACTION, validate_buy)
 
 _ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
@@ -50,12 +51,19 @@ class OfflineReservations:
     corporate actions, costs beyond caller-budgeted fees or session rollover.
     """
 
-    def __init__(self, path, *, session_id: str, starting_cash: D = INITIAL_EQUITY):
+    def __init__(self, path, *, session_id: str, starting_cash: D = INITIAL_EQUITY,
+                 policy: RiskPolicy = DEFAULT_RISK_POLICY):
         if (not isinstance(path, (str, Path)) or not str(path).strip()
                 or str(path).lower().startswith("file:")
                 or str(path) == ":memory:" or "\x00" in str(path)
                 or not isinstance(session_id, str) or not _ID.fullmatch(session_id)
-                or type(starting_cash) is not D or starting_cash != INITIAL_EQUITY):
+                or type(starting_cash) is not D or starting_cash != INITIAL_EQUITY
+                or not isinstance(policy, RiskPolicy)):
+            raise ValueError("INVALID_PAPER_BOOK")
+        self._policy = policy
+        # Policy identity is pinned to a session; it cannot be loosened during
+        # a running/reopened book without creating a new reviewed session.
+        if not policy.fingerprint():
             raise ValueError("INVALID_PAPER_BOOK")
         self._db = sqlite3.connect(str(path), timeout=5, isolation_level=None)
         try:
@@ -83,10 +91,12 @@ class OfflineReservations:
                     self._db.executemany("INSERT INTO book_meta(key,value) VALUES(?,?)", [
                         ("session_id", session_id), ("starting_cash", str(starting_cash)),
                         ("cash", str(starting_cash)), ("halted", "0"),
+                        ("risk_policy", policy.fingerprint()),
                     ])
                 elif (meta.get("session_id") != session_id or
                       _decimal(meta.get("starting_cash", "0")) != starting_cash or
-                      set(meta) != {"session_id", "starting_cash", "cash", "halted"}):
+                      (set(meta) != {"session_id", "starting_cash", "cash", "halted", "risk_policy"}
+                       or meta.get("risk_policy") != policy.fingerprint())):
                     raise ValueError("BOOK_REOPEN_MISMATCH")
                 # Reopening a corrupted persisted book must fail before any
                 # new reservations or hypothetical fills can be recorded.
@@ -140,8 +150,13 @@ class OfflineReservations:
                 raise ValueError("BOOK_STATE_CORRUPT")
             intents[ident] = (symbol, qty, limit, stop, budget, filled, paid)
             if status == "OPEN":
-                remaining = (qty - filled) * limit + budget - paid
-                reserved += remaining
+                try:
+                    with localcontext() as context:
+                        context.traps[Inexact] = True
+                        remaining = (qty - filled) * limit + budget - paid
+                        reserved += remaining
+                except DecimalException as exc:
+                    raise ValueError("BOOK_STATE_CORRUPT") from exc
                 active.append((ident, symbol, qty - filled, remaining))
         holdings = {}
         fill_totals = {}
@@ -156,16 +171,30 @@ class OfflineReservations:
                     or not intents[intent_id][3] < price <= intents[intent_id][2]):
                 raise ValueError("BOOK_STATE_CORRUPT")
             old_qty, old_fees = fill_totals.get(intent_id, (0, D(0)))
-            fill_totals[intent_id] = (old_qty + qty, old_fees + fee)
             symbol = intents[intent_id][0]
-            old_qty, old_cost = holdings.get(symbol, (0, D(0)))
-            holdings[symbol] = old_qty + qty, old_cost + qty * price + fee
-            spent_cash += qty * price + fee
-        if (reserved > cash or cash + spent_cash != INITIAL_EQUITY
+            held_qty, old_cost = holdings.get(symbol, (0, D(0)))
+            try:
+                with localcontext() as context:
+                    context.traps[Inexact] = True
+                    updated_fees = old_fees + fee
+                    updated_cost = old_cost + qty * price + fee
+                    spent_cash += qty * price + fee
+            except DecimalException as exc:
+                raise ValueError("BOOK_STATE_CORRUPT") from exc
+            fill_totals[intent_id] = (old_qty + qty, updated_fees)
+            holdings[symbol] = held_qty + qty, updated_cost
+        try:
+            with localcontext() as context:
+                context.traps[Inexact] = True
+                reconstructed_cash = cash + spent_cash
+                available_cash = cash - reserved
+        except DecimalException as exc:
+            raise ValueError("BOOK_STATE_CORRUPT") from exc
+        if (reserved > cash or reconstructed_cash != INITIAL_EQUITY
                 or any(fill_totals.get(ident, (0, D(0))) != (row[5], row[6])
                        for ident, row in intents.items())):
             raise ValueError("BOOK_STATE_CORRUPT")
-        return PaperBookSnapshot(cash, reserved, cash - reserved,
+        return PaperBookSnapshot(cash, reserved, available_cash,
                                  tuple((sym, *holdings[sym]) for sym in sorted(holdings)),
                                  tuple(active), halted == "1", self._meta("session_id"))
 
@@ -206,14 +235,24 @@ class OfflineReservations:
                     or type(account.day_pnl) is not D or not account.day_pnl.is_finite()
                     or type(account.halted) is not bool):
                 raise ValueError("INVALID_ACCOUNT_STATE")
-            day_change = account.equity - INITIAL_EQUITY
             loss_floor = -(INITIAL_EQUITY * DAILY_LOSS_FRACTION)
+            # Compare absolute equity directly with the exact $98k limit
+            # before any subtraction could round a genuine daily loss away.
             if (account.halted or account.day_pnl <= loss_floor
-                    or day_change <= loss_floor):
+                    or account.equity <= INITIAL_EQUITY + loss_floor):
                 self._db.execute("UPDATE book_meta SET value='1' WHERE key='halted'")
                 return self._snapshot()
-            if (account.cash > account.equity
-                    or abs(day_change - account.day_pnl) > D("0.01")):
+            # A finite Decimal can still overflow the active arithmetic
+            # context, or round a near-boundary P&L comparison. Such marks
+            # are not a trustworthy reconciled snapshot: veto fail-closed.
+            try:
+                with localcontext() as context:
+                    context.traps[Inexact] = True
+                    day_change = account.equity - INITIAL_EQUITY
+                    pnl_gap = abs(day_change - account.day_pnl)
+            except DecimalException as exc:
+                raise ValueError("UNREPRESENTABLE_ACCOUNT_MARK") from exc
+            if account.cash > account.equity or pnl_gap > D("0.01"):
                 raise ValueError("INCONSISTENT_ACCOUNT_STATE")
             return snapshot
 
@@ -260,22 +299,31 @@ class OfflineReservations:
                 if existing[5] == "CANCELLED":
                     raise ValueError("CANCELLED_INTENT_ID")
                 return self._snapshot()  # stable dedupe, no second reservation
-            pending_symbol = sum(
-                (row[3] for row in snapshot.pending if row[1] == proposal.symbol), D(0)
-            )
-            filled_cost = next((cost for sym, _, cost in snapshot.positions
-                                if sym == proposal.symbol), D(0))
             if not _money(proposal.existing_instrument_value):
                 raise ValueError("INVALID_POSITION_VALUE")
-            exposure = max(proposal.existing_instrument_value, filled_cost) + pending_symbol
+            # Never round away a tiny positive fee when existing pending
+            # exposure is near the 10% instrument cap.
+            try:
+                with localcontext() as context:
+                    context.traps[Inexact] = True
+                    pending_symbol = sum(
+                        (row[3] for row in snapshot.pending if row[1] == proposal.symbol), D(0)
+                    )
+                    filled_cost = next((cost for sym, _, cost in snapshot.positions
+                                        if sym == proposal.symbol), D(0))
+                    exposure = max(proposal.existing_instrument_value, filled_cost) + pending_symbol
+                    exposure_with_fees = exposure + fee_budget
+            except DecimalException as exc:
+                raise ValueError("RISK_VETO:UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc
             guard = validate_buy(
                 replace(account, cash=snapshot.available_cash),
                 # Reserve the *new* intent's fee budget against the
                 # instrument cap too. Earlier pending fees and filled fees
                 # are already included in exposure, but this intent's budget
                 # would otherwise be omitted from the 10% limit.
-                replace(proposal, existing_instrument_value=exposure + fee_budget),
+                replace(proposal, existing_instrument_value=exposure_with_fees),
                 expected_session_id=snapshot.session_id, mode="paper",
+                policy=self._policy,
             )
             if not guard.permitted:
                 if guard.reason != "DAILY_LOSS_HALT":
@@ -289,15 +337,22 @@ class OfflineReservations:
                 # A maximum synthetic fee is potential loss at the stop.
                 # The pre-trade guard checks price-to-stop risk alone, so
                 # including this budget prevents a fee-only risk-cap bypass.
-                if ((proposal.price - proposal.stop_price) * proposal.quantity
-                        + fee_budget > account.equity * RISK_FRACTION):
+                try:
+                    with localcontext() as context:
+                        context.traps[Inexact] = True
+                        loss_with_fees = ((proposal.price - proposal.stop_price) *
+                                          proposal.quantity + fee_budget)
+                        maximum_loss = account.equity * self._policy.risk_per_trade_fraction
+                        reserve = proposal.quantity * proposal.price + fee_budget
+                except DecimalException as exc:
+                    raise ValueError("RISK_VETO:UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc
+                if loss_with_fees > maximum_loss:
                     raise ValueError("RISK_VETO:TRADE_RISK_EXCEEDED")
                 if proposal.quantity != proposal.quantity.to_integral_value():
                     raise ValueError("FRACTIONAL_SHARES")
                 quantity = int(proposal.quantity)
                 if not _integer_shares(quantity):
                     raise ValueError("INVALID_QUANTITY")
-                reserve = proposal.quantity * proposal.price + fee_budget
                 if reserve > snapshot.available_cash:
                     raise ValueError("INSUFFICIENT_UNRESERVED_CASH")
                 self._db.execute(
@@ -340,11 +395,22 @@ class OfflineReservations:
             if row is None or row[6] != "OPEN":
                 raise ValueError("NO_OPEN_INTENT")
             total, filled, limit, stop, fee_budget, fees_paid, _ = row
+            # Every synthetic receipt must preserve its full cash and fee
+            # liability. A subcent fee may otherwise round out of cost,
+            # reporting more virtual cash than is truly available.
+            try:
+                with localcontext() as context:
+                    context.traps[Inexact] = True
+                    updated_fees = D(fees_paid) + fee
+                    cost = qty * price + fee
+                    cash_before = D(self._meta("cash"))
+                    cash_after = cash_before - cost
+            except DecimalException as exc:
+                raise ValueError("UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc
             if (filled + qty > total or price > D(limit) or
-                    price <= D(stop) or fee + D(fees_paid) > D(fee_budget)):
+                    price <= D(stop) or updated_fees > D(fee_budget)):
                 raise ValueError("FILL_EXCEEDS_LIMITS")
-            cost = qty * price + fee
-            if cost > D(self._meta("cash")):
+            if cost > cash_before:
                 raise ValueError("INSUFFICIENT_CASH_AT_FILL")
             self._db.execute(
                 "INSERT INTO hypothetical_fills(id,intent_id,qty,price,fee) VALUES(?,?,?,?,?)",
@@ -352,11 +418,11 @@ class OfflineReservations:
             )
             self._db.execute(
                 "UPDATE book_meta SET value=? WHERE key='cash'",
-                (str(D(self._meta("cash")) - cost),),
+                (str(cash_after),),
             )
             self._db.execute(
                 "UPDATE buy_intents SET filled=?, fees_paid=?, status=? WHERE id=?",
-                (filled + qty, str(D(fees_paid) + fee),
+                (filled + qty, str(updated_fees),
                  "FILLED" if filled + qty == total else "OPEN", intent_id),
             )
             return self._snapshot()

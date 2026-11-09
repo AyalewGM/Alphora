@@ -9,6 +9,7 @@ This is **purely local hypothetical paper accounting**. It is not an exchange or
 - The single-session simulated opening-equity baseline is fixed at **$100,000**. A caller cannot change `session_open_equity` to artificially change the 2% daily-loss threshold or risk caps. The separate `equity` and `day_pnl` fields are still caller assertions; authenticated portfolio marks remain a future requirement.
 - Every `reserve_buy` call, **including an idempotent retry of an existing intent**, first invokes `observe_daily_loss`, which can atomically record a one-way `halted` flag from a reconciled caller-asserted account mark or an upstream manual halt. Loss-triggered calls raise `RISK_VETO:DAILY_LOSS_HALT`; later claims of recovery do not re-enable new reservations or synthetic fills. Callers may also invoke `observe_daily_loss` explicitly without creating a new intent. These checks are **not continuous monitoring**: no price feed, quote provenance, scheduler or independent mark-to-market service is implemented. Upstream reconciliation authenticity remains unverified; a missing observer call cannot detect a loss.
 - Opening an existing database and every snapshot now validate persisted intent and synthetic-fill identifier formats, symbols, and stored decimal fields, rejecting malformed records as `BOOK_STATE_CORRUPT`. These fail-closed checks also reject malformed identities and monetary strings when the database has been edited outside this module. They are **structural validations, not cryptographic authentication**.
+- Synthetic fee, reserved-cash and fill accounting now reject inexact Decimal arithmetic rather than silently rounding away a positive fee or creating fictitious virtual buying power. Existing-book replay independently rejects rounded/corrupt synthetic receipts with `BOOK_STATE_CORRUPT`. Rejected fills leave existing reservations and cash unchanged across restart; these are synthetic integrity controls, not authentication of externally supplied receipts.
 - Opening an existing database now verifies its internal cash/receipt invariants before any additional mutation. An interrupted/failed synthetic fill rolls back as one SQLite transaction. Separate-process abrupt-exit tests now verify WAL rollback of uncommitted writes and survival of an already committed synthetic fill, including its replay idempotency. These tests simulate abrupt interpreter exit via `os._exit`, **not** OS kill during the SQLite commit, disk-write errors, filesystem corruption or power loss; they do not prove hardware-level durability.
 - \`record_hypothetical_fill\` only accepts whole-share synthetic BUY fills at or below their stored limit and strictly above stored stop; quantity and fees cannot exceed pending limits or budgets. It atomically updates simulated cash, fee-inclusive acquisition cost basis (fill notional plus actual synthetic buy fee), and remaining reservation. This cost basis is used as a conservative same-symbol exposure floor on later BUY reservations, not a current market mark, tax lot, or P&L. Exact duplicate fill IDs are no-ops; conflicting duplicates are rejected.
 - \`cancel_remaining\` only releases unfilled pending virtual cash and retains filled shares. A cancelled intent ID is terminal: retrying the same ID now raises `CANCELLED_INTENT_ID` instead of falsely reporting a successful new reservation. A replacement virtual buy requires a fresh intent ID; the cancelled ID remains reserved in history across restarts. \`halt\` permanently locks new reservations and new synthetic fill mutations for that session, including after restart; cancellation remains available. The database uses WAL, FULL synchronous commits and immediate write transactions. Simple corruption and missing-book metadata fail closed; this is **not cryptographic tamper evidence**.
@@ -27,3 +28,23 @@ The independent phase-1 decision journal in draft PR #13 is **not** replaced or 
 Run \`python -m unittest discover -s tests -v\`. Synthetic tests cover concurrent reservations across SQLite connections, cash/instrument/risk boundaries, partial and duplicate fills, stale cash snapshots, cancellation, one-way halts, restart durability, corrupted ledgers, fixed opening-equity baseline, durable loss-triggered shutdown and restart, idempotent-intent loss-observation bypass prevention, explicit observation without new intent, untrusted/stale mark rejection, non-loss veto isolation, rejected corrupt reopen, injected SQL transaction failure, abrupt child-process termination before/after a commit, and session mismatch.
 
 Next owners: financial correctness review of exposure and cash arithmetic; independent SQLite/recovery QA including actual process crash/injected I/O failures; separate data/reconciliation service design; human security/governance review before integration. **Do not merge, deploy or connect credentials/orders** on the basis of these synthetic tests alone.
+
+## Configurable simulated risk limits (2026-11-08)
+
+The default limits remain **0.5% planned loss per trade** and **10% maximum
+allocation per instrument**. The offline-only `RiskPolicy` object accepts
+Decimal fractions such as `RiskPolicy(Decimal("0.0025"), Decimal("0.05"))`
+for 0.25% planned risk and 5% instrument allocation. Both fields must be
+finite, positive Decimals; risk/trade is bounded at 2% and allocation at
+100%. These are **validation ceilings, not recommended settings**. The daily
+2% loss shutdown remains fixed and independent.
+
+A caller must pass the *same approved policy* to entry sizing and to
+`OfflineReservations(..., policy=policy)`. The session's policy fingerprint
+is stored in SQLite; reopening with a different policy fails. No mutable
+per-trade override is supported by the ledger. Any change requires a newly
+created session/book with independent operator acceptance. Policy defaults are
+unchanged when no value is supplied, and no runtime UI, network control,
+external orders or brokerage adapter is provided. This is **not a release
+authorization** or proof of unattended paper-trading readiness.
+

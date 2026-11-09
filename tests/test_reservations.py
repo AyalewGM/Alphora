@@ -86,6 +86,56 @@ class OfflineReservationTests(unittest.TestCase):
             D("10000"),
         )
 
+    def test_subcent_fee_never_rounds_away_at_instrument_cap(self):
+        # A prior pending $9,000 position plus a new $1,000 proposed
+        # purchase reaches the exact 10% cap. Even a tiny positive fee
+        # must not disappear from the existing-exposure Decimal sum.
+        prior = self.reserve("first", self.proposal(qty="180", stop="49"))
+        self.assertEqual(prior.reserved_cash, D("9000"))
+        fee = D("0.0000000000000000000000001")
+        with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_LEDGER_ARITHMETIC"):
+            self.reserve("rounded-fee", self.proposal(qty="20", stop="49"),
+                         fee_budget=fee)
+        self.assertEqual(self.book.snapshot(), prior)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), prior)
+
+    def test_subcent_synthetic_fill_fee_cannot_round_out_of_cash(self):
+        # A one-share $50 fill with a tiny positive fee must never post
+        # as exactly $50 of cash spent due to Decimal context precision.
+        before = self.reserve("micro-fill", self.proposal(qty="1", stop="49"),
+                              fee_budget=D("1"))
+        tiny_fee = D("0.0000000000000000000000000001")
+        with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_LEDGER_ARITHMETIC"):
+            self.book.record_hypothetical_fill("micro-fill", "fill-1", 1, D("50"),
+                                               fee=tiny_fee)
+        self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_replay_rejects_corrupt_fill_with_rounded_away_fee(self):
+        # A forged persisted fill may look cash-balanced under default
+        # Decimal precision even though a positive fee was not deducted.
+        self.reserve("micro-replay", self.proposal(qty="1", stop="49"),
+                     fee_budget=D("1"))
+        self.book.close()
+        tiny_fee = "0.0000000000000000000000000001"
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "INSERT INTO hypothetical_fills(id,intent_id,qty,price,fee) "
+                "VALUES(?,?,?,?,?)",
+                ("forged-fill", "micro-replay", 1, "50", tiny_fee),
+            )
+            db.execute(
+                "UPDATE buy_intents SET filled=1, fees_paid=?, status='FILLED' "
+                "WHERE id='micro-replay'", (tiny_fee,),
+            )
+            db.execute("UPDATE book_meta SET value='99950' WHERE key='cash'")
+        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+            OfflineReservations(self.path, session_id="2026-11-02")
+
     def test_fee_budget_is_included_in_per_trade_planned_loss(self):
         # A fee cap is potential loss in addition to the price-to-stop
         # distance. With 100 shares at 50 and a stop at 48 the initial
@@ -172,6 +222,30 @@ class OfflineReservationTests(unittest.TestCase):
         # A caller-asserted manual upstream stop must propagate one-way.
         self.assertTrue(self.book.observe_daily_loss(
             self.account(halted=True), reconciled=True).halted)
+
+    def test_daily_loss_observer_rejects_unrepresentable_marks_without_mutation(self):
+        # A finite Decimal can overflow on subtraction. A just-above-limit
+        # equity can instead round to an apparent $2,000 loss at default
+        # precision; neither input may silently mutate the durable halt.
+        before = self.book.snapshot()
+        snapshots = (
+            (D("1e1000000"), D("0")),
+            (D("98000.00000000000000000000000001"),
+             D("-1999.99999999999999999999999999")),
+        )
+        for equity, day_pnl in snapshots:
+            with self.subTest(equity=str(equity)):
+                unrepresentable = self.account(equity=equity, day_pnl=day_pnl)
+                with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_ACCOUNT_MARK"):
+                    self.book.observe_daily_loss(unrepresentable, reconciled=True)
+                with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_ACCOUNT_MARK"):
+                    self.book.reserve_buy("bad-mark", unrepresentable,
+                                          self.proposal(qty="1"), reconciled=True)
+                self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+        self.reserve("valid-after-mark-rejection", self.proposal(qty="1"))
 
     def test_non_loss_risk_veto_does_not_trigger_permanent_halt(self):
         with self.assertRaisesRegex(ValueError, "TRADE_RISK_EXCEEDED"):
