@@ -19,6 +19,168 @@ class BacktestTests(unittest.TestCase):
                 for b in self.bars:w.writerow([b.day,b.open,b.high,b.low,b.close,b.volume])
             self.assertEqual(load_csv(path),self.bars)
 
+    def test_csv_rejects_extra_and_missing_columns(self):
+        header = "date,open,high,low,close,volume"
+        good = "2025-01-01,100,101,99,100,1000"
+        other = "2025-01-02,101,102,100,101,1000"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bars.csv"
+            for bad in (
+                good + ",unexpected",  # DictReader returns None: [extra]
+                "2025-01-01,100,101,99,100",  # Missing volume
+                "2025-01-01,100,101,99,100,",  # Blank volume
+            ):
+                with self.subTest(row=bad):
+                    path.write_text(header + "\n" + bad + "\n" + other + "\n",
+                                    encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "BAD_CSV_ROW"):
+                        load_csv(path)
+
+    def test_backtest_lookback_requires_strict_integer(self):
+        for bad in (True, 2.5, D("20"), "20", None, 0, -5):
+            with self.subTest(lookback=repr(bad)):
+                with self.assertRaisesRegex(ValueError, "INVALID_PARAMETERS"):
+                    backtest(self.bars, "trend", lookback=bad)
+                with self.assertRaisesRegex(ValueError, "STRATEGY_OR_LOOKBACK"):
+                    signal([b.close for b in self.bars], "trend", lookback=bad)
+        self.assertIsInstance(backtest(self.bars, "trend", lookback=2).final_equity, D)
+
+    def test_csv_malformed_quoting_fails_closed(self):
+        header = "date,open,high,low,close,volume"
+        valid = "2025-01-01,100,101,99,100,1000"
+        later = "2025-01-02,101,102,100,101,1000"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bars.csv"
+            for bad in (
+                '2025-01-01,100,101,99,100,"1000',  # Unterminated quote
+                '2025-01-01,100,101,99,100,"100"0',  # Garbage after quote
+            ):
+                with self.subTest(row=bad):
+                    path.write_text(header + "\n" + bad + "\n" + later + "\n", encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "BAD_CSV_ROW"):
+                        load_csv(path)
+            # Well-formed quoted CSV remains supported.
+            path.write_text(header + "\n" + valid + "\n" +
+                            '2025-01-02,101,102,100,101,"1000"' + "\n",
+                            encoding="utf-8")
+            self.assertEqual(len(load_csv(path)), 2)
+
+    def test_csv_blank_records_and_empty_file_fail_closed(self):
+        header = "date,open,high,low,close,volume"
+        first = "2025-01-01,100,101,99,100,1000"
+        second = "2025-01-02,101,102,100,101,1000"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bars.csv"
+            path.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "CSV_SCHEMA"):
+                load_csv(path)
+
+            # DictReader previously skipped these without reporting data loss.
+            for rows in (
+                "\n" + first + "\n" + second,
+                first + "\n\n" + second,
+                first + "\n" + second + "\n",
+            ):
+                with self.subTest(rows=repr(rows)):
+                    path.write_text(header + "\n" + rows + "\n", encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "BAD_CSV_ROW"):
+                        load_csv(path)
+
+    def test_csv_requires_canonical_dates_and_volumes(self):
+        # Python date.fromisoformat and int accept alternative strings that
+        # silently change a vendor's source representation.
+        header = "date,open,high,low,close,volume"
+        second = "2025-01-02,101,102,100,101,1000"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bars.csv"
+            for day, volume in (
+                ("20250101", "1000"),    # Basic date silently normalized
+                ("2025-W01-3", "1000"),  # ISO week date silently normalized
+                ("2025-01-01", "1_000"), # Python's digit separator
+                ("2025-01-01", "+1000"),
+                ("2025-01-01", " 1000 "),
+                ("2025-01-01", "0001"),
+                ("2025-01-01", "-0"),
+            ):
+                with self.subTest(day=day, volume=volume):
+                    row = f"{day},100,101,99,100,{volume}"
+                    path.write_text(header + "\n" + row + "\n" + second + "\n",
+                                    encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "BAD_CSV_ROW"):
+                        load_csv(path)
+            # Zero trading volume is valid in the generic daily-bar model;
+            # research execution replay applies a separate fillability gate.
+            path.write_text(header + "\n" +
+                            "2025-01-01,100,101,99,100,0\n" + second + "\n",
+                            encoding="utf-8")
+            self.assertEqual(load_csv(path)[0].volume, 0)
+
+    def test_csv_requires_canonical_ohlc_prices(self):
+        # Decimal accepts these noncanonical strings without reporting an
+        # error, obscuring vendor input and reproducibility of research.
+        header = "date,open,high,low,close,volume"
+        good_later = "2025-01-02,101,102,100,101,1000"
+        fields = ("open", "high", "low", "close")
+        bad_values = ("1_00", " 100 ", "+100", "1e2", "١٠٠",
+                      "00100", "100.", ".5")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bars.csv"
+            for field in fields:
+                for value in bad_values:
+                    with self.subTest(field=field, value=value):
+                        row = ["2025-01-01", "100", "100", "100", "100", "1000"]
+                        row[1 + fields.index(field)] = value
+                        path.write_text(header + "\n" + ",".join(row) +
+                                        "\n" + good_later + "\n", encoding="utf-8")
+                        with self.assertRaisesRegex(ValueError, "BAD_CSV_ROW"):
+                            load_csv(path)
+            # Preserve canonical integer and fractional decimal prices.
+            for price in ("100", "100.00", "0.50", "100.123"):
+                with self.subTest(valid_price=price):
+                    path.write_text(header + "\n" +
+                                    ",".join(["2025-01-01", *([price] * 4), "1000"]) +
+                                    "\n" + good_later + "\n", encoding="utf-8")
+                    self.assertEqual(load_csv(path)[0].open, D(price))
+
+    def test_zero_volume_rejected_before_hypothetical_fills(self):
+        # The primitive simulator is also callable without the pinned replay
+        # wrapper. Never fabricate an open fill on a no-trade session.
+        from alphora.research.benchmarks import compare_with_spy
+        for index in (0, 1, len(self.bars) - 1):
+            with self.subTest(zero_volume_index=index):
+                empty = list(self.bars)
+                empty[index] = replace(empty[index], volume=0)
+                with self.assertRaisesRegex(
+                    ValueError, "ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED"
+                ):
+                    backtest(empty, "buy_hold")
+                # Benchmark helpers must not claim an investable SPY reference
+                # if *either* leg has zero-volume observations.
+                with self.assertRaisesRegex(
+                    ValueError, "ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED"
+                ):
+                    compare_with_spy(self.bars, empty, "buy_hold")
+                with self.assertRaisesRegex(
+                    ValueError, "ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED"
+                ):
+                    compare_with_spy(empty, self.bars, "buy_hold")
+
+    def test_spy_zero_volume_in_lookback_warmup_is_not_sliced_away(self):
+        # For a non-buy-hold strategy, comparison starts after warm-up.
+        # Every supplied SPY session must still pass the volume gate.
+        from alphora.research.benchmarks import compare_with_spy
+        for index in (3, 25):
+            with self.subTest(spy_zero_index=index):
+                spy = list(self.bars)
+                spy[index] = replace(spy[index], volume=0)
+                with self.assertRaisesRegex(
+                    ValueError, "ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED"
+                ):
+                    compare_with_spy(self.bars, spy, "trend", lookback=20)
+        self.assertIsNotNone(
+            compare_with_spy(self.bars, self.bars, "trend", lookback=20)
+        )
+
     def test_duplicate_date_rejected(self):
         with self.assertRaises(ValueError):backtest([self.bars[0],self.bars[0]],"trend")
 

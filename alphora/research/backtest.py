@@ -1,5 +1,6 @@
 """Strict daily OHLCV validation and offline next-open backtesting."""
 import csv
+import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal as D
@@ -28,21 +29,48 @@ def validate(bars):
 
 def load_csv(path):
     with open(path,encoding="utf-8",newline="") as f:
-        r=csv.DictReader(f)
-        if r.fieldnames!=["date","open","high","low","close","volume"]:
+        # csv.DictReader silently skips blank records, which can hide
+        # missing sessions in historical replay. Inspect every CSV record.
+        r=csv.reader(f,strict=True)
+        try:
+            header=next(r)
+        except (csv.Error, StopIteration) as exc:
+            raise ValueError("CSV_SCHEMA") from exc
+        if header!=["date","open","high","low","close","volume"]:
             raise ValueError("CSV_SCHEMA")
         bars=[]
-        for item in r:
+        while True:
             try:
-                if any(v is None or not v.strip() for v in item.values()):
-                    raise ValueError("MISSING_FIELD")
+                row=next(r)
+            except StopIteration:
+                break
+            except csv.Error as exc:
+                # Malformed quoting may otherwise silently swallow future rows.
+                raise ValueError("BAD_CSV_ROW") from exc
+            try:
+                # Reject blank records, truncated rows, and surplus columns
+                # without silently dropping a potential historical session.
+                if len(row)!=len(header) or any(not v.strip() for v in row):
+                    raise ValueError("MISSING_OR_EXTRA_FIELD")
+                item=dict(zip(header,row))
+                # date.fromisoformat accepts compact/week dates; int accepts
+                # underscores, signs and whitespace. Reject such silently
+                # normalized vendor values rather than changing their meaning.
+                if (not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", item["date"])
+                    or not re.fullmatch(r"(?:0|[1-9][0-9]*)", item["volume"])
+                    # Decimal accepts underscores, Unicode digits, signs, and
+                    # exponent notation; reject implicit vendor normalization.
+                    or any(not re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", item[k])
+                           for k in ("open", "high", "low", "close"))):
+                    raise ValueError("NONCANONICAL_CSV_VALUE")
                 bars.append(Bar(date.fromisoformat(item["date"]),*(D(item[k]) for k in ("open","high","low","close")),int(item["volume"])))
             except (ArithmeticError,ValueError,TypeError) as exc:
                 raise ValueError("BAD_CSV_ROW") from exc
     return validate(bars)
 
 def signal(closes,strategy,lookback=20):
-    if strategy not in ("trend","momentum","mean_reversion","buy_hold") or lookback<2:
+    if (strategy not in ("trend","momentum","mean_reversion","buy_hold")
+            or type(lookback) is not int or lookback < 2):
         raise ValueError("STRATEGY_OR_LOOKBACK")
     if strategy=="buy_hold": return True
     if len(closes)<lookback+1: return False
@@ -62,8 +90,14 @@ class Result:
 
 def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=D("0.10"),lookback=20):
     validate(bars)
+    # A positive open price on a zero-volume session does not establish a
+    # tradable next-open fill. Until exchange halts and stale prints are
+    # modeled, fail closed rather than invent trades or optimistic P&L.
+    if any(b.volume == 0 for b in bars):
+        raise ValueError("ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED")
     if (strategy not in ("trend","momentum","mean_reversion","buy_hold")
-        or lookback<2 or not all(isinstance(x,D) and x.is_finite() for x in (initial,cost_bps,max_allocation))
+        or type(lookback) is not int or lookback < 2
+        or not all(isinstance(x,D) and x.is_finite() for x in (initial,cost_bps,max_allocation))
         or initial<=0 or not D(0)<=cost_bps<D(10000)
         or not D(0)<max_allocation<=D(1)):
         raise ValueError("INVALID_PARAMETERS")

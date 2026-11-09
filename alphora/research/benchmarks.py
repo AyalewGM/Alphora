@@ -69,6 +69,11 @@ def compare_with_spy(strategy_bars, spy_bars, strategy_name, *,
     """
     validate(strategy_bars)
     validate(spy_bars)
+    # The SPY benchmark is evaluated after strategy warm-up, but the full
+    # supplied source must pass the same no-trade-session integrity gate.
+    # Otherwise a zero-volume warm-up bar is silently dropped by slicing.
+    if any(bar.volume == 0 for bar in spy_bars):
+        raise ValueError("ZERO_VOLUME_RESEARCH_BACKTEST_UNSUPPORTED")
     if [b.day for b in strategy_bars] != [b.day for b in spy_bars]:
         raise ValueError("BENCHMARK_DATE_MISMATCH")
     if (type(lookback) is not int or lookback < 2
