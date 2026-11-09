@@ -223,6 +223,11 @@ def inspect_market_manifest(manifest: MarketManifest, *,
     # This chronological invariant is NOT vendor authentication.
     if m.delivered_at < m.sessions[-1].closes_at:
         raise ValueError("PREMATURE_ARTIFACT_DELIVERY")
+    # A completed daily artifact version cannot itself have become
+    # available before its final included session closed, even when the
+    # later delivery timestamp looks valid. Both claims are unauthenticated.
+    if m.version_available_at < m.sessions[-1].closes_at:
+        raise ValueError("PREMATURE_ARTIFACT_VERSION")
     if (u.day > m.bar_days[0] or u.available_at >= m.sessions[0].opens_at
             or m.calendar_available_at >= m.sessions[0].opens_at
             or m.as_of < m.sessions[-1].closes_at):
