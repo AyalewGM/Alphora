@@ -237,6 +237,24 @@ class PaperAdapterTests(unittest.TestCase):
         self.venue.advance({"SPY": D("47")}, at=at(3))
         self.assertEqual(self.venue.account_snapshot().equity, D("97000"))
 
+    def test_subcent_market_marks_cannot_create_fractional_cent_equity(self):
+        venue = PaperBrokerAdapter(slippage_bps=D("23"))
+        venue.dispatch(buy(qty=10, limit="50"), client_order_id="b")
+        fills = venue.advance({"SPY": D("49.884961")}, at=at())
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0].price, D("49.99"))
+        account = venue.account_snapshot()
+        self.assertEqual(account.cash, account.cash.quantize(D("0.01")))
+        self.assertEqual(account.equity, account.equity.quantize(D("0.01")))
+        self.assertEqual(venue.positions()[0].avg_price,
+                         venue.positions()[0].avg_price.quantize(D("0.01")))
+
+    def test_subcent_fees_and_order_limits_fail_closed(self):
+        with self.assertRaisesRegex(ValueError, "INVALID_PAPER_VENUE_CONFIG"):
+            PaperBrokerAdapter(fee_per_order=D("0.001"))
+        with self.assertRaisesRegex(ValueError, "INVALID_DISPATCH"):
+            self.venue.dispatch(buy(limit="49.999"), client_order_id="bad")
+
     def test_slippage_cash_and_average_basis_are_cent_quantized(self):
         venue = PaperBrokerAdapter(slippage_bps=D("37"))
         venue.dispatch(buy(qty=33, limit="50"), client_order_id="b")
