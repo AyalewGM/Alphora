@@ -245,6 +245,44 @@ class ManagerTests(unittest.TestCase):
         venue_pos = self.venue.positions()
         self.assertEqual(venue_pos[0].qty, 40)
 
+    def test_daily_loss_halt_allows_only_reducing_sell(self):
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        self.mgr.advance({"SPY": D("49")}, at=at(1))
+        self.book.halt()  # stand-in for a persisted daily-loss shutdown
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.mgr.execute_entry(self.entry("c" * 64), self.account(),
+                                   recon=self.recon(at(2)), now=at(2),
+                                   reconciled=True)
+        plan = ExitPlan("PROPOSE_PAPER_SELL", "PROTECTIVE_EXIT", D("40"),
+                        "e" * 64)
+        view = self.mgr.execute_exit(plan, symbol="SPY",
+                                     limit_price=D("48"),
+                                     recon=self.recon(at(2)), now=at(2))
+        self.assertEqual(view.status, "ACKED")
+        self.mgr.advance({"SPY": D("48")}, at=at(3))
+        snapshot = self.book.snapshot()
+        self.assertTrue(snapshot.halted)
+        self.assertEqual(snapshot.positions, (("SPY", 60, D("2940")),))
+        self.assertEqual(snapshot.cash, D("97020"))
+
+    def test_manual_halt_file_blocks_reducing_sell(self):
+        from alphora.killswitch import KillSwitch
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        self.mgr.advance({"SPY": D("49")}, at=at(1))
+        switch = KillSwitch(book=self.book, adapter=self.venue,
+                            halt_file=Path(self.tmp.name) / "manual-halt.json")
+        switch.kill("operator emergency", now=at(2))
+        mgr = PaperOrderManager(book=self.book, ledger=self.ledger,
+                                adapter=self.venue, killswitch=switch)
+        plan = ExitPlan("PROPOSE_PAPER_SELL", "PROTECTIVE_EXIT", D("40"),
+                        "e" * 64)
+        with self.assertRaisesRegex(ValueError, "KILL_SWITCH_ENGAGED"):
+            mgr.execute_exit(plan, symbol="SPY", limit_price=D("48"),
+                             recon=self.recon(at(3)), now=at(3))
+        self.assertIsNone(self.ledger.get("e" * 64))
+
     def test_exit_without_position_fails(self):
         plan = ExitPlan("PROPOSE_PAPER_SELL", "PROTECTIVE_EXIT", D("10"),
                         "b" * 64)
