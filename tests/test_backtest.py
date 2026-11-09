@@ -246,6 +246,24 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[1], results[2])
 
+    def test_extreme_finite_prices_never_emit_nonfinite_float_reports(self):
+        # The Decimal ledger can represent these synthetic marks exactly,
+        # but float daily returns or variance cannot. Reject, not inf/NaN
+        # Sharpe or a falsely zero Sharpe from overflow.
+        first = Bar(date(2025, 1, 2), D("1"), D("1"),
+                    D("1"), D("1"), 1000)
+        for mark, final_day in (("1e309", False), ("1e200", True)):
+            with self.subTest(mark=mark):
+                second = Bar(date(2025, 1, 3), D("1"), D(mark),
+                             D("1"), D(mark), 1000)
+                bars = [first, second]
+                if final_day:
+                    bars.append(Bar(date(2025, 1, 6), D(mark), D(mark),
+                                    D(mark), D(mark), 1000))
+                with self.assertRaisesRegex(ValueError, "NONFINITE_RESEARCH_REPORT"):
+                    backtest(bars, "buy_hold", max_allocation=D("1"),
+                             cost_bps=D(0))
+
     def test_zero_volume_rejected_before_hypothetical_fills(self):
         # The primitive simulator is also callable without the pinned replay
         # wrapper. Never fabricate an open fill on a no-trade session.
