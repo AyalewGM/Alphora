@@ -117,9 +117,24 @@ class MarketManifestTests(unittest.TestCase):
             check(candidate)
         # An exact final close is the earliest chronologically possible
         # delivery, but does not authenticate any vendor timing assertion.
-        on_close = replace(candidate, delivered_at=m.sessions[-1].closes_at)
+        on_close = replace(candidate,
+                           version_available_at=m.sessions[-1].closes_at,
+                           delivered_at=m.sessions[-1].closes_at)
         self.assertEqual(check(on_close).manifest.delivered_at,
                          m.sessions[-1].closes_at)
+
+    def test_completed_artifact_version_cannot_precede_last_session_close(self):
+        m = fixture()
+        final_close = m.sessions[-1].closes_at
+        # A version falsely labeled as available before the final close is
+        # lookahead, even if the file was delivered after the final close.
+        early_version = replace(m, version_available_at=final_close - timedelta(seconds=1))
+        with self.assertRaisesRegex(ValueError, "PREMATURE_ARTIFACT_VERSION"):
+            check(early_version)
+        # UTC and US Eastern representations of the same close are accepted.
+        at_close = replace(m, version_available_at=final_close.astimezone(timezone.utc))
+        self.assertEqual(check(at_close).manifest.version_available_at,
+                         final_close.astimezone(timezone.utc))
 
     def test_calendar_future_or_naive_rejected(self):
         m = fixture()
