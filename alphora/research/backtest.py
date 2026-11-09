@@ -6,6 +6,11 @@ from datetime import date
 from decimal import Context, Decimal as D, DecimalException, Inexact, localcontext
 from math import sqrt
 
+# Research signal arithmetic must not vary with a caller's Decimal context.
+# This context does not trap rounded averages (e.g. mean of three prices);
+# it provides deterministic, bounded-precision comparisons, not exact math.
+_SIGNAL_CONTEXT = Context(prec=28)
+
 @dataclass(frozen=True)
 class Bar:
     day: date
@@ -75,8 +80,14 @@ def signal(closes,strategy,lookback=20):
     if strategy=="buy_hold": return True
     if len(closes)<lookback+1: return False
     if strategy=="momentum": return closes[-1]>closes[-lookback-1]
-    if strategy=="trend": return closes[-1]>sum(closes[-lookback:],D(0))/lookback
-    return closes[-1]<sum(closes[-lookback-1:-1],D(0))/lookback
+    # Without an explicit context, the same close history can produce a
+    # different trend/mean-reversion decision at precision 6 versus 28.
+    with localcontext(_SIGNAL_CONTEXT):
+        if strategy=="trend":
+            reference=sum(closes[-lookback:],D(0))/lookback
+        else:
+            reference=sum(closes[-lookback-1:-1],D(0))/lookback
+    return closes[-1]>reference if strategy=="trend" else closes[-1]<reference
 
 @dataclass(frozen=True)
 class Result:
