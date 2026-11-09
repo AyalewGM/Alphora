@@ -8,6 +8,32 @@ The validator rejects symbol-period start/end dates and delisting effective date
 
 The validator additionally rejects `PREMATURE_ARTIFACT_DELIVERY`: a manifest claiming complete daily bars through its final declared session must not attest that the corresponding artifact was delivered before that session closed. This is only a chronological consistency check on caller-supplied times, **not** proof that the vendor actually delivered a complete file or that a historical bar was usable at any earlier strategy-decision timestamp.
 
+## Historical ticker compatibility with the draft paper ledger
+
+The research manifest intentionally accepts **1–15-character** historical
+ticker identifiers. The draft paper scanner, risk guard and SQLite ledger
+accept at most **10 characters** and have a separate, more restrictive
+contract. A long historical ticker is still legitimate evidence and must
+never be silently truncated into a different paper symbol.
+
+After all provenance claims are validated, `ManifestReceipt` now exposes:
+`paper_symbol` (a current as-of ticker only if representable) and
+`paper_symbol_reason`. An 11–15-character current identifier yields
+`paper_symbol=None` and `PAPER_SYMBOL_UNSUPPORTED_FORMAT`, even though
+the research receipt and its original SHA-256 remain valid. Excluded or
+already-delisted instruments also produce no paper symbol. Compatible
+current symbols have reason `PAPER_SYMBOL_REPRESENTABLE_ONLY`.
+
+These fields represent **syntax and current-universe compatibility ONLY**.
+They are **not** a trade, scanner or paper-order eligibility verdict,
+independent vendor authenticity, current market listing verification or
+approval to connect a broker. Each historical bar's prior symbol still
+requires a reviewed point-in-time mapping before replay. A downstream
+paper path must reject a `None` paper symbol rather than substitute
+another identifier. This is a cross-PR data/risk contract gate, not
+integrated executable handling; obtain independent review and combined
+tests alongside risk PR #23 and later ledger work.
+
 **Limitations / integration gates:** This module neither opens artifact bytes nor verifies vendor delivery/authenticity, licensing grants, historical completeness or the calendar source's correctness. External expected hashes are operator-provided and must come from off-repo receipts; matching them only detects disagreement in claims. Caller-attested universe membership may be biased by survivorship, and bar-level first-seen / next-open revision timing is not checked here (see `alphora.research.data_provenance` and draft PR #17). There is no split/dividend cash or share accounting, total-return benchmark, real LEAN engine run, out-of-sample ML performance validation, or transaction simulator integration. No local dataset or provider token belongs in this public repository. Future review must test delistings, symbol reuse, true vendor revisions, exchange holidays, halts and corporate-action cash/share conservation using licensed off-repo data.
 
 Run tests offline using `python -m unittest tests/test_market_manifest.py -v` from a checkout or `python -m unittest discover -s tests -v`. This manifest cannot authorize execution, data download, connectivity, orders, deployment or a performance claim. Alpaca remains entirely disconnected. The approved virtual-equity and risk limits are not enforced by this manifest.
