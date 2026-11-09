@@ -5,7 +5,7 @@ The fully invested SPY proxy is NOT compliant with the owner allocation cap.
 """
 from dataclasses import dataclass
 from decimal import Context, Decimal as D, localcontext
-from math import sqrt
+from math import isfinite, sqrt
 from .backtest import backtest, validate, Result
 
 # Aligned reference statistics must match the backtest's 28-digit reporting
@@ -39,14 +39,21 @@ def _aligned_metrics(equity_curve) -> AlignedWindowMetrics:
         for before, after in zip(equity_curve, equity_curve[1:]):
             peak = max(peak, after)
             drawdown = max(drawdown, (peak - after) / peak)
-            returns.append(float(after / before - 1))
+            period_return = float(after / before - 1)
+            if not isfinite(period_return):
+                raise ValueError("NONFINITE_RESEARCH_REPORT")
+            returns.append(period_return)
         total_return = equity_curve[-1] / equity_curve[0] - 1
     sharpe = None
     if len(returns) > 1:
         mean = sum(returns) / len(returns)
         variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+        if not isfinite(mean) or not isfinite(variance):
+            raise ValueError("NONFINITE_RESEARCH_REPORT")
         if variance > 0:
             sharpe = sqrt(252) * mean / sqrt(variance)
+            if not isfinite(sharpe):
+                raise ValueError("NONFINITE_RESEARCH_REPORT")
     return AlignedWindowMetrics(
         len(equity_curve), total_return,
         drawdown, sharpe,
