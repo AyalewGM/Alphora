@@ -17,6 +17,11 @@ _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,14}\Z")
 # longer historical security-master identifiers; never truncate for paper use.
 _PAPER_SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
+# Bound caller-supplied manifest iteration and canonical serialization. These
+# limits cover decades of US equity/ETF research; oversized datasets must be
+# partitioned and independently reviewed rather than consumed blindly.
+MAX_MANIFEST_SESSIONS = 20_000
+MAX_SYMBOL_PERIODS = 256
 
 
 def _valid_id(value):
@@ -142,6 +147,8 @@ def inspect_market_manifest(manifest: MarketManifest, *,
                 (not _date(a.delisted_on) or a.delisted_on < a.listed_on))
             or not isinstance(a.symbols, tuple) or not a.symbols):
         raise ValueError("INVALID_INSTRUMENT")
+    if len(a.symbols) > MAX_SYMBOL_PERIODS:
+        raise ValueError("MANIFEST_TOO_LARGE")
     # No independent per-event availability receipt is present. Effective
     # symbol/delisting dates beyond this ET cutoff would disclose future
     # security-master information to a historical research snapshot.
@@ -179,6 +186,10 @@ def inspect_market_manifest(manifest: MarketManifest, *,
             or not isinstance(m.bar_days, tuple) or not m.bar_days
             or len(m.sessions) != len(m.bar_days)):
         raise ValueError("INCOMPLETE_SESSION_COVERAGE")
+    # Reject oversized caller-supplied calendars before iteration or JSON
+    # construction, rather than trusting a claimed finite import size.
+    if len(m.sessions) > MAX_MANIFEST_SESSIONS:
+        raise ValueError("MANIFEST_TOO_LARGE")
     previous_day = None
     for session, bar_day in zip(m.sessions, m.bar_days):
         if (not isinstance(session, ExchangeSession) or not _date(session.day)
