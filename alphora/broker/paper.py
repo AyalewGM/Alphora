@@ -87,8 +87,11 @@ class PaperBrokerAdapter:
                 or slippage_bps >= _BPS_DENOMINATOR
                 or not _money(fee_per_order, positive=False)):
             raise ValueError("INVALID_PAPER_VENUE_CONFIG")
+        if (starting_cash != _cents(starting_cash)
+                or fee_per_order != _cents(fee_per_order)):
+            raise ValueError("INVALID_PAPER_VENUE_CONFIG")
         self._cash = _cents(starting_cash)
-        self._session_open_equity = starting_cash
+        self._session_open_equity = self._cash
         self._reserved = D(0)
         self._slippage_bps = slippage_bps
         self._fee = _cents(fee_per_order)
@@ -159,7 +162,9 @@ class PaperBrokerAdapter:
                 or not isinstance(req.symbol, str) or not _SYMBOL.fullmatch(req.symbol)
                 or req.side not in SIDES or type(req.qty) is not int
                 or not 0 < req.qty <= 1_000_000_000
-                or not _money(req.limit_price) or req.time_in_force not in TIF
+                or not _money(req.limit_price)
+                or req.limit_price != _cents(req.limit_price)
+                or req.time_in_force not in TIF
                 or not isinstance(client_order_id, str)
                 or not _ID.fullmatch(client_order_id)):
             raise ValueError("INVALID_DISPATCH")
@@ -250,9 +255,13 @@ class PaperBrokerAdapter:
                 raise ValueError("INVALID_MARKS")
         if self._latest_advance_at is not None and at < self._latest_advance_at:
             raise ValueError("NON_MONOTONIC_MARK_TIME")
+        clean_marks = {symbol: _cents(price) for symbol, price in marks.items()}
+        if any(price <= 0 for price in clean_marks.values()):
+            raise ValueError("INVALID_MARKS")
         self._latest_advance_at = at
-        self._marks.update(marks)
-        self._mark_times.update({symbol: at for symbol in marks})
+        self._marks.update(clean_marks)
+        self._mark_times.update({symbol: at for symbol in clean_marks})
+        marks = clean_marks
         buy_adjust = D(1) + self._slippage_bps / _BPS_DENOMINATOR
         sell_adjust = D(1) - self._slippage_bps / _BPS_DENOMINATOR
         events = []
