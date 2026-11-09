@@ -136,7 +136,10 @@ def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=
         elif want and not shares:
             budget=_exact_ledger(lambda: min(cash,cash*max_allocation))
             unit_cost=_exact_ledger(lambda: opening*(1+costs))
-            quantity=int(budget/unit_cost)
+            # Decimal true division may round an almost-integer share count
+            # upward under a caller's low precision (violating the cap).
+            # Integer division is exact and pinned to the ledger context.
+            quantity=int(_exact_ledger(lambda: budget // unit_cost))
             if quantity>0:
                 cash=_exact_ledger(lambda: cash-quantity*unit_cost)
                 shares=quantity

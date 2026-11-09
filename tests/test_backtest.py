@@ -160,6 +160,23 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(ordinary.equity_curve, (D("100000"), D("100000")))
         self.assertEqual(ordinary.transactions, 1)
 
+    def test_near_integer_share_sizing_ignores_caller_precision(self):
+        # With a 6-digit caller Decimal context, ordinary true division
+        # previously rounded 10000 / 1.0000001 to 10000 shares, crossing
+        # the 10%-of-equity allocation budget; the correct floor is 9999.
+        bars = [
+            Bar(date(2025, 1, 2), D("1"), D("1"), D("1"), D("1"), 1000),
+            Bar(date(2025, 1, 3), D("1.0000001"), D("1.0000002"),
+                D("1.0000001"), D("1.0000002"), 1000),
+        ]
+        for precision in (6, 28, 80):
+            with self.subTest(precision=precision):
+                with localcontext() as context:
+                    context.prec = precision
+                    result = backtest(bars, "buy_hold", cost_bps=D(0))
+                    self.assertEqual(result.transactions, 1)
+                    self.assertEqual(result.final_equity, D("100000.0009999"))
+
     def test_exact_ledger_independent_of_caller_decimal_precision(self):
         # Without a pinned context, this input fails at precision 28 but
         # silently succeeds at 80. The same offline artifact must never have
