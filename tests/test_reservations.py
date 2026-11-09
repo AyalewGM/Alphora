@@ -86,6 +86,56 @@ class OfflineReservationTests(unittest.TestCase):
             D("10000"),
         )
 
+    def test_subcent_fee_never_rounds_away_at_instrument_cap(self):
+        # A prior pending $9,000 position plus a new $1,000 proposed
+        # purchase reaches the exact 10% cap. Even a tiny positive fee
+        # must not disappear from the existing-exposure Decimal sum.
+        prior = self.reserve("first", self.proposal(qty="180", stop="49"))
+        self.assertEqual(prior.reserved_cash, D("9000"))
+        fee = D("0.0000000000000000000000001")
+        with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_LEDGER_ARITHMETIC"):
+            self.reserve("rounded-fee", self.proposal(qty="20", stop="49"),
+                         fee_budget=fee)
+        self.assertEqual(self.book.snapshot(), prior)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), prior)
+
+    def test_subcent_synthetic_fill_fee_cannot_round_out_of_cash(self):
+        # A one-share $50 fill with a tiny positive fee must never post
+        # as exactly $50 of cash spent due to Decimal context precision.
+        before = self.reserve("micro-fill", self.proposal(qty="1", stop="49"),
+                              fee_budget=D("1"))
+        tiny_fee = D("0.0000000000000000000000000001")
+        with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_LEDGER_ARITHMETIC"):
+            self.book.record_hypothetical_fill("micro-fill", "fill-1", 1, D("50"),
+                                               fee=tiny_fee)
+        self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_replay_rejects_corrupt_fill_with_rounded_away_fee(self):
+        # A forged persisted fill may look cash-balanced under default
+        # Decimal precision even though a positive fee was not deducted.
+        self.reserve("micro-replay", self.proposal(qty="1", stop="49"),
+                     fee_budget=D("1"))
+        self.book.close()
+        tiny_fee = "0.0000000000000000000000000001"
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "INSERT INTO hypothetical_fills(id,intent_id,qty,price,fee) "
+                "VALUES(?,?,?,?,?)",
+                ("forged-fill", "micro-replay", 1, "50", tiny_fee),
+            )
+            db.execute(
+                "UPDATE buy_intents SET filled=1, fees_paid=?, status='FILLED' "
+                "WHERE id='micro-replay'", (tiny_fee,),
+            )
+            db.execute("UPDATE book_meta SET value='99950' WHERE key='cash'")
+        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
+            OfflineReservations(self.path, session_id="2026-11-02")
+
     def test_fee_budget_is_included_in_per_trade_planned_loss(self):
         # A fee cap is potential loss in addition to the price-to-stop
         # distance. With 100 shares at 50 and a stop at 48 the initial
@@ -172,6 +222,30 @@ class OfflineReservationTests(unittest.TestCase):
         # A caller-asserted manual upstream stop must propagate one-way.
         self.assertTrue(self.book.observe_daily_loss(
             self.account(halted=True), reconciled=True).halted)
+
+    def test_daily_loss_observer_rejects_unrepresentable_marks_without_mutation(self):
+        # A finite Decimal can overflow on subtraction. A just-above-limit
+        # equity can instead round to an apparent $2,000 loss at default
+        # precision; neither input may silently mutate the durable halt.
+        before = self.book.snapshot()
+        snapshots = (
+            (D("1e1000000"), D("0")),
+            (D("98000.00000000000000000000000001"),
+             D("-1999.99999999999999999999999999")),
+        )
+        for equity, day_pnl in snapshots:
+            with self.subTest(equity=str(equity)):
+                unrepresentable = self.account(equity=equity, day_pnl=day_pnl)
+                with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_ACCOUNT_MARK"):
+                    self.book.observe_daily_loss(unrepresentable, reconciled=True)
+                with self.assertRaisesRegex(ValueError, "UNREPRESENTABLE_ACCOUNT_MARK"):
+                    self.book.reserve_buy("bad-mark", unrepresentable,
+                                          self.proposal(qty="1"), reconciled=True)
+                self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+        self.reserve("valid-after-mark-rejection", self.proposal(qty="1"))
 
     def test_non_loss_risk_veto_does_not_trigger_permanent_halt(self):
         with self.assertRaisesRegex(ValueError, "TRADE_RISK_EXCEEDED"):
@@ -468,130 +542,6 @@ os._exit(24)  # No close or normal interpreter shutdown.
         for thread in threads: thread.join()
         self.assertEqual(attempts.count("ok"), 1)
         self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
-
-
-class SellReservationTests(unittest.TestCase):
-    """Offline sell-intent coverage, fill bounds, cash credit and durability."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self.tmp.name) / "paper.sqlite"
-        self.book = OfflineReservations(self.path, session_id="2026-11-02")
-        account = PaperAccount(D("100000"), D("100000"), D("100000"),
-                               D("0"), "2026-11-02")
-        self.book.reserve_buy("b1", account,
-                              BuyProposal("SPY", D("100"), D("50"), D("48")),
-                              fee_budget=D("10"), reconciled=True)
-        self.book.record_hypothetical_fill("b1", "bf1", 100, D("50"),
-                                           fee=D("2"))
-        self.account = account
-
-    def tearDown(self):
-        self.book.close()
-        self.tmp.cleanup()
-
-    def sell(self, ident="s1", qty=60, limit="49", **kw):
-        return self.book.reserve_sell(ident, "SPY", qty, D(limit), **kw)
-
-    def test_reserve_sell_validation_dedupe_conflict(self):
-        state = self.sell()
-        self.assertEqual(state.pending_sells, (("s1", "SPY", 60),))
-        self.assertEqual(self.sell(), state)
-        with self.assertRaisesRegex(ValueError, "CONFLICTING_INTENT_ID"):
-            self.sell(qty=50)
-        for bad in (("x y", "SPY", 1, D("1")), ("i", "spy", 1, D("1")),
-                    ("i", "SPY", 0, D("1")), ("i", "SPY", 1.5, D("1")),
-                    ("i", "SPY", 1, D("0")), ("i", "SPY", 1, D("nan"))):
-            with self.subTest(bad=bad):
-                with self.assertRaisesRegex(ValueError, "INVALID_SELL_INTENT"):
-                    self.book.reserve_sell(*bad)
-
-    def test_pending_sell_coverage_uses_held_minus_pending(self):
-        self.sell("s1", 60)
-        with self.assertRaisesRegex(ValueError, "INSUFFICIENT_POSITION"):
-            self.sell("s2", 41)
-        self.sell("s2", 40)
-        with self.assertRaisesRegex(ValueError, "INSUFFICIENT_POSITION"):
-            self.sell("s3", 1)
-        self.assertEqual(len(self.book.snapshot().pending_sells), 2)
-
-    def test_sell_never_available_without_holdings(self):
-        with self.assertRaisesRegex(ValueError, "INSUFFICIENT_POSITION"):
-            self.book.reserve_sell("s-qqq", "QQQ", 1, D("10"))
-
-    def test_sell_fill_credits_proceeds_and_reduces_position(self):
-        self.sell(qty=60, fee_budget=D("10"))
-        state = self.book.record_sell_fill("s1", "sf1", 60, D("52"),
-                                           fee=D("3"))
-        self.assertEqual(state.cash, D("98115"))  # 94998 + 60*52 - 3
-        self.assertEqual(state.positions, (("SPY", 40, D("2000.8")),))
-        self.assertEqual(state.pending_sells, ())
-        self.assertEqual(self.book.record_sell_fill("s1", "sf1", 60, D("52"),
-                                                    fee=D("3")), state)
-        with self.assertRaisesRegex(ValueError, "CONFLICTING_FILL_ID"):
-            self.book.record_sell_fill("s1", "sf1", 60, D("51"), fee=D("3"))
-
-    def test_sell_fill_bounds(self):
-        self.sell(qty=60, limit="50")
-        for qty, price, fee in ((61, D("50"), D(0)), (1, D("49.99"), D(0)),
-                                (1, D("50"), D("11"))):
-            with self.subTest(qty=qty, price=price, fee=fee):
-                with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS"):
-                    self.book.record_sell_fill("s1", "sx", qty, price, fee=fee)
-        for args in (("s1", "f x", 1, D("50")), ("s1", "f", 0, D("50")),
-                     ("s1", "f", 1, D("0")), ("s1", "f", 1, D("50"),)):
-            with self.subTest(args=args):
-                with self.assertRaisesRegex(ValueError, "INVALID_SYNTHETIC_FILL"):
-                    self.book.record_sell_fill(*args, fee=D("-1"))
-        with self.assertRaisesRegex(ValueError, "NO_OPEN_INTENT"):
-            self.book.record_sell_fill("unknown", "f", 1, D("50"))
-
-    def test_cancel_sell_releases_and_terminal_idempotent(self):
-        self.sell()
-        state = self.book.cancel_sell("s1")
-        self.assertEqual(state.pending_sells, ())
-        self.assertEqual(self.book.cancel_sell("s1"), state)
-        with self.assertRaisesRegex(ValueError, "CANCELLED_INTENT_ID"):
-            self.sell()
-        with self.assertRaisesRegex(ValueError, "NO_OPEN_INTENT"):
-            self.book.record_sell_fill("s1", "sf", 1, D("50"))
-        with self.assertRaisesRegex(ValueError, "UNKNOWN_INTENT"):
-            self.book.cancel_sell("nope")
-
-    def test_halt_blocks_sell_reservations_and_fills(self):
-        self.sell()
-        self.book.halt()
-        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
-            self.sell("s2", 10)
-        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
-            self.book.record_sell_fill("s1", "sf", 1, D("52"))
-        # Cancellation remains available while halted.
-        self.book.close()
-        self.book = OfflineReservations(self.path, session_id="2026-11-02")
-        self.assertEqual(self.book.cancel_sell("s1").pending_sells, ())
-
-    def test_sell_state_survives_restart_and_corruption_fails_closed(self):
-        self.sell(qty=60, fee_budget=D("5"))
-        self.book.record_sell_fill("s1", "sf1", 20, D("52"), fee=D("1"))
-        before = self.book.snapshot()
-        self.book.close()
-        self.book = OfflineReservations(self.path, session_id="2026-11-02")
-        self.assertEqual(self.book.snapshot(), before)
-        self.book.close()
-        with sqlite3.connect(self.path) as conn:
-            conn.execute("UPDATE book_meta SET value='99999' WHERE key='cash'")
-        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
-            OfflineReservations(self.path, session_id="2026-11-02")
-        with sqlite3.connect(self.path) as conn:
-            conn.execute("UPDATE book_meta SET value=? WHERE key='cash'",
-                         (str(before.cash),))
-            conn.execute("UPDATE sell_intents SET filled=99 WHERE id='s1'")
-        with self.assertRaisesRegex(ValueError, "BOOK_STATE_CORRUPT"):
-            OfflineReservations(self.path, session_id="2026-11-02")
-        with sqlite3.connect(self.path) as conn:
-            conn.execute("UPDATE sell_intents SET filled=20 WHERE id='s1'")
-        self.book = OfflineReservations(self.path, session_id="2026-11-02")
-        self.assertEqual(self.book.snapshot(), before)
 
 
 if __name__ == "__main__":

@@ -47,6 +47,28 @@ class DecisionTests(unittest.TestCase):
                   pending_instrument_value=D(1000))
         self.assertEqual(self.entry(c).proposal.quantity, D(20))
 
+    def test_inexact_cash_reservation_fails_closed(self):
+        # Default 28-digit Decimal arithmetic would round a tiny but real
+        # reservation away from the $10,000 cash available for a full-cap buy.
+        account = replace(self.account, cash=D("10000"))
+        result = self.entry(account=account,
+                            reserved_cash=D("0.0000000000000000000000000001"))
+        self.assertFalse(result.permitted)
+        self.assertEqual(result.reason, "INVALID_ACCOUNT_OR_ORDER")
+
+    def test_inexact_pending_exposure_fails_closed(self):
+        # This pending exposure would round away when added to $1,000,
+        # otherwise permitting 180 shares at $50 and exceeding the cap.
+        candidate = replace(self.candidate,
+                            existing_instrument_value=D("1000"),
+                            pending_instrument_value=D("0.0000000000000000000000000001"))
+        result = self.entry(candidate)
+        self.assertFalse(result.permitted)
+        self.assertEqual(result.reason, "INVALID_ACCOUNT_OR_ORDER")
+        # Exact, normal-size reservations must still size deterministically.
+        self.assertEqual(self.entry(reserved_cash=D("97000")).proposal.quantity,
+                         D(60))
+
     def test_overcommitted_cash_rejected(self):
         self.assertEqual(self.entry(reserved_cash=D(100001)).reason, 'OVERCOMMITTED_CASH')
 
@@ -79,6 +101,16 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(plan.action,'PROPOSE_PAPER_SELL')
         self.assertEqual(plan.reason,'TAKE_PROFIT')
         self.assertEqual(plan.quantity,D(100))
+
+    def test_unrepresentable_positive_target_cannot_trigger_break_even_sale(self):
+        # With default 28-digit Decimal precision a tiny positive target
+        # rounds 1 + pct/100 back to 1. A $50 bid must never trigger it.
+        quote = replace(self.quote, bid=D("50"), ask=D("50.01"))
+        result = self.exit(quote=quote, take_profit_pct=D("1e-30"))
+        self.assertEqual(result.action, "HOLD")
+        self.assertEqual(result.reason, "INVALID_POSITION_OR_QUOTE")
+        # The ordinary exact 3% target remains valid.
+        self.assertEqual(self.exit().reason, "TAKE_PROFIT")
 
     def test_target_not_reached_on_ask_only(self):
         quote=replace(self.quote, bid=D('51.49'), ask=D('51.80'))
@@ -120,6 +152,57 @@ class DecisionTests(unittest.TestCase):
         self.assertEqual(self.exit(quote=replace(self.quote,regular_session_verified=False)).action,'HOLD')
 
 
+    def test_planner_rejects_untyped_snapshots(self):
+        # The existing offline planner guards must veto all four top-level
+        # boundaries, not only missing accounts/positions. These are not
+        # broker orders and must not produce executable intent identifiers.
+        entry_args = dict(as_of=self.now, expected_session_id='2026-11-02',
+                          reserved_cash=D(0), reconciled=True)
+        exit_args = dict(as_of=self.now, take_profit_pct=D(3))
+        for malformed in (None, {}, object()):
+            with self.subTest(boundary='entry-account', kind=type(malformed).__name__):
+                plan = propose_entry(malformed, self.candidate, **entry_args)
+                self.assertFalse(plan.permitted)
+                self.assertEqual(plan.reason, 'INVALID_ACCOUNT_OR_ORDER')
+                self.assertIsNone(plan.proposal)
+                self.assertIsNone(plan.intent_key)
+            with self.subTest(boundary='entry-candidate', kind=type(malformed).__name__):
+                plan = propose_entry(self.account, malformed, **entry_args)
+                self.assertFalse(plan.permitted)
+                self.assertEqual(plan.reason, 'INVALID_ACCOUNT_OR_ORDER')
+                self.assertIsNone(plan.proposal)
+                self.assertIsNone(plan.intent_key)
+            with self.subTest(boundary='exit-position', kind=type(malformed).__name__):
+                plan = propose_exit(malformed, self.quote, **exit_args)
+                self.assertEqual(plan.action, 'HOLD')
+                self.assertEqual(plan.reason, 'INVALID_POSITION_OR_QUOTE')
+                self.assertIsNone(plan.intent_key)
+            with self.subTest(boundary='exit-quote', kind=type(malformed).__name__):
+                plan = propose_exit(self.position, malformed, **exit_args)
+                self.assertEqual(plan.action, 'HOLD')
+                self.assertEqual(plan.reason, 'INVALID_POSITION_OR_QUOTE')
+                self.assertIsNone(plan.intent_key)
+
+    def test_entry_extreme_decimal_fails_closed_without_exception(self):
+        huge = D('1e1000000')
+        snapshot = replace(self.account, equity=huge, session_open_equity=huge, cash=huge)
+        self.assertEqual(self.entry(account=snapshot).reason, 'INVALID_ACCOUNT_OR_ORDER')
+        candidate = replace(self.candidate, existing_instrument_value=huge,
+                            pending_instrument_value=huge)
+        self.assertEqual(self.entry(candidate).reason, 'INVALID_ACCOUNT_OR_ORDER')
+        self.assertEqual(propose_entry(None, self.candidate, as_of=self.now,
+                      expected_session_id='2026-11-02', reserved_cash=D(0),
+                      reconciled=True).reason, 'INVALID_ACCOUNT_OR_ORDER')
+
+    def test_exit_extreme_decimal_fails_closed_without_exception(self):
+        position = replace(self.position, average_fill_price=D('1e1000000'))
+        quote = replace(self.quote, bid=D('100'), ask=D('100.01'))
+        result = self.exit(position=position, quote=quote)
+        self.assertEqual(result.action, 'HOLD')
+        self.assertEqual(result.reason, 'INVALID_POSITION_OR_QUOTE')
+        self.assertEqual(propose_exit(None, quote, as_of=self.now,
+                        take_profit_pct=D(3)).reason, 'INVALID_POSITION_OR_QUOTE')
+
     def test_daily_loss_from_equity_cannot_be_bypassed(self):
         account=replace(self.account,equity=D(95000),cash=D(95000),day_pnl=D(0))
         self.assertEqual(self.entry(account=account).reason,'DAILY_LOSS_HALT')
@@ -149,6 +232,19 @@ class DecisionTests(unittest.TestCase):
         self.assertIsNotNone(self.entry().intent_key)
         different=self.entry(replace(self.candidate,ask=D('50.01'))).intent_key
         self.assertNotEqual(self.entry().intent_key,different)
+
+    def test_entry_exit_reject_symbols_that_persistent_book_cannot_store(self):
+        for symbol in ("---", "...", "1SPY", "A" * 11):
+            with self.subTest(symbol=symbol):
+                candidate = replace(self.candidate, symbol=symbol, quote_symbol=symbol)
+                self.assertEqual(self.entry(candidate).reason, "INVALID_SYMBOL")
+                position = replace(self.position, symbol=symbol)
+                quote = replace(self.quote, symbol=symbol)
+                self.assertEqual(self.exit(position=position, quote=quote).reason,
+                                 "INVALID_SYMBOL")
+        self.assertEqual(self.exit(position=replace(self.position, symbol="BRK.B"),
+                                   quote=replace(self.quote, symbol="BRK.B")).reason,
+                         "TAKE_PROFIT")
 
     def test_exit_quote_bound_to_symbol(self):
         self.assertEqual(self.exit(quote=replace(self.quote,symbol='QQQ')).reason,

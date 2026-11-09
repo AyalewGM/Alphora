@@ -3,13 +3,39 @@
 This module never contacts a broker. Use Decimal for money calculations.
 """
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, DecimalException, Inexact, localcontext
+import re
 
 INITIAL_EQUITY = Decimal("100000")
 RISK_FRACTION = Decimal("0.005")
 MAX_INSTRUMENT_FRACTION = Decimal("0.10")
 DAILY_LOSS_FRACTION = Decimal("0.02")
 REBALANCE_FREQUENCY = "daily"
+# Keep the direct risk boundary aligned with the persisted offline book.
+_SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
+
+# Bounded operator-configurable PAPER risk parameters. Defaults unchanged.
+# The 2% daily-loss shutdown is independently enforced and is not configurable here.
+@dataclass(frozen=True)
+class RiskPolicy:
+    risk_per_trade_fraction: Decimal = RISK_FRACTION
+    max_instrument_fraction: Decimal = MAX_INSTRUMENT_FRACTION
+
+    def __post_init__(self):
+        if (type(self.risk_per_trade_fraction) is not Decimal
+                or not self.risk_per_trade_fraction.is_finite()
+                or not Decimal("0") < self.risk_per_trade_fraction <= DAILY_LOSS_FRACTION
+                or type(self.max_instrument_fraction) is not Decimal
+                or not self.max_instrument_fraction.is_finite()
+                or not Decimal("0") < self.max_instrument_fraction <= Decimal("1")):
+            raise ValueError("INVALID_RISK_POLICY")
+
+    def fingerprint(self) -> str:
+        return (format(self.risk_per_trade_fraction.normalize(), "f") + "|"
+                + format(self.max_instrument_fraction.normalize(), "f"))
+
+
+DEFAULT_RISK_POLICY = RiskPolicy()
 
 
 @dataclass(frozen=True)
@@ -47,6 +73,7 @@ def validate_buy(
     *,
     expected_session_id: str,
     mode: str = "paper",
+    policy: RiskPolicy = DEFAULT_RISK_POLICY,
 ) -> Decision:
     """Reject unsafe long-only purchases; must be called again just before order simulation.
 
@@ -54,6 +81,15 @@ def validate_buy(
     """
     if mode != "paper":
         return Decision(False, "REAL_TRADING_DISABLED")
+    if not isinstance(policy, RiskPolicy):
+        return Decision(False, "INVALID_RISK_POLICY")
+    # Invalid/untyped paper snapshots must never be interpreted as an
+    # affirmative risk decision. In particular, `0`/None are not a valid
+    # representation of a cleared persistent kill switch.
+    if not isinstance(account, PaperAccount) or not isinstance(proposal, BuyProposal):
+        return Decision(False, "INVALID_ACCOUNT_OR_ORDER")
+    if type(account.halted) is not bool:
+        return Decision(False, "INVALID_ACCOUNT_STATE")
     if (not isinstance(expected_session_id, str) or not expected_session_id
             or not isinstance(account.session_id, str) or not account.session_id
             or account.session_id != expected_session_id):
@@ -77,26 +113,37 @@ def validate_buy(
             not proposal.existing_instrument_value.is_finite()
             or proposal.existing_instrument_value < 0):
         return Decision(False, "INVALID_EXISTING_POSITION")
-    if (not isinstance(proposal.symbol, str) or not proposal.symbol
-            or not proposal.symbol.isascii() or not all(
-                c.isupper() or c.isdigit() or c in ".-" for c in proposal.symbol
-            )):
+    if not isinstance(proposal.symbol, str) or not _SYMBOL.fullmatch(proposal.symbol):
         return Decision(False, "INVALID_SYMBOL")
-    # Do not let an inconsistent reported P&L bypass the daily loss halt.
-    observed_day_pnl = account.equity - account.session_open_equity
-    loss_limit = -(account.session_open_equity * DAILY_LOSS_FRACTION)
-    if account.halted or account.day_pnl <= loss_limit or observed_day_pnl <= loss_limit:
-        return Decision(False, "DAILY_LOSS_HALT")
-    # Cash-only, no deposits/withdrawals in this paper snapshot.
-    if (account.cash > account.equity or
-            abs(observed_day_pnl - account.day_pnl) > Decimal("0.01")):
-        return Decision(False, "INCONSISTENT_ACCOUNT_STATE")
-    notional = proposal.price * proposal.quantity
-    planned_risk = (proposal.price - proposal.stop_price) * proposal.quantity
-    if planned_risk > account.equity * RISK_FRACTION:
-        return Decision(False, "TRADE_RISK_EXCEEDED")
-    if proposal.existing_instrument_value + notional > account.equity * MAX_INSTRUMENT_FRACTION:
-        return Decision(False, "INSTRUMENT_ALLOCATION_EXCEEDED")
-    if notional > account.cash:
-        return Decision(False, "INSUFFICIENT_CASH")
+    # Malformed extreme Decimal values can overflow calculations despite
+    # passing the finite-input test. Return a deterministic veto, never an
+    # uncaught arithmetic exception or affirmative paper decision.
+    try:
+        # Reject any rounded accounting calculation; a small loss or
+        # allocation excess must not disappear at the Decimal precision boundary.
+        with localcontext() as context:
+            context.traps[Inexact] = True
+            # Do not let an inconsistent reported P&L bypass the daily loss halt.
+            observed_day_pnl = account.equity - account.session_open_equity
+            loss_limit = -(account.session_open_equity * DAILY_LOSS_FRACTION)
+            if account.halted or account.day_pnl <= loss_limit or observed_day_pnl <= loss_limit:
+                return Decision(False, "DAILY_LOSS_HALT")
+            # Cash-only, no deposits/withdrawals in this paper snapshot.
+            if (account.cash > account.equity or
+                    abs(observed_day_pnl - account.day_pnl) > Decimal("0.01")):
+                return Decision(False, "INCONSISTENT_ACCOUNT_STATE")
+            notional = proposal.price * proposal.quantity
+            planned_risk = (proposal.price - proposal.stop_price) * proposal.quantity
+            # Very small Decimals may round a positive order to zero in the
+            # active decimal context; never treat that as a free, safe purchase.
+            if notional <= 0 or planned_risk <= 0:
+                return Decision(False, "INVALID_ACCOUNT_OR_ORDER")
+            if planned_risk > account.equity * policy.risk_per_trade_fraction:
+                return Decision(False, "TRADE_RISK_EXCEEDED")
+            if proposal.existing_instrument_value + notional > account.equity * policy.max_instrument_fraction:
+                return Decision(False, "INSTRUMENT_ALLOCATION_EXCEEDED")
+            if notional > account.cash:
+                return Decision(False, "INSUFFICIENT_CASH")
+    except DecimalException:
+        return Decision(False, "INVALID_ACCOUNT_OR_ORDER")
     return Decision(True, "PAPER_BUY_ALLOWED")

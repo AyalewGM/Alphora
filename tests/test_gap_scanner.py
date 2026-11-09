@@ -168,6 +168,125 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(all(x.classification=='EXCLUDED' for x in scan(items)))
 
 
+    def test_extreme_finite_decimal_inputs_fail_closed_without_batch_crash(self):
+        # Decimal.is_finite() is not sufficient for arithmetic safety:
+        # values beyond the active context can raise decimal.Overflow.
+        cases = (
+            ({"previous_close": D("1e-999999999")}, "INVALID_PRICE_ARITHMETIC"),
+            ({"ask": D("1e999999999")}, "INVALID_SPREAD_ARITHMETIC"),
+            ({"avg_daily_dollar_volume20": D("1e999999999")},
+             "INVALID_DOLLAR_VOLUME_ARITHMETIC"),
+        )
+        for changes, reason in cases:
+            with self.subTest(reason=reason):
+                result = screen_one(fixture(**changes))
+                self.assertEqual(result.classification, "EXCLUDED")
+                self.assertIn(reason, result.reasons)
+                self.assertEqual(
+                    scan([fixture(symbol="SAFE"), fixture(symbol="BAD", **changes)])[0].symbol,
+                    "SAFE",
+                )
+
+
+    def test_rvol_arithmetic_overflow_is_excluded(self):
+        # A finite integer feed volume can overflow a constrained Decimal
+        # context when computing same-time relative volume. Fail closed.
+        from decimal import localcontext
+        with localcontext() as context:
+            context.Emax = 9
+            result = screen_one(fixture(
+                premarket_volume=10 ** 12, same_time_baseline_volume=1
+            ))
+            self.assertEqual(result.classification, "EXCLUDED")
+            self.assertIn("INVALID_RVOL_ARITHMETIC", result.reasons)
+
+    def test_decimal_rounding_cannot_promote_below_threshold_candidates(self):
+        # With default Decimal precision, ordinary half-even rounding makes
+        # the 2.999...% gap appear exactly 3% and wrongly pass the minimum.
+        below_gap = fixture(reference_price=D("10.299999999999999999999999999"))
+        self.assertEqual(
+            (below_gap.reference_price / below_gap.previous_close - 1) * 100, D("3")
+        )
+        result = screen_one(below_gap)
+        self.assertEqual(result.classification, "EXCLUDED")
+        self.assertIn("GAP_BELOW_MINIMUM", result.reasons)
+
+        # Extremely large, integer-only but untrusted feed volumes can also
+        # round a true sub-2x RVOL to exactly 2x without a Decimal exception.
+        baseline = 10 ** 34
+        below_rvol = fixture(
+            premarket_volume=2 * baseline - 1,
+            same_time_baseline_volume=baseline,
+        )
+        self.assertEqual(
+            D(below_rvol.premarket_volume) / D(below_rvol.same_time_baseline_volume),
+            D("2"),
+        )
+        result = screen_one(below_rvol)
+        self.assertEqual(result.classification, "EXCLUDED")
+        self.assertIn("LOW_SAME_TIME_RVOL", result.reasons)
+
+        # Exactly on the policy boundary must still pass.
+        on_boundary = fixture(
+            reference_price=D("10.30"), premarket_volume=300_000,
+            same_time_baseline_volume=150_000,
+        )
+        self.assertEqual(screen_one(on_boundary).classification, "WATCHLIST")
+        self.assertEqual(scan([below_gap, below_rvol, on_boundary])[0].symbol,
+                         on_boundary.symbol)
+
+
+    def test_source_identifier_requires_nonblank_text(self):
+        for source in ("", "  ", None, 42):
+            with self.subTest(source=source):
+                result = screen_one(fixture(source=source))
+                self.assertEqual(result.classification, "EXCLUDED")
+                self.assertIn("MISSING_MARKET_PROVENANCE", result.reasons)
+
+    def test_unknown_reversal_or_dilution_evidence_is_not_clean(self):
+        for field, reason in (
+            ("reversal_signal", "REVERSAL_EVIDENCE_UNKNOWN"),
+            ("dilution_signal", "DILUTION_EVIDENCE_UNKNOWN"),
+        ):
+            for value in (None, 0, "false"):
+                with self.subTest(field=field, value=value):
+                    result = screen_one(fixture(**{field: value}))
+                    self.assertEqual(result.classification, "CAUTION")
+                    self.assertIn(reason, result.reasons)
+
+        for field, reason in (
+            ("reversal_signal", "SHARP_REVERSAL_FLAG"),
+            ("dilution_signal", "RECENT_DILUTION_FLAG"),
+        ):
+            with self.subTest(field=field, value=True):
+                result = screen_one(fixture(**{field: True}))
+                self.assertEqual(result.classification, "CAUTION")
+                self.assertIn(reason, result.reasons)
+            self.assertEqual(screen_one(fixture(**{field: False})).classification,
+                             "WATCHLIST")
+
+    def test_spread_just_above_limit_cannot_round_into_watchlist(self):
+        # The true spread exceeds 1%, but normal Decimal precision rounds
+        # the displayed ratio to precisely 1%, falsely permitting a watchlist.
+        above = fixture(
+            previous_close=D("200"), reference_price=D("206"),
+            bid=D("199"), ask=D("201." + "0" * 27 + "1"),
+        )
+        self.assertEqual(
+            (above.ask - above.bid) * 200 / (above.ask + above.bid), D("1")
+        )
+        result = screen_one(above)
+        self.assertEqual(result.classification, "EXCLUDED")
+        self.assertIn("WIDE_SPREAD", result.reasons)
+
+        # Exact 1% remains eligible: conservative upper-bound arithmetic
+        # must not invent an exclusion at the actual limit.
+        exact = replace(above, ask=D("201"))
+        self.assertEqual(screen_one(exact).classification, "WATCHLIST")
+        self.assertEqual(
+            scan([above, exact])[0].classification, "WATCHLIST"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

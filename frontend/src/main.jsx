@@ -4,6 +4,7 @@ import "./styles.css";
 import { APPROVED_POLICY, loadLocalReadOnlyStatus } from "./api.js";
 import { parseLocalDailySnapshot } from "./local-bars.js";
 import { normalizedVolumeHeights } from "./chart-scale.js";
+import { DEFAULT_RISK_DRAFT, validateRiskDraft } from "./risk-draft.js";
 
 const WATCHLIST = [
   { symbol: "SPY", name: "S&P 500 ETF", base: 582.40, change: 0.82 },
@@ -70,6 +71,30 @@ function App() {
   const [search, setSearch] = useState("");
   const [imported, setImported] = useState(null);
   const [importError, setImportError] = useState("");
+  // Draft-only operator input; deliberately no storage or backend write.
+  const [riskDraft, setRiskDraft] = useState({ ...DEFAULT_RISK_DRAFT });
+  const [riskPreview, setRiskPreview] = useState(null);
+  const [riskDraftError, setRiskDraftError] = useState("");
+  function previewRiskDraft(event) {
+    event.preventDefault();
+    try {
+      setRiskPreview(validateRiskDraft(riskDraft));
+      setRiskDraftError("");
+    } catch (error) {
+      setRiskPreview(null);
+      setRiskDraftError(`Preview rejected: ${error.message}`);
+    }
+  }
+  function resetRiskDraft() {
+    setRiskDraft({ ...DEFAULT_RISK_DRAFT });
+    setRiskPreview(null);
+    setRiskDraftError("");
+  }
+  function changeRiskDraft(key, value) {
+    setRiskDraft(current => ({ ...current, [key]: value }));
+    setRiskPreview(null);
+    setRiskDraftError("");
+  }
   async function onSnapshotFile(event) {
     setImportError("");
     const file = event.target.files?.[0];
@@ -122,6 +147,34 @@ function App() {
           <div className="metric"><span>Instrument allocation cap</span><strong>{pct(policy.max_instrument_allocation_fraction)}</strong><small>Per ticker including reservations</small></div>
           <div className="metric"><span>Daily loss shutdown</span><strong>{pct(policy.daily_loss_shutdown_fraction)}</strong><small>Not continuously monitored here</small></div>
         </div>
+        <section className="panel risk-draft-panel" aria-labelledby="risk-draft-title">
+          <div>
+            <h2 id="risk-draft-title">Draft paper-risk settings</h2>
+            <p>Preview limits for a future unattended local simulator. These values are <strong>not active</strong>, not saved, and never sent to the backend. Active displayed policy remains unchanged.</p>
+          </div>
+          <form onSubmit={previewRiskDraft} noValidate>
+            <label>Planned risk per trade (%)
+              <input aria-label="Draft planned risk per trade percent" inputMode="decimal" type="text"
+                value={riskDraft.perTradePct} onChange={event => changeRiskDraft("perTradePct", event.target.value)}
+                aria-describedby="draft-limit-note" />
+            </label>
+            <label>Maximum per-instrument allocation (%)
+              <input aria-label="Draft maximum instrument allocation percent" inputMode="decimal" type="text"
+                value={riskDraft.allocationPct} onChange={event => changeRiskDraft("allocationPct", event.target.value)}
+                aria-describedby="draft-limit-note" />
+            </label>
+            <div className="draft-actions">
+              <button type="submit">Validate preview</button>
+              <button type="button" onClick={resetRiskDraft}>Reset defaults</button>
+            </div>
+          </form>
+          <p id="draft-limit-note">Validated ranges: planned trade risk greater than 0% and at most 2%; allocation greater than 0% and at most 100%. The 2% daily-loss shutdown remains fixed. These are technical bounds, not recommended settings.</p>
+          {riskDraftError && <p className="draft-error" role="alert">{riskDraftError}</p>}
+          {riskPreview && <div className="draft-result" role="status">
+            <strong>Validated preview — NOT APPLIED</strong>
+            <p>Risk fraction: {riskPreview.max_planned_trade_risk_fraction}; allocation fraction: {riskPreview.max_instrument_allocation_fraction}. No settings have been persisted or activated.</p>
+          </div>}
+        </section>
         <section className="panel chart-panel">
           <div className="chart-header"><div className="symbol-title"><div className="symbol-badge">{selected.slice(0,1)}</div><div><h2>{selected} <span>{item.name}</span></h2><p>{showingLocal ? "Local daily bars · source authenticity NOT verified" : "Illustrative candles · NOT real-time prices"}</p></div></div><div className="price"><strong>{showingLocal ? `Close ${imported.bars.at(-1).close.toFixed(2)}` : `${item.base.toFixed(2)}`}</strong><span className={showingLocal ? "" : item.change >= 0 ? "positive":"negative"}>{showingLocal ? `As of ${imported.bars.at(-1).day}` : `${item.change>=0?"+":""}${item.change.toFixed(2)}% demo`}</span></div></div>
           <div className="toolbar"><div className="timeframes">{!showingLocal && TIMEFRAMES.map(t=><button key={t} type="button" className={timeframe===t?"active":""} onClick={()=>setTimeframe(t)} aria-pressed={timeframe===t}>{t}</button>)}{showingLocal && <span className="toolnote">DAILY · Last 60 records</span>}</div><div className="toolnote">{showingLocal ? "Unverified local source · Not for trading" : "Illustrative candles and prices only"}</div></div>

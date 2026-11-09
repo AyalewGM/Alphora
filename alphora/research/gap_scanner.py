@@ -5,7 +5,7 @@ All inputs must be assembled from point-in-time vendor records by a future adapt
 """
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal as D
+from decimal import Decimal as D, DecimalException, ROUND_CEILING, ROUND_FLOOR, localcontext
 import re
 from zoneinfo import ZoneInfo
 
@@ -113,7 +113,8 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
         _append_once(excluded, "UNSUPPORTED_SECURITY")
     if candidate.session not in ("PREMARKET", "OPEN"):
         _append_once(excluded, "UNSUPPORTED_SESSION")
-    if not candidate.source or candidate.feed not in ("SIP", "IEX"):
+    if (not isinstance(candidate.source, str) or not candidate.source.strip()
+            or candidate.feed not in ("SIP", "IEX")):
         _append_once(excluded, "MISSING_MARKET_PROVENANCE")
     elif candidate.feed != "SIP":
         _append_once(caution, "NON_CONSOLIDATED_FEED")
@@ -125,13 +126,24 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
     if not (_positive(candidate.previous_close) and _positive(candidate.reference_price)):
         _append_once(excluded, "INVALID_PRICE")
     else:
-        gap = (candidate.reference_price / candidate.previous_close - 1) * 100
-        if candidate.reference_price < policy.min_price:
-            _append_once(excluded, "PRICE_BELOW_MINIMUM")
-        if gap < policy.min_gap_pct:
-            _append_once(excluded, "GAP_BELOW_MINIMUM")
-        if gap >= policy.extreme_gap_pct:
-            _append_once(caution, "EXTREME_GAP_REVIEW")
+        try:
+            gap = (candidate.reference_price / candidate.previous_close - 1) * 100
+            # A rounded gap can equal a threshold even when the true ratio
+            # falls just below it; enforce a conservative lower bound.
+            with localcontext() as ctx:
+                ctx.rounding = ROUND_FLOOR
+                minimum_gap_bound = (
+                    candidate.reference_price / candidate.previous_close - 1
+                ) * 100
+        except DecimalException:
+            _append_once(excluded, "INVALID_PRICE_ARITHMETIC")
+        else:
+            if candidate.reference_price < policy.min_price:
+                _append_once(excluded, "PRICE_BELOW_MINIMUM")
+            if minimum_gap_bound < policy.min_gap_pct:
+                _append_once(excluded, "GAP_BELOW_MINIMUM")
+            if gap >= policy.extreme_gap_pct:
+                _append_once(caution, "EXTREME_GAP_REVIEW")
 
     if (not _timestamp(candidate.as_of) or not _timestamp(candidate.reference_price_at)
             or not _timestamp(candidate.previous_close_at)
@@ -173,6 +185,13 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
     if (not _positive(candidate.avg_daily_dollar_volume20)
             or candidate.avg_daily_dollar_volume20 < policy.min_avg_daily_dollar_volume):
         _append_once(excluded, "LOW_OR_INVALID_DOLLAR_VOLUME")
+    else:
+        # A finite Decimal can exceed the active arithmetic context and
+        # crash batch ranking when its descending sort key is negated.
+        try:
+            -candidate.avg_daily_dollar_volume20
+        except DecimalException:
+            _append_once(excluded, "INVALID_DOLLAR_VOLUME_ARITHMETIC")
     if (not _whole_nonnegative(candidate.premarket_volume)
             or not _whole_nonnegative(candidate.regular_cumulative_volume)):
         _append_once(excluded, "INVALID_SESSION_VOLUME")
@@ -185,9 +204,20 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
                 or candidate.same_time_baseline_volume <= 0):
             _append_once(caution, "MISSING_SAME_TIME_BASELINE")
         else:
-            rvol = D(observed) / D(candidate.same_time_baseline_volume)
-            if rvol < policy.min_rvol:
-                _append_once(excluded, "LOW_SAME_TIME_RVOL")
+            try:
+                rvol = D(observed) / D(candidate.same_time_baseline_volume)
+                # Avoid promoting below-threshold comparable volume when the
+                # ordinary precision rounds its ratio up to the cutoff.
+                with localcontext() as ctx:
+                    ctx.rounding = ROUND_FLOOR
+                    minimum_rvol_bound = D(observed) / D(
+                        candidate.same_time_baseline_volume
+                    )
+            except DecimalException:
+                _append_once(excluded, "INVALID_RVOL_ARITHMETIC")
+            else:
+                if minimum_rvol_bound < policy.min_rvol:
+                    _append_once(excluded, "LOW_SAME_TIME_RVOL")
 
     if not (_positive(candidate.bid) and _positive(candidate.ask)
             and candidate.bid <= candidate.ask and _timestamp(candidate.quote_at)):
@@ -197,9 +227,25 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
             age = candidate.as_of - candidate.quote_at
             if age < timedelta(0) or age > timedelta(seconds=policy.max_quote_age_seconds):
                 _append_once(excluded, "STALE_OR_FUTURE_QUOTE")
-        spread = (candidate.ask - candidate.bid) * 200 / (candidate.ask + candidate.bid)
-        if spread > policy.max_spread_pct:
-            _append_once(excluded, "WIDE_SPREAD")
+        try:
+            spread = (candidate.ask - candidate.bid) * 200 / (candidate.ask + candidate.bid)
+            # A near-limit spread can round down to the maximum. For the
+            # eligibility veto use an upper bound: numerator rounded up,
+            # denominator rounded down, and quotient rounded up.
+            with localcontext() as ctx:
+                ctx.rounding = ROUND_CEILING
+                numerator_upper = (candidate.ask - candidate.bid) * 200
+            with localcontext() as ctx:
+                ctx.rounding = ROUND_FLOOR
+                denominator_lower = candidate.ask + candidate.bid
+            with localcontext() as ctx:
+                ctx.rounding = ROUND_CEILING
+                maximum_spread_bound = numerator_upper / denominator_lower
+        except DecimalException:
+            _append_once(excluded, "INVALID_SPREAD_ARITHMETIC")
+        else:
+            if maximum_spread_bound > policy.max_spread_pct:
+                _append_once(excluded, "WIDE_SPREAD")
 
     if candidate.credible_catalyst_at is None:
         _append_once(caution, "NO_VERIFIED_CATALYST")
@@ -220,9 +266,13 @@ def screen_one(candidate: GapCandidate, policy: ScannerPolicy = ScannerPolicy())
         _append_once(excluded, "INVALID_FREE_FLOAT")
     elif candidate.free_float_shares < policy.small_float_shares:
         _append_once(caution, "SMALL_FREE_FLOAT")
-    if candidate.reversal_signal:
+    if type(candidate.reversal_signal) is not bool:
+        _append_once(caution, "REVERSAL_EVIDENCE_UNKNOWN")
+    elif candidate.reversal_signal:
         _append_once(caution, "SHARP_REVERSAL_FLAG")
-    if candidate.dilution_signal:
+    if type(candidate.dilution_signal) is not bool:
+        _append_once(caution, "DILUTION_EVIDENCE_UNKNOWN")
+    elif candidate.dilution_signal:
         _append_once(caution, "RECENT_DILUTION_FLAG")
 
     status = "EXCLUDED" if excluded else "CAUTION" if caution else "WATCHLIST"
@@ -237,10 +287,19 @@ def scan(candidates: list[GapCandidate], policy: ScannerPolicy = ScannerPolicy()
     """
     results = [(screen_one(candidate, policy), candidate) for candidate in candidates]
     priority = {"WATCHLIST": 0, "CAUTION": 1, "EXCLUDED": 2}
+
+    def descending_dollar_volume(value):
+        if not _positive(value):
+            return D(0)
+        try:
+            return -value
+        except DecimalException:
+            # screen_one has already excluded unrepresentable amounts.
+            return D(0)
+
     results.sort(key=lambda item: (
         priority[item[0].classification],
-        -item[1].avg_daily_dollar_volume20
-            if _positive(item[1].avg_daily_dollar_volume20) else D(0),
+        descending_dollar_volume(item[1].avg_daily_dollar_volume20),
         -(item[0].rvol or D(0)),
         str(item[0].symbol),
     ))
