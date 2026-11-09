@@ -237,6 +237,20 @@ class PaperAdapterTests(unittest.TestCase):
         self.venue.advance({"SPY": D("47")}, at=at(3))
         self.assertEqual(self.venue.account_snapshot().equity, D("97000"))
 
+    def test_fresh_mark_query_rejects_missing_future_or_stale_marks(self):
+        venue = PaperBrokerAdapter()
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            venue.require_fresh_mark("SPY", at=at())
+        venue.advance({"SPY": D("50")}, at=at(1))
+        self.assertEqual(venue.require_fresh_mark("SPY", at=at(2)), D("50"))
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            venue.require_fresh_mark("SPY", at=at(7))
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            venue.require_fresh_mark("SPY", at=at())
+        venue.advance({"QQQ": D("30")}, at=at(3))
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            venue.require_fresh_mark("SPY", at=at(3))
+
     def test_subcent_market_marks_cannot_create_fractional_cent_equity(self):
         venue = PaperBrokerAdapter(slippage_bps=D("23"))
         venue.dispatch(buy(qty=10, limit="50"), client_order_id="b")
