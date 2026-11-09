@@ -57,6 +57,19 @@ class CorporateActionsTests(unittest.TestCase):
         self.assertEqual(d[-1].retired_cost_basis, D("600"))
         self.assertTrue(d[-1].closed)
 
+    def test_weekend_sessions_fail_closed_even_with_declared_calendar(self):
+        # Weekend timestamps may look like an ordinary 09:30-16:00 ET
+        # session; caller-supplied calendars must not authorize them.
+        for weekend in (date(2025, 3, 8), date(2025, 3, 9)):
+            with self.subTest(day=weekend):
+                session = SessionClose(weekend, et(weekend, 9, 30),
+                                       et(weekend, 16), D("100"),
+                                       et(weekend, 16, 5))
+                self.assert_code("INVALID_OR_LATE_SESSION_MARK",
+                                 sessions=(session,), actions=(),
+                                 as_of=et(weekend, 17),
+                                 expected_session_days=(weekend,))
+
     def test_synthetic_early_close_accepted(self):
         early = replace(self.s[2], closes_at=et(self.d[2], 13),
                         close_available_at=et(self.d[2], 13, 5))
