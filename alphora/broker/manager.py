@@ -166,7 +166,7 @@ class PaperOrderManager:
                       if order.side == "SELL" and order.symbol == symbol
                       and order.client_order_id != plan.intent_key)
         if qty > held - working:
-            raise ValueError("INSUFFICIENT_UNRESERVED_SHARES")
+            raise ValueError("INSUFFICIENT_POSITION")
         view = self._ledger.create(
             plan.intent_key, symbol=symbol, side="SELL", qty=qty,
             limit_price=limit_price, stop_price=None, now=now)
