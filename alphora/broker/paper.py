@@ -128,6 +128,23 @@ class PaperBrokerAdapter:
             available_cash=self._cash - self._reserved,
             day_pnl=equity - self._session_open_equity)
 
+    def require_fresh_mark(self, symbol: str, *, at, max_age_seconds=5):
+        """Require an asserted paper mark known at decision time, never fallback.
+
+        Caller-supplied marks are NOT vendor authenticated; this only prevents
+        stale, missing, future or different-batch marks being used for exits.
+        """
+        if (not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
+                or not _aware(at) or type(max_age_seconds) is not int
+                or not 0 <= max_age_seconds <= 5):
+            raise ValueError("INVALID_MARK_QUERY")
+        marked_at = self._mark_times.get(symbol)
+        if (marked_at is None or marked_at != self._latest_advance_at
+                or marked_at > at
+                or (at - marked_at).total_seconds() > max_age_seconds):
+            raise ValueError("UNVERIFIED_OR_STALE_MARK")
+        return self._marks[symbol]
+
     def positions(self) -> tuple[BrokerPosition, ...]:
         return tuple(BrokerPosition(sym, qty, _cents(cost / qty))
                      for sym, (qty, cost) in sorted(self._positions.items())
