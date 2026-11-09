@@ -240,6 +240,27 @@ class MarketManifestTests(unittest.TestCase):
         self.assertEqual(receipt.paper_symbol_reason,
                          "PAPER_INSTRUMENT_DELISTED")
 
+    def test_oversized_session_manifest_rejected_before_iteration(self):
+        from alphora.research.market_manifest import MAX_MANIFEST_SESSIONS
+        m = fixture()
+        repeated_session = (m.sessions[0],) * (MAX_MANIFEST_SESSIONS + 1)
+        repeated_days = (m.bar_days[0],) * (MAX_MANIFEST_SESSIONS + 1)
+        with self.assertRaisesRegex(ValueError, "MANIFEST_TOO_LARGE"):
+            check(replace(m, sessions=repeated_session, bar_days=repeated_days))
+        # A huge declared calendar with fewer bar days still cannot sneak
+        # through as a validated, full-coverage market history.
+        with self.assertRaisesRegex(ValueError, "INCOMPLETE_SESSION_COVERAGE"):
+            check(replace(m, sessions=repeated_session))
+
+    def test_oversized_ticker_history_rejected_before_period_traversal(self):
+        from alphora.research.market_manifest import MAX_SYMBOL_PERIODS
+        m = fixture()
+        symbols = (m.instrument.symbols[0],) * (MAX_SYMBOL_PERIODS + 1)
+        with self.assertRaisesRegex(ValueError, "MANIFEST_TOO_LARGE"):
+            check(replace(m, instrument=replace(m.instrument, symbols=symbols)))
+        # Ordinary bounded, point-in-time symbol histories still validate.
+        self.assertEqual(check(m).paper_symbol, "NEW")
+
     def test_receipt_does_not_offer_trading_capabilities(self):
         receipt = check(fixture())
         for name in ("place_order", "trade_eligible", "load_broker", "buy"):
