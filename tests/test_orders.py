@@ -413,27 +413,38 @@ os._exit(23)
                 self.assertEqual(db.calls, 1)
 
     def test_concurrent_create_serializes_to_one_record(self):
+        # Repeat on fresh databases to exercise simultaneous WAL initialization
+        # and idempotent order creation across independent connection waves.
         self.ledger.close()
-        path = Path(self.tmp.name) / "concurrent.sqlite"
-        def attempt(_):
-            ledger = OrderLedger(path, session_id="2026-11-02")
-            try:
-                return ledger.create("f" * 64, symbol="SPY", side="BUY", qty=10,
-                                     limit_price=D("50"), now=at()).status
-            finally:
-                ledger.close()
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            statuses = list(pool.map(attempt, range(12)))
-        self.assertEqual(statuses.count("CREATED"), 12)
-        ledger = OrderLedger(path, session_id="2026-11-02")
         try:
-            self.assertEqual(len(ledger.orders()), 1)
-            with sqlite3.connect(path) as conn:
-                self.assertEqual(conn.execute(
-                    "SELECT COUNT(*) FROM order_events").fetchone()[0], 1)
+            for wave in range(3):
+                path = Path(self.tmp.name) / f"concurrent-{wave}.sqlite"
+
+                def attempt(_):
+                    ledger = OrderLedger(path, session_id="2026-11-02")
+                    try:
+                        return ledger.create(
+                            "f" * 64, symbol="SPY", side="BUY", qty=10,
+                            limit_price=D("50"), now=at()
+                        ).status
+                    finally:
+                        ledger.close()
+
+                with self.subTest(wave=wave):
+                    with ThreadPoolExecutor(max_workers=8) as pool:
+                        statuses = list(pool.map(attempt, range(12)))
+                    self.assertEqual(statuses.count("CREATED"), 12)
+                    ledger = OrderLedger(path, session_id="2026-11-02")
+                    try:
+                        self.assertEqual(len(ledger.orders()), 1)
+                        with sqlite3.connect(path) as conn:
+                            self.assertEqual(conn.execute(
+                                "SELECT COUNT(*) FROM order_events"
+                            ).fetchone()[0], 1)
+                    finally:
+                        ledger.close()
         finally:
-            ledger.close()
-        self.ledger = OrderLedger(self.path, session_id="2026-11-02")
+            self.ledger = OrderLedger(self.path, session_id="2026-11-02")
 
 
 if __name__ == "__main__":
