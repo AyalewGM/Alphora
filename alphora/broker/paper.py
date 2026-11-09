@@ -13,7 +13,7 @@ broker order ids. Time is caller-supplied (`at`); nothing reads a wall clock.
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal as D
+from decimal import Decimal as D, ROUND_HALF_EVEN, localcontext, DecimalException
 import re
 
 from ..risk import INITIAL_EQUITY
@@ -24,6 +24,19 @@ from .base import (BrokerAccountSnapshot, BrokerOrderView, BrokerPosition,
 _ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 _BPS_DENOMINATOR = D(10_000)
+_CENT = D("0.01")
+
+
+def _cents(value):
+    if not _money(value, positive=False):
+        raise ValueError("INVALID_MONEY")
+    try:
+        with localcontext() as ctx:
+            ctx.prec = 50
+            return value.quantize(_CENT, rounding=ROUND_HALF_EVEN)
+    except DecimalException as exc:
+        raise ValueError("INVALID_MONEY") from exc
+
 
 
 def _money(value, *, positive=True):
@@ -49,7 +62,7 @@ class _Order:
     fill_value: D = D(0)
 
     def view(self):
-        avg = self.fill_value / self.filled if self.filled else None
+        avg = _cents(self.fill_value / self.filled) if self.filled else None
         return BrokerOrderView(self.broker_order_id, self.client_order_id,
                                self.symbol, self.side, self.qty,
                                self.limit_price, self.status, self.filled, avg)
@@ -61,8 +74,8 @@ class PaperBrokerAdapter:
     Cash accounting: dispatching a BUY reserves qty*limit + fee; a fill debits
     the actual qty*price + fee; cancel/expiry releases the reservation. A SELL
     reserves shares (long-only: no naked short); a fill credits qty*price - fee
-    and reduces cost basis at average cost. Equity marks positions at the last
-    supplied marks, falling back to cost basis for unmarked symbols.
+    and reduces cost basis at average cost. Equity is available only if every held position has a mark from the
+    latest advance. Missing/stale marks fail closed, never fall back to cost.
     """
 
     mode = "paper"
@@ -74,17 +87,19 @@ class PaperBrokerAdapter:
                 or slippage_bps >= _BPS_DENOMINATOR
                 or not _money(fee_per_order, positive=False)):
             raise ValueError("INVALID_PAPER_VENUE_CONFIG")
-        self._cash = starting_cash
+        self._cash = _cents(starting_cash)
         self._session_open_equity = starting_cash
         self._reserved = D(0)
         self._slippage_bps = slippage_bps
-        self._fee = fee_per_order
+        self._fee = _cents(fee_per_order)
         self._positions = {}        # symbol -> [qty, cost]
         self._reserved_shares = {}  # symbol -> reserved qty for open sells
         self._orders = {}           # broker_order_id -> _Order
         self._by_client = {}        # client_order_id -> broker_order_id
         self._sequence = []         # broker_order_ids in dispatch order
         self._marks = {}            # symbol -> last supplied mark
+        self._mark_times = {}       # symbol -> time at which mark was supplied
+        self._latest_advance_at = None
         self._events = {}           # broker_order_id -> [FillEvent]
 
     # ---- venue state ----------------------------------------------------
@@ -93,8 +108,12 @@ class PaperBrokerAdapter:
         return self._positions.get(symbol, [0, D(0)])
 
     def _mark_value(self):
-        return sum(qty * self._marks.get(sym, cost / qty)
-                   for sym, (qty, cost) in self._positions.items() if qty)
+        for symbol, (qty, _cost) in self._positions.items():
+            if qty and (symbol not in self._marks or
+                        self._mark_times.get(symbol) != self._latest_advance_at):
+                raise ValueError("UNVERIFIED_OR_STALE_MARK")
+        return sum(qty * self._marks[sym]
+                   for sym, (qty, _cost) in self._positions.items() if qty)
 
     def account_snapshot(self) -> BrokerAccountSnapshot:
         marked = self._mark_value()
@@ -107,7 +126,7 @@ class PaperBrokerAdapter:
             day_pnl=equity - self._session_open_equity)
 
     def positions(self) -> tuple[BrokerPosition, ...]:
-        return tuple(BrokerPosition(sym, qty, cost / qty)
+        return tuple(BrokerPosition(sym, qty, _cents(cost / qty))
                      for sym, (qty, cost) in sorted(self._positions.items())
                      if qty)
 
@@ -229,7 +248,11 @@ class PaperBrokerAdapter:
             if (not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
                     or not _money(price)):
                 raise ValueError("INVALID_MARKS")
+        if self._latest_advance_at is not None and at < self._latest_advance_at:
+            raise ValueError("NON_MONOTONIC_MARK_TIME")
+        self._latest_advance_at = at
         self._marks.update(marks)
+        self._mark_times.update({symbol: at for symbol in marks})
         buy_adjust = D(1) + self._slippage_bps / _BPS_DENOMINATOR
         sell_adjust = D(1) - self._slippage_bps / _BPS_DENOMINATOR
         events = []
@@ -239,11 +262,11 @@ class PaperBrokerAdapter:
                 continue
             mark = marks[order.symbol]
             if order.side == "BUY":
-                price = mark * buy_adjust
+                price = _cents(mark * buy_adjust)
                 if price > order.limit_price:
                     continue
             else:
-                price = mark * sell_adjust
+                price = _cents(mark * sell_adjust)
                 if price < order.limit_price:
                     continue
             self._release(order)
@@ -256,7 +279,9 @@ class PaperBrokerAdapter:
             else:
                 self._cash += qty * price - fee
                 held, cost = self._position(order.symbol)
-                cost -= (cost / held) * qty  # average-cost basis reduction
+                with localcontext() as ctx:
+                    ctx.prec = 50
+                    cost -= cost if qty == held else _cents(cost * qty / held)
                 left = held - qty
                 if left:
                     self._positions[order.symbol] = [left, cost]
