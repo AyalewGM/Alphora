@@ -8,6 +8,20 @@ The validator rejects symbol-period start/end dates and delisting effective date
 
 The validator additionally rejects `PREMATURE_ARTIFACT_DELIVERY`: a manifest claiming complete daily bars through its final declared session must not attest that the corresponding artifact was delivered before that session closed. This is only a chronological consistency check on caller-supplied times, **not** proof that the vendor actually delivered a complete file or that a historical bar was usable at any earlier strategy-decision timestamp.
 
+## Bounded manifest cardinality
+
+To avoid unbounded work on malformed or adversarial caller-supplied records,
+the validator now rejects more than **20,000 declared exchange sessions** or
+**256 historical ticker periods per stable asset ID** with `MANIFEST_TOO_LARGE`.
+These are engineering resource limits, **not proof of exchange-calendar
+completeness, venue authenticity, ticker availability, or data licensing**.
+They are checked before iterating the respective records and before
+constructing the canonical JSON hash. The existing checks still reject
+session/bar length disagreement, duplicate dates, invalid symbol intervals
+and unreliable chronology. Larger legitimate research histories require a
+separately designed, independently validated chunking protocol; do not simply
+increase these caps for a specific untrusted file.
+
 ## Historical ticker compatibility with the draft paper ledger
 
 The research manifest intentionally accepts **1–15-character** historical
