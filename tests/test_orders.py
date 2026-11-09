@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
+from unittest.mock import patch
 
 from alphora.orders import OrderLedger, LedgerIntegrityError, _configure_wal
 
@@ -361,6 +362,55 @@ os._exit(23)
         db.fetchone = lambda: ("delete",)
         with self.assertRaisesRegex(LedgerIntegrityError, "WAL_MODE_REQUIRED"):
             _configure_wal(db)
+
+    def test_wal_retry_deadline_and_malformed_pragma_fail_closed(self):
+        class AlwaysBusy:
+            calls = 0
+
+            def execute(self, sql):
+                self.calls += 1
+                self.last_sql = sql
+                error = sqlite3.OperationalError("database is locked")
+                # Extended codes must be classified by their base SQLite code.
+                error.sqlite_errorcode = sqlite3.SQLITE_BUSY | (1 << 8)
+                raise error
+
+        db = AlwaysBusy()
+        with patch("alphora.orders.monotonic", side_effect=[10.0, 16.0]):
+            with patch("alphora.orders.sleep") as pause:
+                with self.assertRaises(sqlite3.OperationalError):
+                    _configure_wal(db)
+                pause.assert_not_called()
+        self.assertEqual(db.calls, 1)
+
+        # Bound the final backoff to the time remaining in the retry window.
+        db = AlwaysBusy()
+        with patch("alphora.orders.monotonic", side_effect=[10.0, 14.995, 16.0]):
+            with patch("alphora.orders.sleep") as pause:
+                with self.assertRaises(sqlite3.OperationalError):
+                    _configure_wal(db)
+                pause.assert_called_once()
+                self.assertAlmostEqual(pause.call_args.args[0], 0.005, places=6)
+        self.assertEqual(db.calls, 2)
+
+        class MalformedPragma:
+            def __init__(self, result):
+                self.result = result
+                self.calls = 0
+
+            def execute(self, sql):
+                self.calls += 1
+                return self
+
+            def fetchone(self):
+                return self.result
+
+        for result in (None, (), (None,), (1,), ("delete",), ("wal", "extra")):
+            with self.subTest(result=result):
+                db = MalformedPragma(result)
+                with self.assertRaisesRegex(LedgerIntegrityError, "WAL_MODE_REQUIRED"):
+                    _configure_wal(db)
+                self.assertEqual(db.calls, 1)
 
     def test_concurrent_create_serializes_to_one_record(self):
         self.ledger.close()
