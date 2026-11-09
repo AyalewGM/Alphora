@@ -13,6 +13,9 @@ from zoneinfo import ZoneInfo
 _ET = ZoneInfo("America/New_York")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,14}\Z")
+# Risk/scanner/paper ledger accept at most ten characters. Preserve
+# longer historical security-master identifiers; never truncate for paper use.
+_PAPER_SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -96,6 +99,8 @@ class MarketManifest:
 class ManifestReceipt:
     manifest: MarketManifest
     sha256: str  # local content fingerprint; NOT provider authentication
+    paper_symbol: str | None = None  # representability only, never permission
+    paper_symbol_reason: str = "NOT_ASSESSED"
 
 
 def inspect_market_manifest(manifest: MarketManifest, *,
@@ -235,4 +240,20 @@ def inspect_market_manifest(manifest: MarketManifest, *,
     digest = sha256(payload).hexdigest()
     if expected_manifest_sha256 is not None and digest != expected_manifest_sha256:
         raise ValueError("MANIFEST_PIN_MISMATCH")
-    return ManifestReceipt(m, digest)
+    # Compatibility is informational only. Historical security-master records
+    # may use 11-15-character names, while paper risk and reservations allow
+    # only ten. Long identifiers cannot be truncated or silently mapped.
+    if not u.included:
+        paper_symbol, paper_reason = None, "PAPER_UNIVERSE_EXCLUDED"
+    elif a.delisted_on is not None and a.delisted_on <= as_of_day:
+        paper_symbol, paper_reason = None, "PAPER_INSTRUMENT_DELISTED"
+    else:
+        active = [p.symbol for p in a.symbols
+                  if p.start <= as_of_day and (p.end is None or as_of_day <= p.end)]
+        if len(active) != 1:
+            paper_symbol, paper_reason = None, "PAPER_NO_CURRENT_SYMBOL"
+        elif _PAPER_SYMBOL.fullmatch(active[0]) is None:
+            paper_symbol, paper_reason = None, "PAPER_SYMBOL_UNSUPPORTED_FORMAT"
+        else:
+            paper_symbol, paper_reason = active[0], "PAPER_SYMBOL_REPRESENTABLE_ONLY"
+    return ManifestReceipt(m, digest, paper_symbol, paper_reason)
