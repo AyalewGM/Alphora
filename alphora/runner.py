@@ -134,9 +134,13 @@ class PaperSessionRunner:
         # Materialize no more than two elements, even for an unbounded
         # iterable. Two inputs are enough to reject a multi-day batch.
         days = tuple(islice(days, 2))
+        if not days:
+            # Without a verified mark, an empty replay must not claim the
+            # original $100k is the account's current equity.
+            raise ValueError("MISSING_SESSION_MARK")
         if len(days) > 1:
             raise ValueError("SESSION_ROLLOVER_UNSUPPORTED")
-        if days and isinstance(days[0], SessionDay):
+        if isinstance(days[0], SessionDay):
             if days[0].day != self._book.snapshot().session_id:
                 raise ValueError("SESSION_ROLLOVER_UNSUPPORTED")
         reports = []
@@ -236,9 +240,15 @@ class PaperSessionRunner:
             self._mgr.sync(now=now)
             for broker_id in self._mgr.expire_session(at=now):
                 actions.append(f"EXPIRED:{broker_id}")
+            # Entries may fill after the first observation (with simulated
+            # fees). Report and observe the *settled* account, not the
+            # pre-entry account, or the day's P&L can be overstated.
+            final = self._book.snapshot()
+            settled_account = self._account(final, marks)
+            self._book.observe_daily_loss(settled_account, reconciled=True)
             final = self._book.snapshot()
             reports.append(DayReport(
-                day.day, account.equity, final.cash, final.positions,
+                day.day, settled_account.equity, final.cash, final.positions,
                 len(self._ledger.open_orders()), tuple(actions),
                 recon.status, final.halted))
         return RunReport(tuple(reports),
