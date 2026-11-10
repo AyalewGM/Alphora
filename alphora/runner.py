@@ -15,7 +15,9 @@ vendor-attested timestamps this runner cannot establish.
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal as D
+from itertools import islice
 from typing import Mapping
+from zoneinfo import ZoneInfo
 
 from .broker.base import BrokerAdapter
 from .broker.manager import PaperOrderManager
@@ -27,6 +29,9 @@ from .reconcile import reconcile
 from .reservations import OfflineReservations
 from .research.backtest import Bar
 from .risk import INITIAL_EQUITY, PaperAccount
+
+
+_US_EASTERN = ZoneInfo("America/New_York")
 
 
 def _aware(value):
@@ -126,7 +131,9 @@ class PaperSessionRunner:
         # There is no durable, independently reconciled per-session rollover.
         # Preflight the *whole batch* before processing any fills or intents,
         # so an invalid second day cannot leave a partial first-day mutation.
-        days = tuple(days)
+        # Materialize no more than two elements, even for an unbounded
+        # iterable. Two inputs are enough to reject a multi-day batch.
+        days = tuple(islice(days, 2))
         if len(days) > 1:
             raise ValueError("SESSION_ROLLOVER_UNSUPPORTED")
         if days and isinstance(days[0], SessionDay):
@@ -135,6 +142,7 @@ class PaperSessionRunner:
         reports = []
         for day in days:
             if (not isinstance(day, SessionDay) or not _aware(day.mark_time)
+                    or day.mark_time.astimezone(_US_EASTERN).date().isoformat() != day.day
                     or (self._last_day is not None
                         and day.day <= self._last_day)):
                 raise ValueError("INVALID_SESSION_DAY")
