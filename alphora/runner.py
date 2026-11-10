@@ -163,6 +163,13 @@ class PaperSessionRunner:
                     or (self._last_day is not None
                         and day.day <= self._last_day)):
                 raise ValueError("INVALID_SESSION_DAY")
+            # A present SessionDay with no executable prices is not a verified
+            # current-session mark. It must not mint an unchanged $100k equity
+            # report; malformed mark containers must also fail before mutation.
+            if not isinstance(day.bars, Mapping):
+                raise ValueError("INVALID_MARKS")
+            if not day.bars:
+                raise ValueError("MISSING_SESSION_MARK")
             marks = self._marks(day)
             # Missing held-position marks cannot be replaced by cost basis.
             held = {sym for sym, qty, _cost in self._book.snapshot().positions
