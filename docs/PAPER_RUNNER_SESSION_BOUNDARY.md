@@ -13,6 +13,8 @@ Until there is an independently accepted durable session rollover, `run()` rejec
 - any supplied `SessionDay.day` different from the *persisted* book `session_id` (`SESSION_ROLLOVER_UNSUPPORTED`), including the first invocation;
 - any batch containing more than one `SessionDay` **before processing the first one**, so a later unsupported session cannot leave a partial earlier batch.
 
+The batch preflight consumes at most two elements from an input iterable; an unbounded iterator cannot cause an unbounded in-memory batch. A single-day mark timestamp must also resolve to that session's calendar date in `America/New_York` (not merely match a forged bar/day label); this coarse consistency check is **not** an authoritative trading-hours or exchange-calendar validation. Inputs supplied by a generator may have side effects outside this runner when iterated.
+
 A valid one-day call keeps the existing paper-only model and original risk settings: $100,000 virtual initial equity, 0.5% planned per-trade risk, 10% instrument allocation limit, 2% loss halt relative to this *one* session's starting equity, and a daily rebalance requirement that is not yet implemented as a safe recurrent feature. Inputs remain caller-asserted, not exchange-certified.
 
 Test regressions cover nonmutation of book, ledger and paper adapter on rejected cross-session inputs, subsequent same-session reuse after failed preflight, and a missing mark for an existing position. These are synthetic tests, not an independent financial QA verdict.
