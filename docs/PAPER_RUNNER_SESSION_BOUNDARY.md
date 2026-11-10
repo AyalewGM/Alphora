@@ -39,6 +39,16 @@ mark validation and before the in-memory session is consumed. Synthetic
 negative tests verify no changes to the book, ledger or venue and permit a
 subsequent valid first attempt.
 
+A nonempty session batch is not sufficient evidence of a current price:
+a supplied day with an empty bars mapping previously produced a synthetic
+$100,000 final-equity report without an executable mark. The preflight now
+rejects such input as `MISSING_SESSION_MARK`, and rejects non-mapping
+bar containers as `INVALID_MARKS` before processing any orders. This
+is a **presence/structure check only**; it does not authenticate the marks
+or establish exchange trading-session hours. Regression tests verify that
+rejection leaves venue, ledger, book and in-memory session state unchanged,
+and that a corrected valid day remains usable.
+
 The same preflight now rejects malformed ticker identifiers in both the
 asserted mark mapping and signal mapping, and rejects non-string scanner and
 catalyst metadata. These are validated against the paper venue's bounded
