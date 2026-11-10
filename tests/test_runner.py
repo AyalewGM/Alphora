@@ -154,6 +154,36 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.runner.run((valid_late_utc,)).days[0].day,
                          "2026-11-02")
 
+    def test_empty_session_batch_fails_closed_without_invented_equity(self):
+        self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        before_book = self.book.snapshot()
+        before_orders = self.ledger.orders()
+        before_venue = self.venue.positions()
+        with self.assertRaisesRegex(ValueError, "MISSING_SESSION_MARK"):
+            self.runner.run(())
+        self.assertEqual(self.book.snapshot(), before_book)
+        self.assertEqual(self.ledger.orders(), before_orders)
+        self.assertEqual(self.venue.positions(), before_venue)
+
+    def test_report_and_loss_observation_use_post_fill_fee_equity(self):
+        # The first pre-entry mark is $100,000. A same-day synthetic buy
+        # costing a $1 fee makes the *settled* equity $99,999; the final
+        # report must not silently return the stale pre-fill $100,000.
+        venue = PaperBrokerAdapter(fee_per_order=D("1"))
+        runner = PaperSessionRunner(
+            book=self.book, ledger=self.ledger, adapter=venue,
+            fee_budget=D("1"), take_profit_pct=D("50"))
+        report = runner.run((day(2, "60", {"SPY": WATCH}),))
+        final = self.book.snapshot()
+        self.assertTrue(any(a.startswith("ENTRY:SPY:")
+                            for a in report.days[0].actions))
+        self.assertEqual(final.positions[0][0], "SPY")
+        expected_equity = final.cash + final.positions[0][1] * D("60")
+        self.assertEqual(expected_equity, D("99999"))
+        self.assertEqual(report.days[0].equity, expected_equity)
+        self.assertEqual(report.final_equity, expected_equity)
+        self.assertFalse(report.days[0].halted)
+
     def test_day_and_config_validation(self):
         for kw in ({"mark_price": "mid"}, {"take_profit_pct": D("-1")},
                    {"stop_fraction": D("nan")}, {"fee_budget": D("-1")}):
