@@ -1,7 +1,7 @@
 """Deterministic offline paper-venue behaviour and accounting tests."""
 import unittest
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal as D
+from decimal import Decimal as D, localcontext
 
 from alphora.broker.base import BrokerPosition, DispatchRequest
 from alphora.broker.paper import PaperBrokerAdapter
@@ -226,6 +226,26 @@ class PaperAdapterTests(unittest.TestCase):
         snap = self.venue.account_snapshot()
         self.assertEqual(snap.equity, D("99500"))
         self.assertEqual(snap.day_pnl, D("-500"))
+
+    def test_account_snapshot_uses_isolated_decimal_precision(self):
+        # A 200-share position at $40.01, funded from $100k with a $50
+        # initial fill, is worth exactly $98,002. At caller precision 3,
+        # unguarded Decimal arithmetic rounds this to $98,000, a false
+        # hit of the 2% day-loss threshold.
+        venue = PaperBrokerAdapter()
+        venue.dispatch(buy(qty=200, limit="50"), client_order_id="b")
+        venue.advance({"SPY": D("50")}, at=at())
+        venue.advance({"SPY": D("40.01")}, at=at(1))
+        baseline = venue.account_snapshot()
+        self.assertEqual((baseline.cash, baseline.equity, baseline.day_pnl),
+                         (D("90000"), D("98002"), D("-1998")))
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                snap = venue.account_snapshot()
+                self.assertEqual(snap.equity, D("98002"))
+                self.assertEqual(snap.day_pnl, D("-1998"))
+                self.assertEqual(snap.available_cash, D("90000"))
 
     def test_missing_fresh_position_mark_never_uses_cost_or_old_price(self):
         self.dispatch_buy(qty=1000, limit="50")
