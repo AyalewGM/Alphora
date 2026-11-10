@@ -14,7 +14,7 @@ vendor-attested timestamps this runner cannot establish.
 """
 from dataclasses import dataclass, replace
 from datetime import datetime
-from decimal import Decimal as D, DecimalException, localcontext
+from decimal import Decimal as D, DecimalException, Inexact, localcontext
 from itertools import islice
 from typing import Mapping
 from zoneinfo import ZoneInfo
@@ -112,11 +112,21 @@ class PaperSessionRunner:
         held = {sym for sym, qty, _cost in snap.positions if qty}
         if not held.issubset(marks):
             raise ValueError("UNVERIFIED_OR_STALE_MARK")
-        marked = sum(qty * marks[sym]
-                     for sym, qty, _cost in snap.positions)
-        equity = snap.cash + marked
+        # Marked equity is a financial risk boundary, not a presentation
+        # calculation. Ambient Decimal precision must not round a near-2%
+        # loss into (or away from) the one-way daily shutdown threshold.
+        try:
+            with localcontext() as ctx:
+                ctx.prec = 50
+                ctx.traps[Inexact] = True
+                marked = sum((qty * marks[sym]
+                              for sym, qty, _cost in snap.positions), D(0))
+                equity = snap.cash + marked
+                day_pnl = equity - INITIAL_EQUITY
+        except DecimalException as exc:
+            raise ValueError("INEXACT_PAPER_ACCOUNT") from exc
         return PaperAccount(equity, INITIAL_EQUITY, snap.cash,
-                            equity - INITIAL_EQUITY, snap.session_id)
+                            day_pnl, snap.session_id)
 
     def _stop_of(self, symbol):
         for order in sorted(self._ledger.orders(),
