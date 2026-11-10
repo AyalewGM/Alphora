@@ -39,6 +39,16 @@ mark validation and before the in-memory session is consumed. Synthetic
 negative tests verify no changes to the book, ledger or venue and permit a
 subsequent valid first attempt.
 
+The same preflight now rejects malformed ticker identifiers in both the
+asserted mark mapping and signal mapping, and rejects non-string scanner and
+catalyst metadata. These are validated against the paper venue's bounded
+uppercase ticker contract before the runner consumes its in-memory session
+or advances an existing paper order. An invalid secondary signal must not
+permit another valid ticker's buy to proceed. Regression tests cover mixed
+valid/malformed inputs, unchanged book/ledger/venue, and successful retry.
+Unrecognized but well-typed classification strings remain non-eligible
+signals rather than authentication or eligibility proofs.
+
 This does not authenticate signal origins, timestamps, catalyst assertions,
 or quoted market prices, and does not repair restart/session-rollover
 persistence. This change is developed as a separate stacked draft PR on top
