@@ -48,32 +48,42 @@ class RunnerTests(unittest.TestCase):
         self.ledger.close()
         self.tmp.cleanup()
 
-    def test_entry_hold_protective_exit_then_loss_halt(self):
-        report = self.runner.run((
-            day(2, "50", {"SPY": WATCH}),
-            day(3, "52"),
-            day(4, "40"),
-            day(5, "41", {"SPY": WATCH}),
-        ))
-        d1, d2, d3, d4 = report.days
-        # Day 1: risk sizing -> 200 shares at 10% cap, filled at the mark.
+    def test_one_session_entry_then_cross_session_rejected_without_mutation(self):
+        report = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        d1, = report.days
         self.assertIn("ENTRY:SPY:ACKED", d1.actions)
         self.assertEqual(d1.positions, (("SPY", 200, D("10000")),))
         self.assertEqual(d1.cash, D("90000"))
-        # Day 2: held, marked up.
-        self.assertEqual(d2.equity, D("100400"))
-        self.assertEqual(d2.positions[0][1], 200)
-        # Day 3: bid 40 <= stop 48 -> protective exit fills at mark 40.
-        self.assertIn("EXIT:SPY:ACKED", d3.actions)
-        self.assertEqual(d3.positions, ())
-        self.assertEqual(d3.cash, D("98000"))
-        self.assertTrue(d3.halted)  # halt arms right after the exit settles
-        # Day 4: the armed halt vetoes any new intent.
-        self.assertIn("ENTRY_VETO:SPY:PAPER_BOOK_HALTED", d4.actions)
-        self.assertTrue(d4.halted)
-        self.assertTrue(report.halted)
-        self.assertEqual(report.final_equity, D("98000"))
-        self.assertEqual(self.venue.positions(), ())
+        self.assertFalse(d1.halted)
+
+        before_book = self.book.snapshot()
+        before_orders = self.ledger.orders()
+        before_venue = self.venue.positions()
+        # Session rollover has no durable opening-equity/mark reconciliation.
+        # Reject even a risk-reducing-looking quote rather than silently
+        # reusing the first day's fixed $100k daily loss baseline.
+        with self.assertRaisesRegex(ValueError, "SESSION_ROLLOVER_UNSUPPORTED"):
+            self.runner.run((day(3, "40", {"SPY": WATCH}),))
+        self.assertEqual(self.book.snapshot(), before_book)
+        self.assertEqual(self.ledger.orders(), before_orders)
+        self.assertEqual(self.venue.positions(), before_venue)
+
+    def test_future_day_at_first_call_and_batch_preflight_fail_before_mutations(self):
+        before = self.book.snapshot()
+        for supplied in (
+            (day(3, "50", {"SPY": WATCH}),),
+            (day(2, "50", {"SPY": WATCH}),
+             day(3, "52", {"SPY": WATCH})),
+        ):
+            with self.subTest(n=len(supplied)):
+                with self.assertRaisesRegex(ValueError, "SESSION_ROLLOVER_UNSUPPORTED"):
+                    self.runner.run(supplied)
+                self.assertEqual(self.book.snapshot(), before)
+                self.assertEqual(self.ledger.orders(), ())
+                self.assertEqual(self.venue.positions(), ())
+        # Rejection must not poison a subsequent valid single-session run.
+        self.assertIn("ENTRY:SPY:ACKED",
+                      self.runner.run((day(2, "50", {"SPY": WATCH}),)).days[0].actions)
 
     def test_ineligible_signal_is_skipped_not_dispatched(self):
         report = self.runner.run((day(2, "50", {"SPY": SKIP}),))
@@ -105,14 +115,18 @@ class RunnerTests(unittest.TestCase):
         self.runner.run((day(2, "50", {"SPY": WATCH}),))
         previous = self.book.snapshot()
         missing = SessionDay(
-            "2026-11-03", mt(3),
-            {"QQQ": bar(3, "25", "25", "25", "25")}, {})
+            "2026-11-02", mt(2),
+            {"QQQ": bar(2, "25", "25", "25", "25")}, {})
+        # A fresh in-memory runner must not silently value an existing
+        # position at its cost basis when its actual mark is unavailable.
+        fresh = PaperSessionRunner(book=self.book, ledger=self.ledger,
+                                   adapter=self.venue)
         with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
-            self.runner.run((missing,))
+            fresh.run((missing,))
         self.assertEqual(self.book.snapshot(), previous)
-        # A subsequent genuine lower quote must reveal the drawdown.
-        result = self.runner.run((day(3, "40"),))
-        self.assertTrue(result.days[0].halted)
+        with self.assertRaisesRegex(ValueError, "SESSION_ROLLOVER_UNSUPPORTED"):
+            fresh.run((day(3, "40"),))
+        self.assertEqual(self.book.snapshot(), previous)
 
     def test_day_and_config_validation(self):
         for kw in ({"mark_price": "mid"}, {"take_profit_pct": D("-1")},
