@@ -14,7 +14,7 @@ vendor-attested timestamps this runner cannot establish.
 """
 from dataclasses import dataclass, replace
 from datetime import datetime
-from decimal import Decimal as D, DecimalException, Inexact, localcontext
+from decimal import Decimal as D, DecimalException, Inexact, ROUND_FLOOR, localcontext
 from itertools import islice
 import re
 from typing import Mapping
@@ -35,6 +35,7 @@ from .risk import INITIAL_EQUITY, PaperAccount
 _US_EASTERN = ZoneInfo("America/New_York")
 # Keep caller-input identifiers aligned with paper venue and offline ledger.
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
+_CENT = D("0.01")
 
 
 def _aware(value):
@@ -202,6 +203,7 @@ class PaperSessionRunner:
             # "signal.stop_price or ...".
             if not isinstance(day.signals, Mapping):
                 raise ValueError("INVALID_SESSION_SIGNAL")
+            executable_stops = {}
             for sym, signal in day.signals.items():
                 if (type(sym) is not str or not _SYMBOL.fullmatch(sym)
                         or not isinstance(signal, SessionSignal)
@@ -214,6 +216,33 @@ class PaperSessionRunner:
                         or signal.stop_price <= 0
                         or (sym in marks and signal.stop_price >= marks[sym])):
                     raise ValueError("INVALID_SESSION_SIGNAL")
+                if (sym not in marks
+                        or signal.scanner_classification != "WATCHLIST"
+                        or signal.catalyst_status != "VERIFIED"):
+                    continue
+                # Paper marks and simulated fills are cent-priced. A
+                # fractional-cent stop would understate executable loss,
+                # especially for very low-priced shares. For an implicit
+                # stop, floor to the next lower tick BEFORE sizing risk.
+                # Explicit stops must already be exact executable ticks.
+                try:
+                    with localcontext() as ctx:
+                        ctx.prec = 50
+                        ctx.traps[Inexact] = True
+                        if signal.stop_price is None:
+                            requested = marks[sym] * (D(1) - self._stop_frac)
+                            ctx.traps[Inexact] = False
+                            stop = requested.quantize(_CENT, rounding=ROUND_FLOOR)
+                        else:
+                            ctx.traps[Inexact] = False
+                            stop = signal.stop_price.quantize(_CENT)
+                            if stop != signal.stop_price:
+                                raise ValueError("INEXACT_PAPER_STOP")
+                except DecimalException as exc:
+                    raise ValueError("UNREPRESENTABLE_PAPER_STOP") from exc
+                if stop <= 0 or stop >= marks[sym]:
+                    raise ValueError("UNREPRESENTABLE_PAPER_STOP")
+                executable_stops[sym] = stop
             self._last_day = day.day
             now = day.mark_time
             actions = [f"FILL:{e.broker_order_id}"
@@ -269,7 +298,7 @@ class PaperSessionRunner:
                 held = next((c for s, _q, c in snap.positions if s == sym), D(0))
                 pending = sum((v for i, s, _q, v in snap.pending if s == sym),
                               D(0))
-                stop = signal.stop_price or marks[sym] * (D(1) - self._stop_frac)
+                stop = executable_stops.get(sym, D(0))
                 plan = propose_entry(
                     account,
                     EntryCandidate(sym, marks[sym], stop, now,
