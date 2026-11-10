@@ -184,6 +184,31 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(report.final_equity, expected_equity)
         self.assertFalse(report.days[0].halted)
 
+    def test_inexact_paper_mark_rejected_before_account_or_venue_mutation(self):
+        # The offline paper venue rounds each supplied mark to cents while
+        # runner equity was formerly computed at the raw mark. Refuse a
+        # fractional-cent mark rather than diverging on held valuation,
+        # loss-limit enforcement and reported final equity.
+        before_book = self.book.snapshot()
+        before_orders = self.ledger.orders()
+        before_venue = self.venue.positions()
+        for price, reason in (
+            ("50.004", "INEXACT_PAPER_MARK"),
+            ("50.005", "INEXACT_PAPER_MARK"),
+            ("NaN", "INVALID_MARKS"),
+            ("Infinity", "INVALID_MARKS"),
+        ):
+            with self.subTest(price=price):
+                with self.assertRaisesRegex(ValueError, reason):
+                    self.runner.run((day(2, price, {"SPY": WATCH}),))
+                self.assertEqual(self.book.snapshot(), before_book)
+                self.assertEqual(self.ledger.orders(), before_orders)
+                self.assertEqual(self.venue.positions(), before_venue)
+        # A rejected first mark must not poison a later valid same-day call.
+        accepted = self.runner.run((day(2, "50.00", {"SPY": WATCH}),))
+        self.assertIn("ENTRY:SPY:ACKED", accepted.days[0].actions)
+        self.assertEqual(accepted.final_equity, D("100000"))
+
     def test_day_and_config_validation(self):
         for kw in ({"mark_price": "mid"}, {"take_profit_pct": D("-1")},
                    {"stop_fraction": D("nan")}, {"fee_budget": D("-1")}):
