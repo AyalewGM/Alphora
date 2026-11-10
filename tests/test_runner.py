@@ -306,6 +306,30 @@ class RunnerTests(unittest.TestCase):
         accepted = self.runner.run((day(2, "50", {"SPY": WATCH}),))
         self.assertIn("ENTRY:SPY:ACKED", accepted.days[0].actions)
 
+    def test_missing_session_marks_fail_closed_before_mutation(self):
+        # An empty day with no prices previously returned the original
+        # $100,000 as though a current session mark had been supplied.
+        # Malformed bars containers likewise must fail with a stable error
+        # before the venue, book or ledger can advance.
+        before_book = self.book.snapshot()
+        before_orders = self.ledger.orders()
+        before_venue = self.venue.positions()
+        before_working = self.venue.open_orders()
+        for bars, error in (({}, "MISSING_SESSION_MARK"),
+                            (None, "INVALID_MARKS"),
+                            ([], "INVALID_MARKS")):
+            with self.subTest(bars=repr(bars)):
+                supplied = SessionDay("2026-11-02", mt(2), bars, {})
+                with self.assertRaisesRegex(ValueError, error):
+                    self.runner.run((supplied,))
+                self.assertEqual(self.book.snapshot(), before_book)
+                self.assertEqual(self.ledger.orders(), before_orders)
+                self.assertEqual(self.venue.positions(), before_venue)
+                self.assertEqual(self.venue.open_orders(), before_working)
+                self.assertIsNone(self.runner._last_day)
+        accepted = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        self.assertIn("ENTRY:SPY:ACKED", accepted.days[0].actions)
+
     def test_day_and_config_validation(self):
         for kw in ({"mark_price": "mid"}, {"take_profit_pct": D("-1")},
                    {"stop_fraction": D("nan")}, {"fee_budget": D("-1")}):
