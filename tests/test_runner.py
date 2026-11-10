@@ -330,6 +330,58 @@ class RunnerTests(unittest.TestCase):
         accepted = self.runner.run((day(2, "50", {"SPY": WATCH}),))
         self.assertIn("ENTRY:SPY:ACKED", accepted.days[0].actions)
 
+    def test_cent_executable_default_stop_limits_low_price_risk(self):
+        # Mark $0.02, default 4% stop would be a non-executable $0.0192.
+        # Nearest *lower* executable tick is $0.01. Risk must be sized
+        # against a real $0.01 per-share loss, not a fictitious $0.0008.
+        report = self.runner.run((day(2, "0.02", {"SPY": WATCH}),))
+        buys = [o for o in self.ledger.orders() if o.side == "BUY"]
+        self.assertEqual(len(buys), 1)
+        order, = buys
+        self.assertEqual(order.stop_price, D("0.01"))
+        self.assertEqual(order.qty, 50000)
+        self.assertEqual((D("0.02") - order.stop_price) * order.qty,
+                         D("500"))  # approved 0.5% of $100,000
+        self.assertEqual(self.book.snapshot().positions,
+                         (("SPY", 50000, D("1000")),))
+        self.assertEqual(report.final_equity, D("100000"))
+
+    def test_fractional_cent_or_unrepresentable_stop_rejects_before_mutation(self):
+        # $0.01 cannot support a positive stop below the entry price when
+        # both marks and fills use cents. Caller-supplied subcent stops
+        # cannot quietly become a much larger real tick-loss exposure.
+        before_book = self.book.snapshot()
+        before_orders = self.ledger.orders()
+        before_venue = self.venue.positions()
+        cases = (
+            ("0.01", WATCH, "UNREPRESENTABLE_PAPER_STOP"),
+            ("0.02", SessionSignal("WATCHLIST", "VERIFIED", D("0.019")),
+             "INEXACT_PAPER_STOP"),
+            ("50.00", SessionSignal("WATCHLIST", "VERIFIED", D("49.999")),
+             "INEXACT_PAPER_STOP"),
+        )
+        for price, signal, reason in cases:
+            with self.subTest(price=price, reason=reason):
+                with self.assertRaisesRegex(ValueError, reason):
+                    self.runner.run((day(2, price, {"SPY": signal}),))
+                self.assertEqual(self.book.snapshot(), before_book)
+                self.assertEqual(self.ledger.orders(), before_orders)
+                self.assertEqual(self.venue.positions(), before_venue)
+                self.assertEqual(self.venue.open_orders(), ())
+                self.assertIsNone(self.runner._last_day)
+        accepted = self.runner.run((day(2, "0.02", {"SPY": WATCH}),))
+        self.assertIn("ENTRY:SPY:ACKED", accepted.days[0].actions)
+
+    def test_default_stop_floors_to_cent_for_nonpenny_mark(self):
+        report = self.runner.run((day(2, "40.01", {"SPY": WATCH}),))
+        buys = [o for o in self.ledger.orders() if o.side == "BUY"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0].stop_price, D("38.40"))
+        self.assertEqual(buys[0].qty, 249)  # $10,000 instrument cap
+        self.assertLessEqual(
+            buys[0].qty * (D("40.01") - buys[0].stop_price), D("500"))
+        self.assertEqual(report.final_equity, D("100000"))
+
     def test_day_and_config_validation(self):
         for kw in ({"mark_price": "mid"}, {"take_profit_pct": D("-1")},
                    {"stop_fraction": D("nan")}, {"fee_budget": D("-1")}):
