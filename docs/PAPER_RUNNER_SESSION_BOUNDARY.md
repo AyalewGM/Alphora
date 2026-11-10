@@ -69,3 +69,29 @@ of #43 so its previously approved exact head remains unchanged.
 A safe multi-day implementation must persist authoritative exchange-session identity and the verified opening portfolio mark for each session, reconcile cash and held/pending orders, handle fees and corporate actions, and make rollover crash-safe and idempotent. Re-entry at the same session on runner restart still requires a durable progress/checkpoint gate; the in-memory `_last_day` is not restart protection. Batch preflight is not a transaction or atomic portfolio replay within the accepted single session. Quote authenticity, stale marks, overnight gaps, session calendar, full reconciliation, restart recovery, and qualified independent financial review are not established by this containment fix.
 
 **No unattended paper execution; no live brokerage integration or activation.** Keep PR in draft until independent code and financial risk reviewers approve current head and CI evidence.
+
+## Cent-executable protective-stop risk calculation (stacked follow-up)
+
+The offline paper venue accepts cent-quantized execution marks, so a default
+protective stop calculated as `mark * (1 - stop_fraction)` can otherwise
+produce a non-executable fractional-cent threshold. Treating that theoretical
+price as an available protective execution level understates planned
+per-share loss for low-priced shares and can produce an oversized paper
+position. Example: a $0.02 mark and 4% default stop imply a theoretical
+$0.0192; the next lower executable cent tick is **$0.01**. The runner
+now floors the **implicit** stop to the next lower cent tick *before* the
+decision/risk sizing; on the approved $100,000 starting equity and 0.5%
+planned risk limit, this constrains the example to at most 50,000 shares
+($500 planned stop loss), before other limits and fees. If no strictly
+positive cent-priced stop exists (e.g. a $0.01 mark), preflight fails
+closed with `UNREPRESENTABLE_PAPER_STOP` before venue/book mutations.
+An **explicit** fractional-cent stop is rejected with
+`INEXACT_PAPER_STOP` instead of silently modifying its meaning.
+
+These are **synthetic tick-arithmetic and intent-sizing** protections, not
+a guarantee that a protective sell will fill at its stop. Gap-through-stop
+losses, unavailable quotes, illiquidity, slippage, single-session restart
+replay, missing licensed point-in-time marks, and multi-day rollover remain
+separate, blocking financial and release acceptance. No brokerage connection,
+credentials, deployment, unattended execution or real-money trading is
+introduced. The approved paper risk settings are unchanged.
