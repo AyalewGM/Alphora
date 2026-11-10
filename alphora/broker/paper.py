@@ -312,45 +312,54 @@ class PaperBrokerAdapter:
         self._marks.update(clean_marks)
         self._mark_times.update({symbol: at for symbol in clean_marks})
         marks = clean_marks
-        buy_adjust = D(1) + self._slippage_bps / _BPS_DENOMINATOR
-        sell_adjust = D(1) - self._slippage_bps / _BPS_DENOMINATOR
-        events = []
-        for ident in self._sequence:
-            order = self._orders[ident]
-            if order.status != "ACCEPTED" or order.symbol not in marks:
-                continue
-            mark = marks[order.symbol]
-            if order.side == "BUY":
-                price = _cents(mark * buy_adjust)
-                if price > order.limit_price:
+        # Slippage, cash settlement, cost basis and fill value are financial
+        # calculations, not display values. Never inherit caller precision:
+        # at prec=3, a 37bps slippage factor rounds from 1.0037 to 1.00.
+        # Explicit cent quantization below intentionally rounds venue prices;
+        # the whole fill sequence otherwise runs in a stable local context.
+        with localcontext() as ctx:
+            ctx.prec = 50
+            ctx.rounding = ROUND_HALF_EVEN
+            ctx.traps[Inexact] = False
+            buy_adjust = D(1) + self._slippage_bps / _BPS_DENOMINATOR
+            sell_adjust = D(1) - self._slippage_bps / _BPS_DENOMINATOR
+            events = []
+            for ident in self._sequence:
+                order = self._orders[ident]
+                if order.status != "ACCEPTED" or order.symbol not in marks:
                     continue
-            else:
-                price = _cents(mark * sell_adjust)
-                if price < order.limit_price:
-                    continue
-            self._release(order)
-            qty, fee = order.qty, self._fee
-            if order.side == "BUY":
-                self._cash -= qty * price + fee
-                held, cost = self._position(order.symbol)
-                self._positions[order.symbol] = [held + qty,
-                                                 cost + qty * price + fee]
-            else:
-                self._cash += qty * price - fee
-                held, cost = self._position(order.symbol)
-                with localcontext() as ctx:
-                    ctx.prec = 50
-                    cost -= cost if qty == held else _cents(cost * qty / held)
-                left = held - qty
-                if left:
-                    self._positions[order.symbol] = [left, cost]
+                mark = marks[order.symbol]
+                if order.side == "BUY":
+                    price = _cents(mark * buy_adjust)
+                    if price > order.limit_price:
+                        continue
                 else:
-                    self._positions.pop(order.symbol, None)
-            order.filled = qty
-            order.fill_value = qty * price
-            order.status = "FILLED"
-            event = FillEvent(f"{ident}-fill-1", ident, order.client_order_id,
-                              order.symbol, order.side, qty, price, fee, at)
-            self._events.setdefault(ident, []).append(event)
-            events.append(event)
-        return tuple(events)
+                    price = _cents(mark * sell_adjust)
+                    if price < order.limit_price:
+                        continue
+                self._release(order)
+                qty, fee = order.qty, self._fee
+                if order.side == "BUY":
+                    self._cash -= qty * price + fee
+                    held, cost = self._position(order.symbol)
+                    self._positions[order.symbol] = [held + qty,
+                                                     cost + qty * price + fee]
+                else:
+                    self._cash += qty * price - fee
+                    held, cost = self._position(order.symbol)
+                    with localcontext() as ctx:
+                        ctx.prec = 50
+                        cost -= cost if qty == held else _cents(cost * qty / held)
+                    left = held - qty
+                    if left:
+                        self._positions[order.symbol] = [left, cost]
+                    else:
+                        self._positions.pop(order.symbol, None)
+                order.filled = qty
+                order.fill_value = qty * price
+                order.status = "FILLED"
+                event = FillEvent(f"{ident}-fill-1", ident, order.client_order_id,
+                                  order.symbol, order.side, qty, price, fee, at)
+                self._events.setdefault(ident, []).append(event)
+                events.append(event)
+            return tuple(events)
