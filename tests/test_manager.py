@@ -143,6 +143,34 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.venue.open_orders(), ())
         self.assertEqual(self.book.snapshot().pending, ())
 
+    def test_direct_entry_rejects_subcent_ticks_before_book_or_ledger_writes(self):
+        # The runner enforces cent stops, but a direct PaperOrderManager caller
+        # previously reserved cash and journaled an intent before the venue
+        # rejected a fractional-cent limit, or accepted a subcent stop.
+        initial = self.book.snapshot()
+        cases = (
+            (self.entry(price="50.001", stop="48"), "INEXACT_PAPER_PRICE"),
+            (self.entry(price="50", stop="49.999"), "INEXACT_PAPER_STOP"),
+            (self.entry(price="0.02", stop="0.019", qty="100"),
+             "INEXACT_PAPER_STOP"),
+        )
+        for plan, error in cases:
+            with self.subTest(error=error, price=str(plan.proposal.price),
+                              stop=str(plan.proposal.stop_price)):
+                with self.assertRaisesRegex(ValueError, error):
+                    self.mgr.execute_entry(plan, self.account(),
+                                           recon=self.recon(), now=at(),
+                                           reconciled=True)
+                self.assertEqual(self.book.snapshot(), initial)
+                self.assertEqual(self.ledger.orders(), ())
+                self.assertEqual(self.venue.open_orders(), ())
+                self.assertEqual(self.venue.positions(), ())
+        # Rejected requests cannot poison the next valid intent.
+        result = self.mgr.execute_entry(self.entry(), self.account(),
+                                        recon=self.recon(), now=at(),
+                                        reconciled=True)
+        self.assertEqual(result.status, "ACKED")
+
     def test_entry_unreconciled_or_unpermitted_fails(self):
         with self.assertRaisesRegex(ValueError, "INVALID_OR_UNPERMITTED_PLAN"):
             self.mgr.execute_entry(self.entry(), self.account(),
@@ -244,6 +272,29 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(book.positions, (("SPY", 40, D("1960")),))
         venue_pos = self.venue.positions()
         self.assertEqual(venue_pos[0].qty, 40)
+
+    def test_direct_exit_rejects_subcent_limit_before_ledger_write(self):
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(),
+                               reconciled=True)
+        self.mgr.advance({"SPY": D("49")}, at=at(1))
+        before_book = self.book.snapshot()
+        before_ledger = self.ledger.orders()
+        before_venue = self.venue.positions()
+        plan = ExitPlan("PROPOSE_PAPER_SELL", "PROTECTIVE_EXIT", D("30"),
+                        "b" * 64)
+        with self.assertRaisesRegex(ValueError, "INEXACT_PAPER_PRICE"):
+            self.mgr.execute_exit(plan, symbol="SPY", limit_price=D("48.001"),
+                                  recon=self.recon(at(2)), now=at(2))
+        self.assertEqual(self.book.snapshot(), before_book)
+        self.assertEqual(self.ledger.orders(), before_ledger)
+        self.assertEqual(self.venue.positions(), before_venue)
+        self.assertEqual(self.venue.open_orders(), ())
+        self.assertIsNone(self.ledger.get("b" * 64))
+        accepted = self.mgr.execute_exit(plan, symbol="SPY",
+                                         limit_price=D("48.00"),
+                                         recon=self.recon(at(2)), now=at(2))
+        self.assertEqual(accepted.status, "ACKED")
 
     def test_daily_loss_halt_allows_only_reducing_sell(self):
         self.mgr.execute_entry(self.entry(), self.account(),
