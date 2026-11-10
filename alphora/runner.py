@@ -14,7 +14,7 @@ vendor-attested timestamps this runner cannot establish.
 """
 from dataclasses import dataclass, replace
 from datetime import datetime
-from decimal import Decimal as D
+from decimal import Decimal as D, DecimalException, localcontext
 from itertools import islice
 from typing import Mapping
 from zoneinfo import ZoneInfo
@@ -159,6 +159,21 @@ class PaperSessionRunner:
             for bar in day.bars.values():
                 if bar.day.isoformat() != day.day:
                     raise ValueError("INVALID_SESSION_DAY")
+            # The paper venue quantizes every mark to cents, but account
+            # reporting formerly valued holdings using the unrounded mark.
+            # Reject fractional-cent prices *before* venue/book mutations;
+            # never allow the venue's loss observation and runner equity
+            # report to disagree about the same asserted mark.
+            for price in marks.values():
+                if not isinstance(price, D) or not price.is_finite() or price <= 0:
+                    raise ValueError("INVALID_MARKS")
+                try:
+                    with localcontext() as ctx:
+                        ctx.prec = 50  # same maximum precision as paper venue
+                        if price != price.quantize(D("0.01")):
+                            raise ValueError("INEXACT_PAPER_MARK")
+                except DecimalException as exc:
+                    raise ValueError("INEXACT_PAPER_MARK") from exc
             self._last_day = day.day
             now = day.mark_time
             actions = [f"FILL:{e.broker_order_id}"
