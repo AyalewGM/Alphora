@@ -3,13 +3,13 @@ import tempfile
 import unittest
 from itertools import repeat
 from datetime import date, datetime, timezone
-from decimal import Decimal as D
+from decimal import Decimal as D, localcontext
 from pathlib import Path
 
 from alphora.broker.paper import PaperBrokerAdapter
 from alphora.orders import OrderLedger
 from alphora.research.backtest import Bar
-from alphora.reservations import OfflineReservations
+from alphora.reservations import OfflineReservations, PaperBookSnapshot
 from alphora.runner import PaperSessionRunner, SessionDay, SessionSignal
 
 
@@ -164,6 +164,27 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.book.snapshot(), before_book)
         self.assertEqual(self.ledger.orders(), before_orders)
         self.assertEqual(self.venue.positions(), before_venue)
+
+    def test_paper_account_mark_is_independent_of_caller_decimal_precision(self):
+        # Regression: 200 * $40.01 + $90k cash is $98,002, NOT $98,000.
+        # A caller precision of 3 previously rounded this above-threshold
+        # mark down to the exact 2% daily-loss halt boundary.
+        snap = PaperBookSnapshot(
+            cash=D("90000"), reserved_cash=D(0),
+            available_cash=D("90000"),
+            positions=(("SPY", 200, D("10000")),),
+            pending=(), halted=False, session_id="2026-11-02")
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                account = self.runner._account(snap, {"SPY": D("40.01")})
+                self.assertEqual(account.equity, D("98002"))
+                self.assertEqual(account.day_pnl, D("-1998"))
+                self.assertGreater(account.equity, D("98000"))
+        # Extreme finite values that cannot be summed exactly inside the
+        # bounded accounting context must fail closed, never misstate P&L.
+        with self.assertRaisesRegex(ValueError, "INEXACT_PAPER_ACCOUNT"):
+            self.runner._account(snap, {"SPY": D("1e60")})
 
     def test_report_and_loss_observation_use_post_fill_fee_equity(self):
         # The first pre-entry mark is $100,000. A same-day synthetic buy
