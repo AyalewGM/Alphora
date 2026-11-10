@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal as D, DecimalException, Inexact, localcontext
 from itertools import islice
+import re
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,8 @@ from .risk import INITIAL_EQUITY, PaperAccount
 
 
 _US_EASTERN = ZoneInfo("America/New_York")
+# Keep caller-input identifiers aligned with paper venue and offline ledger.
+_SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 
 
 def _aware(value):
@@ -174,7 +177,9 @@ class PaperSessionRunner:
             # Reject fractional-cent prices *before* venue/book mutations;
             # never allow the venue's loss observation and runner equity
             # report to disagree about the same asserted mark.
-            for price in marks.values():
+            for sym, price in marks.items():
+                if type(sym) is not str or not _SYMBOL.fullmatch(sym):
+                    raise ValueError("INVALID_MARKS")
                 if not isinstance(price, D) or not price.is_finite() or price <= 0:
                     raise ValueError("INVALID_MARKS")
                 try:
@@ -191,7 +196,10 @@ class PaperSessionRunner:
             if not isinstance(day.signals, Mapping):
                 raise ValueError("INVALID_SESSION_SIGNAL")
             for sym, signal in day.signals.items():
-                if type(sym) is not str or not isinstance(signal, SessionSignal):
+                if (type(sym) is not str or not _SYMBOL.fullmatch(sym)
+                        or not isinstance(signal, SessionSignal)
+                        or type(signal.scanner_classification) is not str
+                        or type(signal.catalyst_status) is not str):
                     raise ValueError("INVALID_SESSION_SIGNAL")
                 if signal.stop_price is not None and (
                         type(signal.stop_price) is not D
