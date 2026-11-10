@@ -95,3 +95,23 @@ replay, missing licensed point-in-time marks, and multi-day rollover remain
 separate, blocking financial and release acceptance. No brokerage connection,
 credentials, deployment, unattended execution or real-money trading is
 introduced. The approved paper risk settings are unchanged.
+
+
+## Direct paper-order manager tick preflight
+
+`PaperOrderManager.execute_entry` can be called without passing through
+`PaperSessionRunner`. Previously, a direct caller could submit a fractional-cent
+limit that reserved cash and created a ledger record before the cent-only venue
+rejected dispatch. A fractional-cent protective stop could also be accepted
+by the manager, understating the risk modeled against cent-executable marks.
+The manager now rejects noncent entry limits with
+`INEXACT_PAPER_PRICE` and noncent protective stops with
+`INEXACT_PAPER_STOP`, **before book reservation or ledger mutation**.
+Direct reduce-only paper exits also reject noncent limit prices before
+journal mutation; this does not prohibit a valid cent-priced protective sell.
+
+Synthetic manager tests assert unchanged book, ledger and venue for rejected
+buy and sell proposals, plus a successful correction/retry. This is an
+offline contract for the disconnected paper adapter, not real exchange tick
+compliance, a guarantee of stop fills or a substitute for persisted
+session-opening equity and restart acceptance.
