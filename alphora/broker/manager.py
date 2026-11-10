@@ -16,7 +16,7 @@ next idempotent sync heals — divergence beyond that is reconciliation's job.
 """
 from dataclasses import replace
 from datetime import datetime
-from decimal import Decimal as D
+from decimal import Decimal as D, DecimalException, localcontext
 
 from ..decision import EntryPlan, ExitPlan
 from ..orders import OrderLedger
@@ -35,6 +35,22 @@ def _aware(value):
 
 def _money(value):
     return isinstance(value, D) and value.is_finite() and value > 0
+
+
+def _cent_price(value):
+    """Require exactly representable cent ticks before any durable intent.
+
+    The venue only dispatches cent-priced limits. A subcent stop is also
+    incompatible with the venue's executable marks and understates risk.
+    """
+    if not _money(value):
+        return False
+    try:
+        with localcontext() as ctx:
+            ctx.prec = 50
+            return value == value.quantize(D("0.01"))
+    except DecimalException:
+        return False
 
 
 class PaperOrderManager:
@@ -103,6 +119,14 @@ class PaperOrderManager:
         self._require_clean_recon(recon, now, max_recon_age_seconds)
         self._assert_dispatchable()
         proposal = plan.proposal
+        # Direct manager callers must satisfy the same executable-tick
+        # contract as PaperSessionRunner. Otherwise a subcent entry limit
+        # reserves book cash and journals an intent *before* the venue
+        # rejects dispatch; a subcent protective stop understates exposure.
+        if not _cent_price(proposal.price):
+            raise ValueError("INEXACT_PAPER_PRICE")
+        if not _cent_price(proposal.stop_price):
+            raise ValueError("INEXACT_PAPER_STOP")
         if not proposal.quantity == proposal.quantity.to_integral_value():
             raise ValueError("INVALID_QUANTITY")
         snap0 = self._book.snapshot()
@@ -153,6 +177,10 @@ class PaperOrderManager:
             raise ValueError("INVALID_OR_UNACTIONABLE_PLAN")
         if not _aware(now):
             raise ValueError("INVALID_TIMESTAMP")
+        # A noncent exit limit would also be rejected by the paper venue
+        # after the ledger has already been mutated to SENT.
+        if not _cent_price(limit_price):
+            raise ValueError("INEXACT_PAPER_PRICE")
         self._require_clean_recon(recon, now, max_recon_age_seconds)
         if recon.status != "CLEAN":
             raise ValueError("STALE_OR_UNCLEAN_RECONCILIATION")
