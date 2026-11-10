@@ -39,6 +39,20 @@ def _cents(value):
 
 
 
+def _cent_average(total, qty):
+    """Cent-rounded read-only per-share amount, isolated from caller context.
+
+    Division may be recurring and cent rounding is intentional. Unlike
+    reservation/equity accounting, the read model is permitted to round
+    *only* the resulting per-share display value to the nearest cent.
+    """
+    with localcontext() as ctx:
+        ctx.prec = 50
+        ctx.rounding = ROUND_HALF_EVEN
+        ctx.traps[Inexact] = False
+        return _cents(total / qty)
+
+
 def _money(value, *, positive=True):
     return isinstance(value, D) and value.is_finite() and (value > 0 if positive else value >= 0)
 
@@ -62,7 +76,7 @@ class _Order:
     fill_value: D = D(0)
 
     def view(self):
-        avg = _cents(self.fill_value / self.filled) if self.filled else None
+        avg = _cent_average(self.fill_value, self.filled) if self.filled else None
         return BrokerOrderView(self.broker_order_id, self.client_order_id,
                                self.symbol, self.side, self.qty,
                                self.limit_price, self.status, self.filled, avg)
@@ -156,7 +170,7 @@ class PaperBrokerAdapter:
         return self._marks[symbol]
 
     def positions(self) -> tuple[BrokerPosition, ...]:
-        return tuple(BrokerPosition(sym, qty, _cents(cost / qty))
+        return tuple(BrokerPosition(sym, qty, _cent_average(cost, qty))
                      for sym, (qty, cost) in sorted(self._positions.items())
                      if qty)
 
