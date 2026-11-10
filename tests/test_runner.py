@@ -262,6 +262,50 @@ class RunnerTests(unittest.TestCase):
         accepted = self.runner.run((day(2, "50", {"SPY": WATCH}),))
         self.assertIn("ENTRY:SPY:ACKED", accepted.days[0].actions)
 
+    def test_invalid_symbol_and_signal_fields_preflight_before_paper_mutation(self):
+        # A well-formed SPY order must not slip through because another
+        # caller-provided signal is malformed. The whole input is rejected
+        # before advancing paper marks or consuming this session.
+        before_book = self.book.snapshot()
+        before_orders = self.ledger.orders()
+        before_positions = self.venue.positions()
+        before_working = self.venue.open_orders()
+        invalid = (
+            {"SPY": WATCH, "ZZ invalid": WATCH},
+            {"SPY": WATCH, "ZZZZZZZZZZZ": WATCH},
+            {"SPY": WATCH, "": WATCH},
+            {"SPY": SessionSignal(None, "VERIFIED")},
+            {"SPY": SessionSignal("WATCHLIST", None)},
+            {"SPY": SessionSignal(["WATCHLIST"], "VERIFIED")},
+            {"SPY": SessionSignal("WATCHLIST", ["VERIFIED"])},
+        )
+        for signals in invalid:
+            with self.subTest(signals=repr(signals)):
+                supplied = SessionDay("2026-11-02", mt(2),
+                                      {"SPY": bar(2, "50", "50", "50", "50")},
+                                      signals)
+                with self.assertRaisesRegex(ValueError, "INVALID_SESSION_SIGNAL"):
+                    self.runner.run((supplied,))
+                self.assertEqual(self.book.snapshot(), before_book)
+                self.assertEqual(self.ledger.orders(), before_orders)
+                self.assertEqual(self.venue.positions(), before_positions)
+                self.assertEqual(self.venue.open_orders(), before_working)
+                self.assertIsNone(self.runner._last_day)
+
+        # The venue rejects an invalid mark symbol itself, but only after
+        # the runner formerly marked the session as consumed. Fail earlier.
+        bad_bars = {"SPY": bar(2, "50", "50", "50", "50"),
+                    "ZZ invalid": bar(2, "50", "50", "50", "50")}
+        with self.assertRaisesRegex(ValueError, "INVALID_MARKS"):
+            self.runner.run((SessionDay("2026-11-02", mt(2),
+                                        bad_bars, {"SPY": WATCH}),))
+        self.assertEqual(self.book.snapshot(), before_book)
+        self.assertEqual(self.ledger.orders(), before_orders)
+        self.assertEqual(self.venue.positions(), before_positions)
+        self.assertIsNone(self.runner._last_day)
+        accepted = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        self.assertIn("ENTRY:SPY:ACKED", accepted.days[0].actions)
+
     def test_day_and_config_validation(self):
         for kw in ({"mark_price": "mid"}, {"take_profit_pct": D("-1")},
                    {"stop_fraction": D("nan")}, {"fee_budget": D("-1")}):
