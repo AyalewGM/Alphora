@@ -161,6 +161,21 @@ class PaperSessionRunner:
                         and day.day <= self._last_day)):
                 raise ValueError("INVALID_SESSION_DAY")
             marks = self._marks(day)
+            # Validate caller-provided signals before advance()/sync() can
+            # settle existing intents or change durable paper state. An
+            # explicit invalid stop must not silently become the default via
+            # "signal.stop_price or ...".
+            if not isinstance(day.signals, Mapping):
+                raise ValueError("INVALID_SESSION_SIGNAL")
+            for sym, signal in day.signals.items():
+                if type(sym) is not str or not isinstance(signal, SessionSignal):
+                    raise ValueError("INVALID_SESSION_SIGNAL")
+                if signal.stop_price is not None and (
+                        type(signal.stop_price) is not D
+                        or not signal.stop_price.is_finite()
+                        or signal.stop_price <= 0
+                        or (sym in marks and signal.stop_price >= marks[sym])):
+                    raise ValueError("INVALID_SESSION_SIGNAL")
             # Missing held-position marks cannot be replaced by cost basis.
             held = {sym for sym, qty, _cost in self._book.snapshot().positions
                     if qty}
