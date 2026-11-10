@@ -122,6 +122,16 @@ class PaperSessionRunner:
         return None
 
     def run(self, days) -> RunReport:
+        # The current book pins the 2% loss baseline to the original $100k.
+        # There is no durable, independently reconciled per-session rollover.
+        # Preflight the *whole batch* before processing any fills or intents,
+        # so an invalid second day cannot leave a partial first-day mutation.
+        days = tuple(days)
+        if len(days) > 1:
+            raise ValueError("SESSION_ROLLOVER_UNSUPPORTED")
+        if days and isinstance(days[0], SessionDay):
+            if days[0].day != self._book.snapshot().session_id:
+                raise ValueError("SESSION_ROLLOVER_UNSUPPORTED")
         reports = []
         for day in days:
             if (not isinstance(day, SessionDay) or not _aware(day.mark_time)
