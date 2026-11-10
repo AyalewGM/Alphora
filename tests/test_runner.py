@@ -1,6 +1,7 @@
-"""Offline forward-paper session runner: multi-day pipeline behaviour."""
+"""Offline forward-paper runner: single-session containment and safety."""
 import tempfile
 import unittest
+from itertools import repeat
 from datetime import date, datetime, timezone
 from decimal import Decimal as D
 from pathlib import Path
@@ -127,6 +128,31 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SESSION_ROLLOVER_UNSUPPORTED"):
             fresh.run((day(3, "40"),))
         self.assertEqual(self.book.snapshot(), previous)
+
+    def test_timestamp_must_match_us_eastern_session_and_unbounded_input_fails_closed(self):
+        original = self.book.snapshot()
+        original_orders = self.ledger.orders()
+        # Nov 3 21:00 UTC is Nov 3 16:00 ET, not session Nov 2.
+        # A past/future timestamp cannot masquerade as an executable
+        # same-session mark just because the bar and book IDs agree.
+        mismatched = SessionDay(
+            "2026-11-02", mt(3), {"SPY": bar(2, "50", "50", "50", "50")},
+            {"SPY": WATCH})
+        with self.assertRaisesRegex(ValueError, "INVALID_SESSION_DAY"):
+            self.runner.run((mismatched,))
+        # An endless batch must stop after at most two elements; never
+        # materialize the full iterator or process any hypothetical order.
+        with self.assertRaisesRegex(ValueError, "SESSION_ROLLOVER_UNSUPPORTED"):
+            self.runner.run(repeat(day(2, "50", {"SPY": WATCH})))
+        self.assertEqual(self.book.snapshot(), original)
+        self.assertEqual(self.ledger.orders(), original_orders)
+        self.assertEqual(self.venue.positions(), ())
+        # UTC calendar rollover is not automatically an ET day rollover.
+        valid_late_utc = SessionDay(
+            "2026-11-02", datetime(2026, 11, 3, 1, 0, tzinfo=timezone.utc),
+            {"SPY": bar(2, "50", "50", "50", "50")}, {})
+        self.assertEqual(self.runner.run((valid_late_utc,)).days[0].day,
+                         "2026-11-02")
 
     def test_day_and_config_validation(self):
         for kw in ({"mark_price": "mid"}, {"take_profit_pct": D("-1")},
