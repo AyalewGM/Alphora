@@ -43,19 +43,19 @@ class OfflineReservationTests(unittest.TestCase):
         self.assertEqual(state.session_id, "2026-11-02")
         self.assertFalse(hasattr(self.book, "submit_order"))
 
-    def test_persisted_policy_rejects_tiny_looser_limit_at_low_precision(self):
-        # Existing persisted default 0.5% risk identity must not collide
-        # with an increased per-trade allowance when reopening at prec=3.
+    def test_persisted_policy_rejects_tiny_stricter_limit_at_low_precision(self):
+        # Persisted default 0.5% risk identity must not collide with a
+        # slightly tighter valid allowance when reopening at prec=3.
         initial = self.book.snapshot()
         self.book.close()
         try:
             with localcontext() as context:
                 context.prec = 3
-                loosened = RiskPolicy(
-                    D("0.00500000000000000000000001"), D("0.10"))
+                tightened = RiskPolicy(
+                    D("0.00499999999999999999999999"), D("0.10"))
                 with self.assertRaisesRegex(ValueError, "BOOK_REOPEN_MISMATCH"):
                     OfflineReservations(
-                        self.path, session_id="2026-11-02", policy=loosened)
+                        self.path, session_id="2026-11-02", policy=tightened)
         finally:
             self.book = OfflineReservations(
                 self.path, session_id="2026-11-02")
