@@ -19,10 +19,10 @@ class TestRisk(unittest.TestCase):
 
     def test_policy_fingerprint_is_exact_under_ambient_decimal_precision(self):
         # A persisted risk-policy identity must distinguish even a tiny
-        # increase in the allowed per-trade loss. Ambient precision=3
+        # decrease in the allowed per-trade loss (still below hard cap). Ambient precision=3
         # previously rounded both identities to the same "0.005|0.1".
         original = RiskPolicy(D("0.005"), D("0.10"))
-        loosened = RiskPolicy(D("0.00500000000000000000000001"), D("0.10"))
+        tightened = RiskPolicy(D("0.00499999999999999999999999"), D("0.10"))
         equivalent = RiskPolicy(D("0.00500"), D("0.1000"))
         for precision in (3, 6, 28, 80):
             with self.subTest(precision=precision), localcontext() as context:
@@ -30,8 +30,8 @@ class TestRisk(unittest.TestCase):
                 self.assertEqual(original.fingerprint(), "0.005|0.1")
                 self.assertEqual(equivalent.fingerprint(), original.fingerprint())
                 self.assertEqual(
-                    loosened.fingerprint(), "0.00500000000000000000000001|0.1")
-                self.assertNotEqual(loosened.fingerprint(), original.fingerprint())
+                    tightened.fingerprint(), "0.00499999999999999999999999|0.1")
+                self.assertNotEqual(tightened.fingerprint(), original.fingerprint())
 
     def test_boundary_500_risk_and_10000_allocation(self):
         self.assertTrue(self.decide().permitted)
