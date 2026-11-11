@@ -6,10 +6,10 @@ import sys
 import threading
 import unittest
 from dataclasses import replace
-from decimal import Decimal as D
+from decimal import Decimal as D, localcontext
 from pathlib import Path
 
-from alphora.risk import BuyProposal, PaperAccount, INITIAL_EQUITY
+from alphora.risk import BuyProposal, PaperAccount, RiskPolicy, INITIAL_EQUITY
 from alphora.reservations import OfflineReservations
 
 
@@ -42,6 +42,24 @@ class OfflineReservationTests(unittest.TestCase):
         self.assertEqual(state.pending, ())
         self.assertEqual(state.session_id, "2026-11-02")
         self.assertFalse(hasattr(self.book, "submit_order"))
+
+    def test_persisted_policy_rejects_tiny_looser_limit_at_low_precision(self):
+        # Existing persisted default 0.5% risk identity must not collide
+        # with an increased per-trade allowance when reopening at prec=3.
+        initial = self.book.snapshot()
+        self.book.close()
+        try:
+            with localcontext() as context:
+                context.prec = 3
+                loosened = RiskPolicy(
+                    D("0.00500000000000000000000001"), D("0.10"))
+                with self.assertRaisesRegex(ValueError, "BOOK_REOPEN_MISMATCH"):
+                    OfflineReservations(
+                        self.path, session_id="2026-11-02", policy=loosened)
+        finally:
+            self.book = OfflineReservations(
+                self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), initial)
 
     def test_pending_reserves_cash_and_exact_id_is_idempotent(self):
         first = self.reserve(fee_budget=D("4"))
