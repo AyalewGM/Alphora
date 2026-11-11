@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import replace
-from decimal import Decimal as D
+from decimal import Decimal as D, localcontext
 from alphora.risk import PaperAccount, BuyProposal, validate_buy, INITIAL_EQUITY, REBALANCE_FREQUENCY
 
 
@@ -58,6 +58,29 @@ class TestRisk(unittest.TestCase):
         self.assertEqual(validate_buy(self.account, None,
                                       expected_session_id="2026-11-02").reason,
                          "INVALID_ACCOUNT_OR_ORDER")
+
+    def test_direct_risk_decision_is_independent_of_caller_decimal_precision(self):
+        # A realistic cent-priced, whole-share $1,646.04 order is inside
+        # the $500 risk, $10,000 symbol cap and $100k available cash.
+        # Ambient precision 3 must not turn it into a spurious veto.
+        proposal = BuyProposal("SPY", D("33"), D("49.88"), D("48.00"))
+        for prec in (3, 6, 28, 80):
+            with self.subTest(precision=prec), localcontext() as ctx:
+                ctx.prec = prec
+                decision = self.decide(proposal=proposal)
+                self.assertEqual((decision.permitted, decision.reason),
+                                 (True, "PAPER_BUY_ALLOWED"))
+
+        # The safety veto must be just as stable; legitimate near-boundary
+        # overallocations are not permitted or rounded to the 10% cap.
+        over = BuyProposal("SPY", D("20"),
+                           D("500.00000000000000000000000001"),
+                           D("475.00000000000000000000000001"))
+        for prec in (3, 6, 28, 80):
+            with self.subTest(precision=prec), localcontext() as ctx:
+                ctx.prec = prec
+                decision = self.decide(proposal=over)
+                self.assertFalse(decision.permitted)
 
     def test_inexact_risk_boundary_arithmetic(self):
         # True notional exceeds the 10% $10,000 cap by a tiny fraction,
