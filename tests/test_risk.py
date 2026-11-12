@@ -48,6 +48,45 @@ class TestRisk(unittest.TestCase):
         self.assertEqual(self.decide(account=replace(self.account, day_pnl=D("-2000"))).reason,
                          "DAILY_LOSS_HALT")
 
+    def test_direct_guard_uses_current_session_open_not_initial_equity(self):
+        # Issue #42: these are synthetic *direct guard* contracts only.
+        # The runner/book currently reject cross-session rollover; this test
+        # does not authorize or simulate durable multi-session accounting.
+        tiny_order = BuyProposal("SPY", D("1"), D("100"), D("99"))
+        # Prior session closes/next session opens at $105k. A $3k current-day
+        # drawdown is >2% even though equity remains above the initial $100k.
+        # A $1,900 drawdown from a $95k open is exactly 2%.
+        for opening, mark in (
+            ("105000", "102000"),
+            ("105000", "102900"),
+            ("95000", "93100"),
+        ):
+            with self.subTest(opening=opening, mark=mark):
+                actual_pnl = D(mark) - D(opening)
+                account = replace(self.account,
+                    session_open_equity=D(opening), equity=D(mark),
+                    cash=D(mark), day_pnl=actual_pnl)
+                self.assertEqual(self.decide(account=account,
+                    proposal=tiny_order).reason, "DAILY_LOSS_HALT")
+                # A caller-supplied stale or falsified P&L must not override
+                # the equity-versus-session-open loss calculation.
+                spoofed = replace(account, day_pnl=D("0"))
+                self.assertEqual(self.decide(account=spoofed,
+                    proposal=tiny_order).reason, "DAILY_LOSS_HALT")
+
+        # One cent better than the 2% boundary is not itself a loss halt.
+        # These are single synthetic account snapshots, NOT rollover tests.
+        for opening, mark in (
+            ("105000", "102900.01"),
+            ("95000", "93100.01"),
+        ):
+            with self.subTest(opening=opening, mark=mark):
+                account = replace(self.account,
+                    session_open_equity=D(opening), equity=D(mark),
+                    cash=D(mark), day_pnl=D(mark) - D(opening))
+                self.assertTrue(self.decide(account=account,
+                    proposal=tiny_order).permitted)
+
     def test_below_daily_loss_boundary(self):
         account=replace(self.account, equity=D("98001"), cash=D("98001"), day_pnl=D("-1999"))
         proposal=replace(self.buy, quantity=D("19"))
