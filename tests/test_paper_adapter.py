@@ -98,6 +98,47 @@ class PaperAdapterTests(unittest.TestCase):
                               client_order_id="c")
         self.assertEqual((over.accepted, over.reason), (False, "INSUFFICIENT_CASH"))
 
+    def test_dispatch_buying_power_ignores_ambient_decimal_precision(self):
+        # Precision 3 previously rounded $100,000.01 to $100,000,
+        # accepting an order exceeding the $100k cash-only account.
+        venue = PaperBrokerAdapter()
+        with localcontext() as ctx:
+            ctx.prec = 3
+            rejected = venue.dispatch(buy(qty=1, limit="100000.01"),
+                                      client_order_id="over")
+        self.assertFalse(rejected.accepted)
+        self.assertEqual(rejected.reason, "INSUFFICIENT_CASH")
+        self.assertEqual(venue.open_orders(), ())
+        snap = venue.account_snapshot()
+        self.assertEqual((snap.cash, snap.reserved_cash, snap.available_cash),
+                         (D("100000"), D(0), D("100000")))
+        self.assertTrue(venue.dispatch(buy(qty=1, limit="50"),
+                                       client_order_id="valid").accepted)
+
+    def test_dispatch_and_cancel_preserve_exact_cent_reservations(self):
+        # At low ambient precision two $49,999.99 holds must remain
+        # $99,999.98, then unwind without a $0.01 cash accounting drift.
+        venue = PaperBrokerAdapter()
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision):
+                venue = PaperBrokerAdapter()
+                with localcontext() as ctx:
+                    ctx.prec = precision
+                    for key in ("a", "b"):
+                        ack = venue.dispatch(buy(qty=1, limit="49999.99"),
+                                             client_order_id=key)
+                        self.assertTrue(ack.accepted)
+                    self.assertEqual(venue.account_snapshot().reserved_cash,
+                                     D("99999.98"))
+                    self.assertEqual(venue.account_snapshot().available_cash,
+                                     D("0.02"))
+                    venue.cancel("paper-00000001")
+                    self.assertEqual(venue.account_snapshot().reserved_cash,
+                                     D("49999.99"))
+                    venue.cancel("paper-00000002")
+                    self.assertEqual(venue.account_snapshot().reserved_cash, D(0))
+                    self.assertEqual(venue.account_snapshot().cash, D("100000"))
+
     def test_sell_requires_unreserved_shares(self):
         venue = PaperBrokerAdapter()
         venue.dispatch(buy(qty=50, limit="10"), client_order_id="b")

@@ -205,8 +205,19 @@ class PaperBrokerAdapter:
             return DispatchAck(client_order_id, None, False,
                                "CLIENT_ORDER_ID_CONFLICT")
         if req.side == "BUY":
-            hold = req.qty * req.limit_price + self._fee
-            if hold > self._cash - self._reserved:
+            # Reservations are the cash-only overspend boundary. Ambient
+            # Decimal precision must not round an over-budget BUY down or
+            # silently round the sum of pending holds up/down.
+            try:
+                with localcontext() as ctx:
+                    ctx.prec = 50
+                    ctx.traps[Inexact] = True
+                    hold = req.qty * req.limit_price + self._fee
+                    available = self._cash - self._reserved
+                    next_reserved = self._reserved + hold
+            except DecimalException as exc:
+                raise ValueError("INEXACT_PAPER_RESERVATION") from exc
+            if hold > available:
                 return DispatchAck(client_order_id, None, False,
                                    "INSUFFICIENT_CASH")
         else:
@@ -221,7 +232,7 @@ class PaperBrokerAdapter:
         self._by_client[client_order_id] = broker_id
         self._sequence.append(broker_id)
         if req.side == "BUY":
-            self._reserved += hold
+            self._reserved = next_reserved
         else:
             self._reserved_shares[req.symbol] = (
                 self._reserved_shares.get(req.symbol, 0) + req.qty)
@@ -229,7 +240,19 @@ class PaperBrokerAdapter:
 
     def _release(self, order):
         if order.side == "BUY":
-            self._reserved -= order.qty * order.limit_price + self._fee
+            # A cancelled/expired/filled order must release exactly the
+            # cents it held, independent of the caller's Decimal context.
+            try:
+                with localcontext() as ctx:
+                    ctx.prec = 50
+                    ctx.traps[Inexact] = True
+                    hold = order.qty * order.limit_price + self._fee
+                    remaining = self._reserved - hold
+            except DecimalException as exc:
+                raise ValueError("INEXACT_PAPER_RESERVATION") from exc
+            if remaining < 0:
+                raise ValueError("PAPER_RESERVATION_UNDERFLOW")
+            self._reserved = remaining
         else:
             left = self._reserved_shares.get(order.symbol, 0) - order.qty
             if left:
