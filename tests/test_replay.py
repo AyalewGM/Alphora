@@ -2,14 +2,14 @@
 import unittest
 from dataclasses import replace
 from datetime import date, datetime, timedelta
-from decimal import Decimal as D
+from decimal import Decimal as D, localcontext
 from zoneinfo import ZoneInfo
 
 from alphora.research.backtest import Bar, backtest
 from alphora.research.data_provenance import ObservedDailyBar, inspect_daily_snapshot
 from alphora.research.replay import (
     replay_candidate_snapshot, compare_candidate_snapshots,
-    session_manifest_sha256,
+    session_manifest_sha256, _input_fingerprint,
 )
 
 ET = ZoneInfo("America/New_York")
@@ -414,6 +414,27 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
                          second.input_fingerprint_sha256)
         self.assertEqual(second.input_fingerprint_sha256,
                          third.input_fingerprint_sha256)
+
+    def test_research_fingerprint_preserves_tiny_fee_changes_at_any_precision(self):
+        # Two distinct assumed fee rates are different research trials,
+        # even when Decimal.normalize() rounds both values to 5.
+        common = dict(
+            kind="single_asset", strategy="buy_hold",
+            candidate_sha256=self.spy.sha256, spy_sha256=None,
+            as_of=self.spy.as_of, lookback=20,
+            manifest_sha256=None, manifest_pinned=False,
+        )
+        first = D("5.0000000000000000000000000000000001")
+        revised = D("5.0000000000000000000000000000000002")
+        equivalent = D("5.000000000000000000000000000000000100")
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                original = _input_fingerprint(cost_bps=first, **common)
+                self.assertNotEqual(
+                    original, _input_fingerprint(cost_bps=revised, **common))
+                self.assertEqual(
+                    original, _input_fingerprint(cost_bps=equivalent, **common))
 
     def test_research_fingerprint_changes_with_strategy_cost_and_lookback(self):
         base = replay_candidate_snapshot(
