@@ -270,6 +270,10 @@ class PaperSessionRunner:
                 # The stop is the trigger, not the limit: a protective exit
                 # accepts the current asserted-executable mark.
                 try:
+                    # A previous exit can mutate the venue, ledger and book.
+                    # Refresh the certificate before each distinct SELL dispatch.
+                    recon = reconcile(self._book, self._ledger,
+                                      self._adapter, at=now)
                     view = self._mgr.execute_exit(
                         plan, symbol=sym, limit_price=marks[sym],
                         recon=recon, fee_budget=self._fee, now=now)
@@ -281,6 +285,9 @@ class PaperSessionRunner:
             actions.extend(f"FILL:{e.broker_order_id}"
                            for e in self._mgr.advance(marks, at=now))
             self._mgr.sync(now=now)
+            # A pre-exit certificate cannot attest the post-exit state.
+            # Recheck after settlement before any new BUY decisions.
+            recon = reconcile(self._book, self._ledger, self._adapter, at=now)
             # Exits settle first, THEN the daily mark is observed as a real
             # equity mark: risk-reducing liquidation is never blocked by the
             # one-way loss halt it may arm. New intents face the armed halt.
@@ -311,6 +318,11 @@ class PaperSessionRunner:
                     actions.append(f"ENTRY_SKIP:{sym}:{plan.reason}")
                     continue
                 try:
+                    # A previous BUY may have changed cash, reserved cash or
+                    # open orders. A fresh certificate is required for *each*
+                    # attempted dispatch, not merely once per daily mark.
+                    recon = reconcile(self._book, self._ledger,
+                                      self._adapter, at=now)
                     view = self._mgr.execute_entry(
                         plan, self._account(snap, marks), recon=recon,
                         fee_budget=self._fee, now=now, reconciled=True)
