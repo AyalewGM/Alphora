@@ -139,6 +139,12 @@ def _input_fingerprint(
     an independently pinned calendar manifest. A value computed from inputs
     supplied by the same actor is not a signature or an attestation.
     """
+    # Decimal.normalize() rounds at the caller's ambient precision. An
+    # input receipt must distinguish tiny changes in assumed fees, while
+    # stripping only fractional trailing zeros for equivalent values.
+    cost_literal = format(cost_bps, "f")
+    if "." in cost_literal:
+        cost_literal = cost_literal.rstrip("0").rstrip(".")
     canonical = {
         "schema": 1,
         "kind": kind,
@@ -146,7 +152,7 @@ def _input_fingerprint(
         "spy_snapshot_sha256": spy_sha256,
         "as_of_utc": as_of.astimezone(timezone.utc).isoformat(timespec="microseconds"),
         "strategy": strategy,
-        "cost_bps": format(cost_bps.normalize(), "f"),
+        "cost_bps": cost_literal,
         "lookback": lookback,
         "virtual_initial_equity": format(_INITIAL, "f"),
         "max_instrument_allocation": format(_MAX_ALLOCATION, "f"),
