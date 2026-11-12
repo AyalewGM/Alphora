@@ -116,7 +116,12 @@ def inspect_daily_snapshot(
             raise ValueError("NEXT_OPEN_LOOKAHEAD")
 
     def decimal_string(value):
-        return format(value.normalize(), "f")
+        # Decimal.normalize() rounds to the ambient precision. Two distinct
+        # vendor bar versions could otherwise receive the same pinned hash.
+        # Preserve every significant digit, while removing only insignificant
+        # fractional trailing zeroes for equivalent Decimal representations.
+        literal = format(value, "f")
+        return literal.rstrip("0").rstrip(".") if "." in literal else literal
 
     document = {
         "schema": 1,
