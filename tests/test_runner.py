@@ -284,7 +284,7 @@ class RunnerTests(unittest.TestCase):
             book=self.book, ledger=self.ledger, adapter=self.venue,
             take_profit_pct=D("100"))
         updated_day = SessionDay(
-            "2026-11-02", datetime(2026, 11, 2, 20, 30, tzinfo=timezone.utc),
+            "2026-11-02", datetime(2026, 11, 2, 21, 30, tzinfo=timezone.utc),
             {"SPY": bar(2, "80", "80", "80", "80")}, {"SPY": WATCH})
         second = self.runner.run((updated_day,))
         self.assertTrue(any(a.startswith("ENTRY_SKIP:SPY:")
