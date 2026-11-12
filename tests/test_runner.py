@@ -1,14 +1,15 @@
-"""Offline forward-paper session runner: multi-day pipeline behaviour."""
+"""Offline forward-paper runner: single-session containment and safety."""
 import tempfile
 import unittest
+from itertools import repeat
 from datetime import date, datetime, timezone
-from decimal import Decimal as D
+from decimal import Decimal as D, localcontext
 from pathlib import Path
 
 from alphora.broker.paper import PaperBrokerAdapter
 from alphora.orders import OrderLedger
 from alphora.research.backtest import Bar
-from alphora.reservations import OfflineReservations
+from alphora.reservations import OfflineReservations, PaperBookSnapshot
 from alphora.runner import PaperSessionRunner, SessionDay, SessionSignal
 
 
@@ -48,32 +49,42 @@ class RunnerTests(unittest.TestCase):
         self.ledger.close()
         self.tmp.cleanup()
 
-    def test_entry_hold_protective_exit_then_loss_halt(self):
-        report = self.runner.run((
-            day(2, "50", {"SPY": WATCH}),
-            day(3, "52"),
-            day(4, "40"),
-            day(5, "41", {"SPY": WATCH}),
-        ))
-        d1, d2, d3, d4 = report.days
-        # Day 1: risk sizing -> 200 shares at 10% cap, filled at the mark.
+    def test_one_session_entry_then_cross_session_rejected_without_mutation(self):
+        report = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        d1, = report.days
         self.assertIn("ENTRY:SPY:ACKED", d1.actions)
         self.assertEqual(d1.positions, (("SPY", 200, D("10000")),))
         self.assertEqual(d1.cash, D("90000"))
-        # Day 2: held, marked up.
-        self.assertEqual(d2.equity, D("100400"))
-        self.assertEqual(d2.positions[0][1], 200)
-        # Day 3: bid 40 <= stop 48 -> protective exit fills at mark 40.
-        self.assertIn("EXIT:SPY:ACKED", d3.actions)
-        self.assertEqual(d3.positions, ())
-        self.assertEqual(d3.cash, D("98000"))
-        self.assertTrue(d3.halted)  # halt arms right after the exit settles
-        # Day 4: the armed halt vetoes any new intent.
-        self.assertIn("ENTRY_VETO:SPY:PAPER_BOOK_HALTED", d4.actions)
-        self.assertTrue(d4.halted)
-        self.assertTrue(report.halted)
-        self.assertEqual(report.final_equity, D("98000"))
-        self.assertEqual(self.venue.positions(), ())
+        self.assertFalse(d1.halted)
+
+        before_book = self.book.snapshot()
+        before_orders = self.ledger.orders()
+        before_venue = self.venue.positions()
+        # Session rollover has no durable opening-equity/mark reconciliation.
+        # Reject even a risk-reducing-looking quote rather than silently
+        # reusing the first day's fixed $100k daily loss baseline.
+        with self.assertRaisesRegex(ValueError, "SESSION_ROLLOVER_UNSUPPORTED"):
+            self.runner.run((day(3, "40", {"SPY": WATCH}),))
+        self.assertEqual(self.book.snapshot(), before_book)
+        self.assertEqual(self.ledger.orders(), before_orders)
+        self.assertEqual(self.venue.positions(), before_venue)
+
+    def test_future_day_at_first_call_and_batch_preflight_fail_before_mutations(self):
+        before = self.book.snapshot()
+        for supplied in (
+            (day(3, "50", {"SPY": WATCH}),),
+            (day(2, "50", {"SPY": WATCH}),
+             day(3, "52", {"SPY": WATCH})),
+        ):
+            with self.subTest(n=len(supplied)):
+                with self.assertRaisesRegex(ValueError, "SESSION_ROLLOVER_UNSUPPORTED"):
+                    self.runner.run(supplied)
+                self.assertEqual(self.book.snapshot(), before)
+                self.assertEqual(self.ledger.orders(), ())
+                self.assertEqual(self.venue.positions(), ())
+        # Rejection must not poison a subsequent valid single-session run.
+        self.assertIn("ENTRY:SPY:ACKED",
+                      self.runner.run((day(2, "50", {"SPY": WATCH}),)).days[0].actions)
 
     def test_ineligible_signal_is_skipped_not_dispatched(self):
         report = self.runner.run((day(2, "50", {"SPY": SKIP}),))
@@ -105,14 +116,119 @@ class RunnerTests(unittest.TestCase):
         self.runner.run((day(2, "50", {"SPY": WATCH}),))
         previous = self.book.snapshot()
         missing = SessionDay(
-            "2026-11-03", mt(3),
-            {"QQQ": bar(3, "25", "25", "25", "25")}, {})
+            "2026-11-02", mt(2),
+            {"QQQ": bar(2, "25", "25", "25", "25")}, {})
+        # A fresh in-memory runner must not silently value an existing
+        # position at its cost basis when its actual mark is unavailable.
+        fresh = PaperSessionRunner(book=self.book, ledger=self.ledger,
+                                   adapter=self.venue)
         with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
-            self.runner.run((missing,))
+            fresh.run((missing,))
         self.assertEqual(self.book.snapshot(), previous)
-        # A subsequent genuine lower quote must reveal the drawdown.
-        result = self.runner.run((day(3, "40"),))
-        self.assertTrue(result.days[0].halted)
+        with self.assertRaisesRegex(ValueError, "SESSION_ROLLOVER_UNSUPPORTED"):
+            fresh.run((day(3, "40"),))
+        self.assertEqual(self.book.snapshot(), previous)
+
+    def test_timestamp_must_match_us_eastern_session_and_unbounded_input_fails_closed(self):
+        original = self.book.snapshot()
+        original_orders = self.ledger.orders()
+        # Nov 3 21:00 UTC is Nov 3 16:00 ET, not session Nov 2.
+        # A past/future timestamp cannot masquerade as an executable
+        # same-session mark just because the bar and book IDs agree.
+        mismatched = SessionDay(
+            "2026-11-02", mt(3), {"SPY": bar(2, "50", "50", "50", "50")},
+            {"SPY": WATCH})
+        with self.assertRaisesRegex(ValueError, "INVALID_SESSION_DAY"):
+            self.runner.run((mismatched,))
+        # An endless batch must stop after at most two elements; never
+        # materialize the full iterator or process any hypothetical order.
+        with self.assertRaisesRegex(ValueError, "SESSION_ROLLOVER_UNSUPPORTED"):
+            self.runner.run(repeat(day(2, "50", {"SPY": WATCH})))
+        self.assertEqual(self.book.snapshot(), original)
+        self.assertEqual(self.ledger.orders(), original_orders)
+        self.assertEqual(self.venue.positions(), ())
+        # UTC calendar rollover is not automatically an ET day rollover.
+        valid_late_utc = SessionDay(
+            "2026-11-02", datetime(2026, 11, 3, 1, 0, tzinfo=timezone.utc),
+            {"SPY": bar(2, "50", "50", "50", "50")}, {})
+        self.assertEqual(self.runner.run((valid_late_utc,)).days[0].day,
+                         "2026-11-02")
+
+    def test_empty_session_batch_fails_closed_without_invented_equity(self):
+        self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        before_book = self.book.snapshot()
+        before_orders = self.ledger.orders()
+        before_venue = self.venue.positions()
+        with self.assertRaisesRegex(ValueError, "MISSING_SESSION_MARK"):
+            self.runner.run(())
+        self.assertEqual(self.book.snapshot(), before_book)
+        self.assertEqual(self.ledger.orders(), before_orders)
+        self.assertEqual(self.venue.positions(), before_venue)
+
+    def test_paper_account_mark_is_independent_of_caller_decimal_precision(self):
+        # Regression: 200 * $40.01 + $90k cash is $98,002, NOT $98,000.
+        # A caller precision of 3 previously rounded this above-threshold
+        # mark down to the exact 2% daily-loss halt boundary.
+        snap = PaperBookSnapshot(
+            cash=D("90000"), reserved_cash=D(0),
+            available_cash=D("90000"),
+            positions=(("SPY", 200, D("10000")),),
+            pending=(), halted=False, session_id="2026-11-02")
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                account = self.runner._account(snap, {"SPY": D("40.01")})
+                self.assertEqual(account.equity, D("98002"))
+                self.assertEqual(account.day_pnl, D("-1998"))
+                self.assertGreater(account.equity, D("98000"))
+        # Extreme finite values that cannot be summed exactly inside the
+        # bounded accounting context must fail closed, never misstate P&L.
+        with self.assertRaisesRegex(ValueError, "INEXACT_PAPER_ACCOUNT"):
+            self.runner._account(snap, {"SPY": D("1e60")})
+
+    def test_report_and_loss_observation_use_post_fill_fee_equity(self):
+        # The first pre-entry mark is $100,000. A same-day synthetic buy
+        # costing a $1 fee makes the *settled* equity $99,999; the final
+        # report must not silently return the stale pre-fill $100,000.
+        venue = PaperBrokerAdapter(fee_per_order=D("1"))
+        runner = PaperSessionRunner(
+            book=self.book, ledger=self.ledger, adapter=venue,
+            fee_budget=D("1"), take_profit_pct=D("50"))
+        report = runner.run((day(2, "60", {"SPY": WATCH}),))
+        final = self.book.snapshot()
+        self.assertTrue(any(a.startswith("ENTRY:SPY:")
+                            for a in report.days[0].actions))
+        self.assertEqual(final.positions[0][0], "SPY")
+        expected_equity = final.cash + final.positions[0][1] * D("60")
+        self.assertEqual(expected_equity, D("99999"))
+        self.assertEqual(report.days[0].equity, expected_equity)
+        self.assertEqual(report.final_equity, expected_equity)
+        self.assertFalse(report.days[0].halted)
+
+    def test_inexact_paper_mark_rejected_before_account_or_venue_mutation(self):
+        # The offline paper venue rounds each supplied mark to cents while
+        # runner equity was formerly computed at the raw mark. Refuse a
+        # fractional-cent mark rather than diverging on held valuation,
+        # loss-limit enforcement and reported final equity.
+        before_book = self.book.snapshot()
+        before_orders = self.ledger.orders()
+        before_venue = self.venue.positions()
+        for price, reason in (
+            ("50.004", "INEXACT_PAPER_MARK"),
+            ("50.005", "INEXACT_PAPER_MARK"),
+            ("NaN", "INVALID_MARKS"),
+            ("Infinity", "INVALID_MARKS"),
+        ):
+            with self.subTest(price=price):
+                with self.assertRaisesRegex(ValueError, reason):
+                    self.runner.run((day(2, price, {"SPY": WATCH}),))
+                self.assertEqual(self.book.snapshot(), before_book)
+                self.assertEqual(self.ledger.orders(), before_orders)
+                self.assertEqual(self.venue.positions(), before_venue)
+        # A rejected first mark must not poison a later valid same-day call.
+        accepted = self.runner.run((day(2, "50.00", {"SPY": WATCH}),))
+        self.assertIn("ENTRY:SPY:ACKED", accepted.days[0].actions)
+        self.assertEqual(accepted.final_equity, D("100000"))
 
     def test_day_and_config_validation(self):
         for kw in ({"mark_price": "mid"}, {"take_profit_pct": D("-1")},
