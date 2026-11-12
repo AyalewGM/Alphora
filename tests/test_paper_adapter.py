@@ -355,6 +355,29 @@ class PaperAdapterTests(unittest.TestCase):
                 self.assertEqual(venue.account_snapshot().cash, D("98897.78"))
                 self.assertEqual(venue.positions()[0].qty, 22)
 
+    def test_filled_order_and_position_views_ignore_caller_decimal_precision(self):
+        # With a $1 fee, 33 shares at a $49.88 fill have a cent-rounded
+        # average cost of $49.91. Ambient precision 3 previously reported
+        # $49.90 for both avg fill and average position cost.
+        venue = PaperBrokerAdapter(slippage_bps=D("37"),
+                                   fee_per_order=D("1"))
+        ack = venue.dispatch(buy(qty=33, limit="50"),
+                             client_order_id="precision-read")
+        self.assertTrue(ack.accepted)
+        fills = venue.advance({"SPY": D("49.70")}, at=at())
+        self.assertEqual(fills[0].price, D("49.88"))
+        self.assertEqual(venue.positions(),
+                         (BrokerPosition("SPY", 33, D("49.91")),))
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                self.assertEqual(venue.positions(),
+                                 (BrokerPosition("SPY", 33, D("49.91")),))
+                self.assertEqual(
+                    venue.order_status(ack.broker_order_id).avg_fill_price,
+                    D("49.88"))
+                self.assertEqual(venue.account_snapshot().cash, D("98352.96"))
+
     def test_slippage_cash_and_average_basis_are_cent_quantized(self):
         venue = PaperBrokerAdapter(slippage_bps=D("37"))
         venue.dispatch(buy(qty=33, limit="50"), client_order_id="b")
