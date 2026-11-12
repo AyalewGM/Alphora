@@ -330,6 +330,31 @@ class PaperAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INVALID_DISPATCH"):
             self.venue.dispatch(buy(limit="49.999"), client_order_id="bad")
 
+    def test_fill_slippage_and_cash_ignore_ambient_decimal_precision(self):
+        # Precision 3 previously erased 37bps of simulated slippage and
+        # rounded filled cash / basis values at the paper settlement boundary.
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision):
+                venue = PaperBrokerAdapter(slippage_bps=D("37"),
+                                           fee_per_order=D("1"))
+                self.assertTrue(venue.dispatch(buy(qty=33, limit="50"),
+                                               client_order_id="b").accepted)
+                with localcontext() as ctx:
+                    ctx.prec = precision
+                    fills = venue.advance({"SPY": D("49.70")}, at=at())
+                self.assertEqual(len(fills), 1)
+                self.assertEqual(fills[0].price, D("49.88"))
+                self.assertEqual(venue.account_snapshot().cash, D("98352.96"))
+                self.assertTrue(venue.dispatch(sell(qty=11, limit="49"),
+                                               client_order_id="s").accepted)
+                with localcontext() as ctx:
+                    ctx.prec = precision
+                    sale = venue.advance({"SPY": D("49.80")}, at=at(1))
+                self.assertEqual(len(sale), 1)
+                self.assertEqual(sale[0].price, D("49.62"))
+                self.assertEqual(venue.account_snapshot().cash, D("98897.78"))
+                self.assertEqual(venue.positions()[0].qty, 22)
+
     def test_slippage_cash_and_average_basis_are_cent_quantized(self):
         venue = PaperBrokerAdapter(slippage_bps=D("37"))
         venue.dispatch(buy(qty=33, limit="50"), client_order_id="b")
