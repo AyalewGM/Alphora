@@ -112,6 +112,103 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(any(a.startswith("ENTRY_VETO:SPY")
                             for a in d.actions), d.actions)
 
+    def test_first_entry_uses_reconciliation_after_exit_sync(self):
+        # No historical pre-exit certificate may be reused after settlement.
+        import alphora.runner as runner_mod
+        log = []
+        real_reconcile, mgr = runner_mod.reconcile, self.runner._mgr
+        real_sync, real_entry = mgr.sync, mgr.execute_entry
+
+        def recording_reconcile(*args, **kwargs):
+            result = real_reconcile(*args, **kwargs)
+            log.append(("recon", result))
+            return result
+
+        def recording_sync(*args, **kwargs):
+            log.append(("sync", None))
+            return real_sync(*args, **kwargs)
+
+        def recording_entry(*args, recon, **kwargs):
+            log.append(("entry", recon))
+            return real_entry(*args, recon=recon, **kwargs)
+
+        runner_mod.reconcile = recording_reconcile
+        mgr.sync, mgr.execute_entry = recording_sync, recording_entry
+        try:
+            report = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        finally:
+            runner_mod.reconcile = real_reconcile
+            mgr.sync, mgr.execute_entry = real_sync, real_entry
+        self.assertIn("ENTRY:SPY:ACKED", report.days[0].actions)
+        entry_at = next(i for i, (kind, _) in enumerate(log) if kind == "entry")
+        before = log[:entry_at]
+        last_recon = max(i for i, (kind, _) in enumerate(before) if kind == "recon")
+        last_sync = max(i for i, (kind, _) in enumerate(before) if kind == "sync")
+        self.assertGreater(last_recon, last_sync)
+        self.assertIs(log[entry_at][1], before[last_recon][1])
+
+    def _two_entry_session(self):
+        return day(2, "50", {"SPY": WATCH, "QQQ": WATCH},
+                   (("QQQ", bar(2, "40", "40", "40", "40")),))
+
+    def test_each_buy_uses_a_distinct_fresh_reconciliation(self):
+        import alphora.runner as runner_mod
+        log = []
+        real_reconcile, mgr = runner_mod.reconcile, self.runner._mgr
+        real_entry = mgr.execute_entry
+
+        def recording_reconcile(*args, **kwargs):
+            result = real_reconcile(*args, **kwargs)
+            log.append(("recon", result))
+            return result
+
+        def recording_entry(*args, recon, **kwargs):
+            log.append(("entry", recon))
+            return real_entry(*args, recon=recon, **kwargs)
+
+        runner_mod.reconcile = recording_reconcile
+        mgr.execute_entry = recording_entry
+        try:
+            report = self.runner.run((self._two_entry_session(),))
+        finally:
+            runner_mod.reconcile = real_reconcile
+            mgr.execute_entry = real_entry
+        actions = report.days[0].actions
+        self.assertIn("ENTRY:QQQ:ACKED", actions)
+        self.assertIn("ENTRY:SPY:ACKED", actions)
+        entries = [i for i, (kind, _) in enumerate(log) if kind == "entry"]
+        self.assertEqual(len(entries), 2)
+        first, second = entries
+        self.assertIsNot(log[first][1], log[second][1])
+        self.assertTrue(any(kind == "recon" for kind, _ in log[first+1:second]))
+        self.assertIs(log[second][1], log[second-1][1])
+
+    def test_second_entry_fails_closed_on_new_venue_discrepancy(self):
+        from alphora.broker.base import DispatchRequest
+        mgr = self.runner._mgr
+        real_entry, called = mgr.execute_entry, []
+
+        def faulty_entry(*args, **kwargs):
+            view = real_entry(*args, **kwargs)
+            if not called:
+                # Introduce an unknown venue order after the first BUY.
+                self.venue.dispatch(DispatchRequest("QQQ", "BUY", 1, D("10")),
+                                    client_order_id="z" * 64)
+            called.append(view)
+            return view
+
+        mgr.execute_entry = faulty_entry
+        try:
+            report = self.runner.run((self._two_entry_session(),))
+        finally:
+            mgr.execute_entry = real_entry
+        actions = report.days[0].actions
+        self.assertIn("ENTRY:QQQ:ACKED", actions)
+        self.assertTrue(any(a.startswith("ENTRY_VETO:SPY:STALE_OR_UNCLEAN")
+                            for a in actions), actions)
+        self.assertEqual(len(called), 1)
+        self.assertEqual({o.symbol for o in self.ledger.orders()}, {"QQQ"})
+
     def test_missing_held_symbol_mark_is_never_treated_as_break_even(self):
         self.runner.run((day(2, "50", {"SPY": WATCH}),))
         previous = self.book.snapshot()
