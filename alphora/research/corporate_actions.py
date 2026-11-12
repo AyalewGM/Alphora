@@ -131,6 +131,9 @@ def replay_static_position(*, asset_id: str, sessions: tuple[SessionClose, ...],
     previous = None
     for s in sessions:
         if (not isinstance(s, SessionClose) or not _date(s.day)
+                # US equity/ETF regular closes cannot occur on weekends.
+                # This is only a sanity gate, not a verified holiday calendar.
+                or s.day.weekday() >= 5
                 or not all(_aware(t) for t in
                            (s.opens_at, s.closes_at, s.close_available_at))
                 or not s.opens_at < s.closes_at <= s.close_available_at <= as_of
