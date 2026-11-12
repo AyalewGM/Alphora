@@ -170,7 +170,8 @@ class PaperOrderManager:
         if (not isinstance(plan, ExitPlan)
                 or plan.action != "PROPOSE_PAPER_SELL"
                 or not isinstance(plan.intent_key, str)
-                or not isinstance(symbol, str) or not _money(limit_price)
+                or not isinstance(symbol, str) or plan.symbol != symbol
+                or not _money(limit_price)
                 or not (isinstance(plan.quantity, D)
                         and plan.quantity == plan.quantity.to_integral_value()
                         and plan.quantity > 0)):
