@@ -13,7 +13,7 @@ broker order ids. Time is caller-supplied (`at`); nothing reads a wall clock.
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal as D, ROUND_HALF_EVEN, localcontext, DecimalException
+from decimal import Decimal as D, ROUND_HALF_EVEN, Inexact, localcontext, DecimalException
 import re
 
 from ..risk import INITIAL_EQUITY
@@ -119,14 +119,24 @@ class PaperBrokerAdapter:
                    for sym, (qty, _cost) in self._positions.items() if qty)
 
     def account_snapshot(self) -> BrokerAccountSnapshot:
-        marked = self._mark_value()
-        equity = self._cash + marked
+        # A risk-facing mark must not inherit a caller's Decimal precision:
+        # rounding $98,002 to $98,000 can falsely engage the 2% loss halt.
+        # The snapshot itself never mutates venue state.
+        try:
+            with localcontext() as ctx:
+                ctx.prec = 50
+                ctx.traps[Inexact] = True
+                marked = self._mark_value()
+                equity = self._cash + marked
+                available = self._cash - self._reserved
+                day_pnl = equity - self._session_open_equity
+        except DecimalException as exc:
+            raise ValueError("INEXACT_PAPER_ACCOUNT") from exc
         return BrokerAccountSnapshot(
             mode="paper", equity=equity,
             session_open_equity=self._session_open_equity,
             cash=self._cash, reserved_cash=self._reserved,
-            available_cash=self._cash - self._reserved,
-            day_pnl=equity - self._session_open_equity)
+            available_cash=available, day_pnl=day_pnl)
 
     def require_fresh_mark(self, symbol: str, *, at, max_age_seconds=5):
         """Require an asserted paper mark known at decision time, never fallback.
