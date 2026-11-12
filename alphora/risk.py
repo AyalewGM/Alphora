@@ -122,6 +122,11 @@ def validate_buy(
         # Reject any rounded accounting calculation; a small loss or
         # allocation excess must not disappear at the Decimal precision boundary.
         with localcontext() as context:
+            # Use a fixed precision for every direct caller, just as the
+            # offline paper venue does. A caller's precision=3 must not
+            # spuriously reject a valid cent-priced trade; still trap any
+            # inexact >50-digit arithmetic rather than round away risk.
+            context.prec = 50
             context.traps[Inexact] = True
             # Do not let an inconsistent reported P&L bypass the daily loss halt.
             observed_day_pnl = account.equity - account.session_open_equity
