@@ -142,7 +142,9 @@ def _input_fingerprint(
     # Decimal.normalize() rounds at the caller's ambient precision. An
     # input receipt must distinguish tiny changes in assumed fees, while
     # stripping only fractional trailing zeros for equivalent values.
-    cost_literal = format(cost_bps, "f")
+    # Signed Decimal zero is economically identical to positive zero; it
+    # must not create a different research receipt for the same fee input.
+    cost_literal = "0" if cost_bps.is_zero() else format(cost_bps, "f")
     if "." in cost_literal:
         cost_literal = cost_literal.rstrip("0").rstrip(".")
     canonical = {
