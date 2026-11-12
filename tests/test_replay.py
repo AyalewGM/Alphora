@@ -436,6 +436,24 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
                 self.assertEqual(
                     original, _input_fingerprint(cost_bps=equivalent, **common))
 
+    def test_research_fingerprint_canonicalizes_signed_zero_fees(self):
+        # Negative zero is a valid Decimal research fee input, economically
+        # identical to +0. The reproducibility receipt must not falsely
+        # distinguish equivalent offline simulations at any caller precision.
+        common = dict(
+            kind="single_asset", strategy="buy_hold",
+            candidate_sha256=self.spy.sha256, spy_sha256=None,
+            as_of=self.spy.as_of, lookback=20,
+            manifest_sha256=None, manifest_pinned=False,
+        )
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                original = _input_fingerprint(cost_bps=D("0"), **common)
+                for equivalent in (D("0.000"), D("-0"), D("-0.000"), D("-0E+4")):
+                    self.assertEqual(
+                        original, _input_fingerprint(cost_bps=equivalent, **common))
+
     def test_research_fingerprint_changes_with_strategy_cost_and_lookback(self):
         base = replay_candidate_snapshot(
             self.spy, "trend", expected_sha256=self.spy.sha256,
