@@ -1,7 +1,7 @@
 import unittest
 from dataclasses import replace
 from decimal import Decimal as D, localcontext
-from alphora.risk import PaperAccount, BuyProposal, validate_buy, INITIAL_EQUITY, REBALANCE_FREQUENCY
+from alphora.risk import PaperAccount, BuyProposal, RiskPolicy, validate_buy, INITIAL_EQUITY, REBALANCE_FREQUENCY
 
 
 class TestRisk(unittest.TestCase):
@@ -16,6 +16,22 @@ class TestRisk(unittest.TestCase):
     def test_config(self):
         self.assertEqual(INITIAL_EQUITY, D("100000"))
         self.assertEqual(REBALANCE_FREQUENCY, "daily")
+
+    def test_policy_fingerprint_is_exact_under_ambient_decimal_precision(self):
+        # A persisted risk-policy identity must distinguish even a tiny
+        # decrease in the allowed per-trade loss (still below hard cap). Ambient precision=3
+        # previously rounded both identities to the same "0.005|0.1".
+        original = RiskPolicy(D("0.005"), D("0.10"))
+        tightened = RiskPolicy(D("0.00499999999999999999999999"), D("0.10"))
+        equivalent = RiskPolicy(D("0.00500"), D("0.1000"))
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as context:
+                context.prec = precision
+                self.assertEqual(original.fingerprint(), "0.005|0.1")
+                self.assertEqual(equivalent.fingerprint(), original.fingerprint())
+                self.assertEqual(
+                    tightened.fingerprint(), "0.00499999999999999999999999|0.1")
+                self.assertNotEqual(tightened.fingerprint(), original.fingerprint())
 
     def test_boundary_500_risk_and_10000_allocation(self):
         self.assertTrue(self.decide().permitted)

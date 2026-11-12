@@ -31,8 +31,18 @@ class RiskPolicy:
             raise ValueError("INVALID_RISK_POLICY")
 
     def fingerprint(self) -> str:
-        return (format(self.risk_per_trade_fraction.normalize(), "f") + "|"
-                + format(self.max_instrument_fraction.normalize(), "f"))
+        # Risk-policy identity is persisted in the offline SQLite book and
+        # must never depend on a caller's Decimal precision. normalize()
+        # rounds to the active context and can collapse a slightly looser
+        # policy into the approved policy's identity at precision=3.
+        # Formatting is exact; strip only fractional trailing zeros so
+        # numerically equivalent policy values retain their existing ID.
+        def canonical(value: Decimal) -> str:
+            literal = format(value, "f")
+            return literal.rstrip("0").rstrip(".") if "." in literal else literal
+
+        return (canonical(self.risk_per_trade_fraction) + "|"
+                + canonical(self.max_instrument_fraction))
 
 
 DEFAULT_RISK_POLICY = RiskPolicy()
