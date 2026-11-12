@@ -179,6 +179,7 @@ class ExitPlan:
     reason: str
     quantity: D = D("0")
     intent_key: str | None = None
+    symbol: str | None = None  # bind proposed sale to its evaluated position
 
 
 def propose_exit(position: FilledPosition, quote: ExitQuote, *,
@@ -245,4 +246,5 @@ def propose_exit(position: FilledPosition, quote: ExitQuote, *,
     key = sha256((f"PAPER|EXIT|{position.position_id}|{position.symbol}|"
                   f"{position.reconciliation_version}|{reason}|{available_quantity}")
                  .encode("utf-8")).hexdigest()
-    return ExitPlan("PROPOSE_PAPER_SELL", reason, available_quantity, key)
+    return ExitPlan("PROPOSE_PAPER_SELL", reason, available_quantity, key,
+                    position.symbol)
