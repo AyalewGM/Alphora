@@ -4,9 +4,13 @@ Capped buy-hold matches only per-instrument allocation, not time in market.
 The fully invested SPY proxy is NOT compliant with the owner allocation cap.
 """
 from dataclasses import dataclass
-from decimal import Decimal as D
-from math import sqrt
+from decimal import Context, Decimal as D, localcontext
+from math import isfinite, sqrt
 from .backtest import backtest, validate, Result
+
+# Aligned reference statistics must match the backtest's 28-digit reporting
+# arithmetic regardless of a caller's ambient Decimal precision.
+_METRICS_CONTEXT = Context(prec=28)
 
 
 @dataclass(frozen=True)
@@ -28,21 +32,33 @@ def _aligned_metrics(equity_curve) -> AlignedWindowMetrics:
         for value in equity_curve
     ):
         raise ValueError("INVALID_EVALUATION_EQUITY")
-    peak = equity_curve[0]
-    drawdown = D(0)
-    returns = []
-    for before, after in zip(equity_curve, equity_curve[1:]):
-        peak = max(peak, after)
-        drawdown = max(drawdown, (peak - after) / peak)
-        returns.append(float(after / before - 1))
+    with localcontext(_METRICS_CONTEXT):
+        peak = equity_curve[0]
+        drawdown = D(0)
+        returns = []
+        for before, after in zip(equity_curve, equity_curve[1:]):
+            peak = max(peak, after)
+            drawdown = max(drawdown, (peak - after) / peak)
+            period_return = float(after / before - 1)
+            if not isfinite(period_return):
+                raise ValueError("NONFINITE_RESEARCH_REPORT")
+            returns.append(period_return)
+        total_return = equity_curve[-1] / equity_curve[0] - 1
     sharpe = None
     if len(returns) > 1:
         mean = sum(returns) / len(returns)
-        variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+        try:
+            variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+        except OverflowError as exc:
+            raise ValueError("NONFINITE_RESEARCH_REPORT") from exc
+        if not isfinite(mean) or not isfinite(variance):
+            raise ValueError("NONFINITE_RESEARCH_REPORT")
         if variance > 0:
             sharpe = sqrt(252) * mean / sqrt(variance)
+            if not isfinite(sharpe):
+                raise ValueError("NONFINITE_RESEARCH_REPORT")
     return AlignedWindowMetrics(
-        len(equity_curve), equity_curve[-1] / equity_curve[0] - 1,
+        len(equity_curve), total_return,
         drawdown, sharpe,
     )
 
@@ -104,8 +120,9 @@ def compare_with_spy(strategy_bars, spy_bars, strategy_name, *,
     aligned_strategy = _aligned_metrics(aligned_curve)
     aligned_capped = _aligned_metrics(capped.equity_curve)
     aligned_full = _aligned_metrics(full.equity_curve)
+    with localcontext(_METRICS_CONTEXT):
+        excess = aligned_strategy.total_return - aligned_capped.total_return
     return BenchmarkComparison(
         strategy, capped, full,
-        aligned_strategy.total_return - aligned_capped.total_return,
-        start, aligned_strategy, aligned_capped, aligned_full,
+        excess, start, aligned_strategy, aligned_capped, aligned_full,
     )

@@ -3,8 +3,16 @@ import csv
 import re
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal as D
-from math import sqrt
+from decimal import Context, Decimal as D, DecimalException, Inexact, localcontext
+from math import isfinite, sqrt
+
+# Research signal arithmetic must not vary with a caller's Decimal context.
+# This context does not trap rounded averages (e.g. mean of three prices);
+# it provides deterministic, bounded-precision comparisons, not exact math.
+_SIGNAL_CONTEXT = Context(prec=28)
+# Performance statistics are research approximations, but must be identical
+# for identical inputs regardless of the caller's ambient Decimal precision.
+_REPORT_CONTEXT = Context(prec=28)
 
 @dataclass(frozen=True)
 class Bar:
@@ -75,8 +83,14 @@ def signal(closes,strategy,lookback=20):
     if strategy=="buy_hold": return True
     if len(closes)<lookback+1: return False
     if strategy=="momentum": return closes[-1]>closes[-lookback-1]
-    if strategy=="trend": return closes[-1]>sum(closes[-lookback:],D(0))/lookback
-    return closes[-1]<sum(closes[-lookback-1:-1],D(0))/lookback
+    # Without an explicit context, the same close history can produce a
+    # different trend/mean-reversion decision at precision 6 versus 28.
+    with localcontext(_SIGNAL_CONTEXT):
+        if strategy=="trend":
+            reference=sum(closes[-lookback:],D(0))/lookback
+        else:
+            reference=sum(closes[-lookback-1:-1],D(0))/lookback
+    return closes[-1]>reference if strategy=="trend" else closes[-1]<reference
 
 @dataclass(frozen=True)
 class Result:
@@ -87,6 +101,25 @@ class Result:
     sharpe: float | None
     transactions: int
     equity_curve: tuple[D,...]
+
+# Fix ledger precision independent of caller-global Decimal context. The
+# default 28 significant digits remain the conservative accounting boundary.
+_LEDGER_CONTEXT = Context(prec=28)
+_LEDGER_CONTEXT.traps[Inexact] = True
+
+
+def _exact_ledger(operation):
+    """Reject rounded/overflowing simulated cash and market-value arithmetic.
+
+    Fractional sizing and performance ratios may be rounded for research, but
+    the cash ledger must not silently lose dollars or small positions.
+    """
+    try:
+        with localcontext(_LEDGER_CONTEXT):
+            return operation()
+    except DecimalException as exc:
+        raise ValueError("UNREPRESENTABLE_BACKTEST_LEDGER_ARITHMETIC") from exc
+
 
 def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=D("0.10"),lookback=20):
     validate(bars)
@@ -103,7 +136,7 @@ def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=
         raise ValueError("INVALID_PARAMETERS")
     cash=initial
     shares=0
-    costs=cost_bps/D(10000)
+    costs=_exact_ledger(lambda: cost_bps/D(10000))
     equity=[initial]
     transactions=0
     for i in range(1,len(bars)):
@@ -111,26 +144,48 @@ def backtest(bars,strategy,*,initial=D("100000"),cost_bps=D("5"),max_allocation=
         want=signal([b.close for b in bars[:i]],strategy,lookback)
         opening=bars[i].open
         if shares and not want:
-            cash+=shares*opening*(1-costs)
+            cash=_exact_ledger(lambda: cash+shares*opening*(1-costs))
             shares=0
             transactions+=1
         elif want and not shares:
-            quantity=int(min(cash,cash*max_allocation)/(opening*(1+costs)))
+            budget=_exact_ledger(lambda: min(cash,cash*max_allocation))
+            unit_cost=_exact_ledger(lambda: opening*(1+costs))
+            # Decimal true division may round an almost-integer share count
+            # upward under a caller's low precision (violating the cap).
+            # Integer division is exact and pinned to the ledger context.
+            quantity=int(_exact_ledger(lambda: budget // unit_cost))
             if quantity>0:
-                cash-=quantity*opening*(1+costs)
+                cash=_exact_ledger(lambda: cash-quantity*unit_cost)
                 shares=quantity
                 transactions+=1
-        equity.append(cash+shares*bars[i].close)
+        equity.append(_exact_ledger(lambda: cash+shares*bars[i].close))
     peak=equity[0]
     drawdown=D(0)
     returns=[]
-    for a,b in zip(equity,equity[1:]):
-        peak=max(peak,b)
-        drawdown=max(drawdown,(peak-b)/peak)
-        returns.append(float(b/a-1))
+    # A low-precision caller previously rounded tiny returns to zero, making
+    # the same P&L appear to have no Sharpe ratio or a different drawdown.
+    with localcontext(_REPORT_CONTEXT):
+        for a,b in zip(equity,equity[1:]):
+            peak=max(peak,b)
+            drawdown=max(drawdown,(peak-b)/peak)
+            period_return = float(b/a-1)
+            if not isfinite(period_return):
+                raise ValueError("NONFINITE_RESEARCH_REPORT")
+            returns.append(period_return)
+        total_return=equity[-1]/initial-1
     sharpe=None
     if len(returns)>1:
         mean=sum(returns)/len(returns)
-        variance=sum((x-mean)**2 for x in returns)/(len(returns)-1)
-        if variance>0: sharpe=sqrt(252)*mean/sqrt(variance)
-    return Result(strategy,equity[-1],equity[-1]/initial-1,drawdown,sharpe,transactions,tuple(equity))
+        try:
+            variance=sum((x-mean)**2 for x in returns)/(len(returns)-1)
+        except OverflowError as exc:
+            raise ValueError("NONFINITE_RESEARCH_REPORT") from exc
+        # Even finite float returns can overflow squared deviations.
+        # Never return an invented zero/NaN/Inf Sharpe from overflow.
+        if not isfinite(mean) or not isfinite(variance):
+            raise ValueError("NONFINITE_RESEARCH_REPORT")
+        if variance>0:
+            sharpe=sqrt(252)*mean/sqrt(variance)
+            if not isfinite(sharpe):
+                raise ValueError("NONFINITE_RESEARCH_REPORT")
+    return Result(strategy,equity[-1],total_return,drawdown,sharpe,transactions,tuple(equity))

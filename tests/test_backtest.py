@@ -3,7 +3,7 @@ import csv
 import tempfile
 from dataclasses import replace
 from datetime import date,datetime,timedelta
-from decimal import Decimal as D
+from decimal import Decimal as D, localcontext
 from pathlib import Path
 from alphora.research.backtest import Bar,load_csv,signal,backtest
 
@@ -141,6 +141,128 @@ class BacktestTests(unittest.TestCase):
                                     ",".join(["2025-01-01", *([price] * 4), "1000"]) +
                                     "\n" + good_later + "\n", encoding="utf-8")
                     self.assertEqual(load_csv(path)[0].open, D(price))
+
+    def test_inexact_cash_ledger_fails_closed(self):
+        # At default Decimal precision, subtracting one dollar from 1e30
+        # silently produces 1e30 again. Never count the share without paying.
+        tiny = [
+            Bar(date(2025, 1, 2), D("1"), D("1"), D("1"), D("1"), 1000),
+            Bar(date(2025, 1, 3), D("1"), D("1"), D("1"), D("1"), 1000),
+        ]
+        with self.assertRaisesRegex(
+            ValueError, "UNREPRESENTABLE_BACKTEST_LEDGER_ARITHMETIC"
+        ):
+            backtest(tiny, "buy_hold", initial=D("1e30"),
+                     max_allocation=D("1e-30"), cost_bps=D(0))
+        # Normal owner-approved capital and allocation remain usable.
+        ordinary = backtest(tiny, "buy_hold", initial=D("100000"),
+                            max_allocation=D("0.10"), cost_bps=D(0))
+        self.assertEqual(ordinary.equity_curve, (D("100000"), D("100000")))
+        self.assertEqual(ordinary.transactions, 1)
+
+    def test_near_integer_share_sizing_ignores_caller_precision(self):
+        # With a 6-digit caller Decimal context, ordinary true division
+        # previously rounded 10000 / 1.0000001 to 10000 shares, crossing
+        # the 10%-of-equity allocation budget; the correct floor is 9999.
+        bars = [
+            Bar(date(2025, 1, 2), D("1"), D("1"), D("1"), D("1"), 1000),
+            Bar(date(2025, 1, 3), D("1.0000001"), D("1.0000002"),
+                D("1.0000001"), D("1.0000002"), 1000),
+        ]
+        for precision in (6, 28, 80):
+            with self.subTest(precision=precision):
+                with localcontext() as context:
+                    context.prec = precision
+                    result = backtest(bars, "buy_hold", cost_bps=D(0))
+                    self.assertEqual(result.transactions, 1)
+                    self.assertEqual(result.final_equity, D("100000.0009999"))
+
+    def test_exact_ledger_independent_of_caller_decimal_precision(self):
+        # Without a pinned context, this input fails at precision 28 but
+        # silently succeeds at 80. The same offline artifact must never have
+        # context-dependent cash-ledger acceptance or rejection.
+        tiny = [
+            Bar(date(2025, 1, 2), D("1"), D("1"), D("1"), D("1"), 1000),
+            Bar(date(2025, 1, 3), D("1"), D("1"), D("1"), D("1"), 1000),
+        ]
+        for precision in (6, 28, 80):
+            with self.subTest(precision=precision):
+                with localcontext() as context:
+                    context.prec = precision
+                    with self.assertRaisesRegex(
+                        ValueError, "UNREPRESENTABLE_BACKTEST_LEDGER_ARITHMETIC"
+                    ):
+                        backtest(tiny, "buy_hold", initial=D("1e30"),
+                                 max_allocation=D("1e-30"), cost_bps=D(0))
+
+    def test_inexact_market_valuation_fails_closed(self):
+        # High-precision but finite marks can silently round a held
+        # position value. Reject rather than report an invented equity.
+        tiny = [
+            Bar(date(2025, 1, 2), D("1"), D("1"), D("1"), D("1"), 1000),
+            Bar(date(2025, 1, 3), D("1"), D("1.000000000000000000000000001"),
+                D("1"), D("1.000000000000000000000000001"), 1000),
+        ]
+        with self.assertRaisesRegex(
+            ValueError, "UNREPRESENTABLE_BACKTEST_LEDGER_ARITHMETIC"
+        ):
+            backtest(tiny, "buy_hold", cost_bps=D(0))
+
+    def test_signal_decisions_are_independent_of_decimal_precision(self):
+        # Previously a precision-6 caller could buy a falling close while a
+        # precision-28 caller correctly rejected the same trend signal.
+        trend = [D("1.0000000"), D("1.0000011"), D("1.0000010")]
+        # The opposite precision-sensitive boundary occurs for mean reversion.
+        reversion = [D("1.0000000"), D("1.0000011"), D("1.0000005")]
+        for precision in (6, 28, 80):
+            with self.subTest(precision=precision):
+                with localcontext() as context:
+                    context.prec = precision
+                    self.assertFalse(signal(trend, "trend", lookback=2))
+                    self.assertTrue(signal(reversion, "mean_reversion", lookback=2))
+
+    def test_backtest_reports_ignore_caller_decimal_precision(self):
+        # Identical exact cash/marks must not give zero daily returns or a
+        # missing Sharpe merely because the caller uses 6-digit precision.
+        days = (date(2025, 1, 2), date(2025, 1, 3),
+                date(2025, 1, 6), date(2025, 1, 7))
+        closes = ("1", "1.0000002", "1.0000001", "1.0000003")
+        bars = [
+            Bar(day, D("1"), D("1.0000005"), D("0.9999995"),
+                D(close), 1000000)
+            for day, close in zip(days, closes)
+        ]
+        results = []
+        for precision in (6, 28, 80):
+            with self.subTest(precision=precision):
+                with localcontext() as context:
+                    context.prec = precision
+                    result = backtest(bars, "buy_hold", cost_bps=D(0))
+                self.assertEqual(result.final_equity, D("100000.003"))
+                self.assertEqual(result.total_return, D("0.00000003"))
+                self.assertGreater(result.max_drawdown, D(0))
+                self.assertIsNotNone(result.sharpe)
+                results.append(result)
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[1], results[2])
+
+    def test_extreme_finite_prices_never_emit_nonfinite_float_reports(self):
+        # The Decimal ledger can represent these synthetic marks exactly,
+        # but float daily returns or variance cannot. Reject, not inf/NaN
+        # Sharpe or a falsely zero Sharpe from overflow.
+        first = Bar(date(2025, 1, 2), D("1"), D("1"),
+                    D("1"), D("1"), 1000)
+        for mark, final_day in (("1e309", False), ("1e200", True)):
+            with self.subTest(mark=mark):
+                second = Bar(date(2025, 1, 3), D("1"), D(mark),
+                             D("1"), D(mark), 1000)
+                bars = [first, second]
+                if final_day:
+                    bars.append(Bar(date(2025, 1, 6), D(mark), D(mark),
+                                    D(mark), D(mark), 1000))
+                with self.assertRaisesRegex(ValueError, "NONFINITE_RESEARCH_REPORT"):
+                    backtest(bars, "buy_hold", max_allocation=D("1"),
+                             cost_bps=D(0))
 
     def test_zero_volume_rejected_before_hypothetical_fills(self):
         # The primitive simulator is also callable without the pinned replay
