@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal as D, DecimalException, Inexact, localcontext
 from itertools import islice
+import re
 from typing import Mapping
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,8 @@ from .risk import INITIAL_EQUITY, PaperAccount
 
 
 _US_EASTERN = ZoneInfo("America/New_York")
+# Keep caller-input identifiers aligned with paper venue and offline ledger.
+_SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 
 
 def _aware(value):
@@ -160,6 +163,13 @@ class PaperSessionRunner:
                     or (self._last_day is not None
                         and day.day <= self._last_day)):
                 raise ValueError("INVALID_SESSION_DAY")
+            # A present SessionDay with no executable prices is not a verified
+            # current-session mark. It must not mint an unchanged $100k equity
+            # report; malformed mark containers must also fail before mutation.
+            if not isinstance(day.bars, Mapping):
+                raise ValueError("INVALID_MARKS")
+            if not day.bars:
+                raise ValueError("MISSING_SESSION_MARK")
             marks = self._marks(day)
             # Missing held-position marks cannot be replaced by cost basis.
             held = {sym for sym, qty, _cost in self._book.snapshot().positions
@@ -174,7 +184,9 @@ class PaperSessionRunner:
             # Reject fractional-cent prices *before* venue/book mutations;
             # never allow the venue's loss observation and runner equity
             # report to disagree about the same asserted mark.
-            for price in marks.values():
+            for sym, price in marks.items():
+                if type(sym) is not str or not _SYMBOL.fullmatch(sym):
+                    raise ValueError("INVALID_MARKS")
                 if not isinstance(price, D) or not price.is_finite() or price <= 0:
                     raise ValueError("INVALID_MARKS")
                 try:
@@ -184,6 +196,24 @@ class PaperSessionRunner:
                             raise ValueError("INEXACT_PAPER_MARK")
                 except DecimalException as exc:
                     raise ValueError("INEXACT_PAPER_MARK") from exc
+            # Validate caller-provided signals before advance()/sync() can
+            # settle existing intents or change durable paper state. An
+            # explicit invalid stop must not silently become the default via
+            # "signal.stop_price or ...".
+            if not isinstance(day.signals, Mapping):
+                raise ValueError("INVALID_SESSION_SIGNAL")
+            for sym, signal in day.signals.items():
+                if (type(sym) is not str or not _SYMBOL.fullmatch(sym)
+                        or not isinstance(signal, SessionSignal)
+                        or type(signal.scanner_classification) is not str
+                        or type(signal.catalyst_status) is not str):
+                    raise ValueError("INVALID_SESSION_SIGNAL")
+                if signal.stop_price is not None and (
+                        type(signal.stop_price) is not D
+                        or not signal.stop_price.is_finite()
+                        or signal.stop_price <= 0
+                        or (sym in marks and signal.stop_price >= marks[sym])):
+                    raise ValueError("INVALID_SESSION_SIGNAL")
             self._last_day = day.day
             now = day.mark_time
             actions = [f"FILL:{e.broker_order_id}"

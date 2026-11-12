@@ -27,6 +27,43 @@ The final session report recomputes equity from the settled book and same-sessio
 
 Test regressions cover nonmutation of book, ledger and paper adapter on rejected cross-session or empty inputs, subsequent same-session reuse after failed preflight, a missing mark for an existing position, and post-fill fee equity reporting. These are synthetic tests, not an independent financial QA verdict.
 
+## Strict caller-signal preflight (stacked safety follow-up)
+
+Before any paper-venue advance, reconciliation, or order mutation, the
+runner validates the session signal mapping, each typed `SessionSignal`,
+and any explicitly provided stop price. An explicit zero, non-finite,
+wrong-typed, or non-protective stop is rejected as
+`INVALID_SESSION_SIGNAL`, rather than silently falling back to a default
+stop through a false-valued expression. This check occurs after executable
+mark validation and before the in-memory session is consumed. Synthetic
+negative tests verify no changes to the book, ledger or venue and permit a
+subsequent valid first attempt.
+
+A nonempty session batch is not sufficient evidence of a current price:
+a supplied day with an empty bars mapping previously produced a synthetic
+$100,000 final-equity report without an executable mark. The preflight now
+rejects such input as `MISSING_SESSION_MARK`, and rejects non-mapping
+bar containers as `INVALID_MARKS` before processing any orders. This
+is a **presence/structure check only**; it does not authenticate the marks
+or establish exchange trading-session hours. Regression tests verify that
+rejection leaves venue, ledger, book and in-memory session state unchanged,
+and that a corrected valid day remains usable.
+
+The same preflight now rejects malformed ticker identifiers in both the
+asserted mark mapping and signal mapping, and rejects non-string scanner and
+catalyst metadata. These are validated against the paper venue's bounded
+uppercase ticker contract before the runner consumes its in-memory session
+or advances an existing paper order. An invalid secondary signal must not
+permit another valid ticker's buy to proceed. Regression tests cover mixed
+valid/malformed inputs, unchanged book/ledger/venue, and successful retry.
+Unrecognized but well-typed classification strings remain non-eligible
+signals rather than authentication or eligibility proofs.
+
+This does not authenticate signal origins, timestamps, catalyst assertions,
+or quoted market prices, and does not repair restart/session-rollover
+persistence. This change is developed as a separate stacked draft PR on top
+of #43 so its previously approved exact head remains unchanged.
+
 ## Remaining release blockers
 
 A safe multi-day implementation must persist authoritative exchange-session identity and the verified opening portfolio mark for each session, reconcile cash and held/pending orders, handle fees and corporate actions, and make rollover crash-safe and idempotent. Re-entry at the same session on runner restart still requires a durable progress/checkpoint gate; the in-memory `_last_day` is not restart protection. Batch preflight is not a transaction or atomic portfolio replay within the accepted single session. Quote authenticity, stale marks, overnight gaps, session calendar, full reconciliation, restart recovery, and qualified independent financial review are not established by this containment fix.
