@@ -11,8 +11,14 @@ export const OFFLINE_CAPABILITIES = Object.freeze({
   live_orders_enabled: false
 });
 
-function exactDecimal(value) {
-  return typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value);
+function canonicalDecimal(value) {
+  // Exact comparison with the read-only policy: Number() would round an
+  // infinitesimally looser limit to the approved float and wrongly accept it.
+  if (typeof value !== "string" || value.length > 64 ||
+      !/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(value)) return null;
+  const [whole, fraction = ""] = value.split(".");
+  const significant = fraction.replace(/0+$/, "");
+  return significant ? whole + "." + significant : whole;
 }
 
 export function validateBackendStatus(policy, capabilities) {
@@ -28,8 +34,8 @@ export function validateBackendStatus(policy, capabilities) {
   }
   for (const key of ["starting_virtual_equity", "max_planned_trade_risk_fraction",
                      "max_instrument_allocation_fraction", "daily_loss_shutdown_fraction"]) {
-    if (!exactDecimal(policy[key]) ||
-        Number(policy[key]) !== Number(APPROVED_POLICY[key])) {
+    if (canonicalDecimal(policy[key]) === null ||
+        canonicalDecimal(policy[key]) !== canonicalDecimal(APPROVED_POLICY[key])) {
       throw new Error("UNEXPECTED_RISK_POLICY");
     }
   }
