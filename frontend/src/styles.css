@@ -50,3 +50,18 @@
 #main-content:focus{outline:none}
 /* Selected states are conveyed by aria-pressed; keep keyboard focus visible. */
 .timeframes button:focus-visible,.tabbar button:focus-visible,.watchrow:focus-visible,.clearbutton:focus-visible{outline:3px solid #87b6ff;outline-offset:2px}
+
+/* Responsive keyboard access: keep the verification status legible rather than
+   overflowing off a 320px viewport, and keep all research tabs reachable. */
+@media (max-width:560px) {
+  .topbar { height:auto; min-height:66px; flex-wrap:wrap; row-gap:8px; padding-block:10px }
+  .top-right { flex:1 1 100%; min-width:0; justify-content:flex-start }
+  .top-right [role="status"] { min-width:0; overflow-wrap:anywhere; line-height:1.35 }
+  .top-right .status-dot { flex:0 0 7px }
+  .top-right .avatar { margin-left:auto; flex-shrink:0 }
+  .tabbar { overflow-x:auto; white-space:nowrap; overscroll-behavior-inline:contain }
+  .tabbar button { flex:0 0 auto; min-height:44px }
+  .chart-header { flex-wrap:wrap; gap:12px }
+  .chart-footer { gap:8px }
+  .chart-footer>span:first-child { min-width:0; overflow-wrap:anywhere }
+}
