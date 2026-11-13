@@ -12,7 +12,7 @@ from decimal import Decimal as D, DecimalException, Inexact, localcontext
 import re
 import sqlite3
 
-from .risk import DAILY_LOSS_FRACTION
+from .risk import DAILY_LOSS_FRACTION, INITIAL_EQUITY
 
 _RECEIPT = re.compile(r"[a-f0-9]{64}\Z")
 _CENT = D("0.01")
@@ -98,6 +98,8 @@ class SessionEquityCheckpoint:
         _session(session_id)
         _amount(opening_equity, positive=True)
         _receipt(opening_receipt)
+        if opening_equity != INITIAL_EQUITY:
+            raise ValueError("INVALID_SESSION_STARTING_EQUITY")
         if proven_new_book is not True:
             raise ValueError("FRESH_BOOK_EVIDENCE_REQUIRED")
         with self._atomic():
