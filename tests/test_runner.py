@@ -244,6 +244,56 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(report.final_equity, D("99999"))
         self.assertFalse(report.halted)
 
+    def test_instrument_exposure_preserves_pending_reservation_cents(self):
+        # A low ambient Decimal precision must not erase small pending
+        # amounts when enforcing the per-instrument allocation limit.
+        from dataclasses import replace
+        snap = replace(self.book.snapshot(),
+                       positions=(("SPY", 1, D("40")),),
+                       pending=(("a", "SPY", 1, D("4990.04")),
+                                ("b", "SPY", 1, D("4990.04")),
+                                ("c", "QQQ", 1, D("10"))))
+        with localcontext() as ctx:
+            ctx.prec = 3
+            held, pending = self.runner._instrument_exposure(
+                snap, {"SPY": D("40.01")}, "SPY")
+        self.assertEqual(held, D("40.01"))
+        self.assertEqual(pending, D("9980.08"))
+        impossible = replace(snap, pending=(
+            ("a", "SPY", 1, D("1e80")),
+            ("b", "SPY", 1, D("1"))))
+        with self.assertRaisesRegex(ValueError,
+                                    "INEXACT_PAPER_INSTRUMENT_EXPOSURE"):
+            self.runner._instrument_exposure(
+                impossible, {"SPY": D("40.01")}, "SPY")
+
+    def test_appreciated_holdings_count_at_current_mark_not_purchase_cost(self):
+        # A $10k holding at $50 appreciates to $16k at an $80 mark.
+        # Original book cost is still $10k; no incremental BUY is allowed
+        # under the owner's 10% current-equity symbol exposure ceiling.
+        self.runner = PaperSessionRunner(
+            book=self.book, ledger=self.ledger, adapter=self.venue,
+            take_profit_pct=D("100"))
+        first = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        self.assertIn("ENTRY:SPY:ACKED", first.days[0].actions)
+        self.assertEqual(self.book.snapshot().positions,
+                         (("SPY", 200, D("10000")),))
+        # Restart within SAME simulated session: multi-day rollover remains
+        # unsupported until separately accepted under issue #42.
+        self.runner = PaperSessionRunner(
+            book=self.book, ledger=self.ledger, adapter=self.venue,
+            take_profit_pct=D("100"))
+        updated_day = SessionDay(
+            "2026-11-02", datetime(2026, 11, 2, 21, 30, tzinfo=timezone.utc),
+            {"SPY": bar(2, "80", "80", "80", "80")}, {"SPY": WATCH})
+        second = self.runner.run((updated_day,))
+        self.assertTrue(any(a.startswith("ENTRY_SKIP:SPY:")
+                            for a in second.days[0].actions), second.days[0].actions)
+        self.assertFalse(any(a.startswith("ENTRY:SPY:")
+                             for a in second.days[0].actions), second.days[0].actions)
+        self.assertEqual(self.book.snapshot().positions[0][1], 200)
+        self.assertEqual(second.final_equity, D("106000"))
+
     def test_missing_held_symbol_mark_is_never_treated_as_break_even(self):
         self.runner.run((day(2, "50", {"SPY": WATCH}),))
         previous = self.book.snapshot()

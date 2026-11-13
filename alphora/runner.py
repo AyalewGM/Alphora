@@ -132,6 +132,26 @@ class PaperSessionRunner:
         return PaperAccount(equity, INITIAL_EQUITY, snap.cash,
                             day_pnl, snap.session_id)
 
+    @staticmethod
+    def _instrument_exposure(snap, marks, symbol):
+        """Current marked holdings plus reserved exposure, exactly summed.
+
+        The book stores purchase cost, not market exposure; using cost for
+        a new BUY decision could breach the approved 10% instrument cap.
+        """
+        try:
+            with localcontext() as ctx:
+                ctx.prec = 50
+                ctx.traps[Inexact] = True
+                held = sum((D(qty) * marks[symbol]
+                            for s, qty, _cost in snap.positions
+                            if s == symbol), D(0))
+                pending = sum((value for _id, s, _qty, value in snap.pending
+                               if s == symbol), D(0))
+        except (DecimalException, KeyError) as exc:
+            raise ValueError("INEXACT_PAPER_INSTRUMENT_EXPOSURE") from exc
+        return held, pending
+
     def _stop_of(self, symbol):
         for order in sorted(self._ledger.orders(),
                             key=lambda o: o.created_at, reverse=True):
@@ -302,9 +322,9 @@ class PaperSessionRunner:
                 if snap.halted:
                     actions.append(f"ENTRY_VETO:{sym}:PAPER_BOOK_HALTED")
                     break
-                held = next((c for s, _q, c in snap.positions if s == sym), D(0))
-                pending = sum((v for i, s, _q, v in snap.pending if s == sym),
-                              D(0))
+                # Existing holdings use today's verified market mark, not
+                # historical purchase cost. Reserved orders count as well.
+                held, pending = self._instrument_exposure(snap, marks, sym)
                 stop = executable_stops.get(sym, D(0))
                 plan = propose_entry(
                     account,
