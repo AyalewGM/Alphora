@@ -222,7 +222,7 @@ class RunnerTests(unittest.TestCase):
             mgr.execute_entry = real_entry
         actions = report.days[0].actions
         self.assertIn("ENTRY:QQQ:ACKED", actions)
-        self.assertTrue(any(a.startswith("ENTRY_VETO:SPY:FATAL_RECONCILIATION")
+        self.assertTrue(any(a.startswith("ENTRY_VETO:SPY:STALE_OR_UNCLEAN")
                             for a in actions), actions)
         self.assertEqual(len(called), 1)
         self.assertEqual({o.symbol for o in self.ledger.orders()}, {"QQQ"})
