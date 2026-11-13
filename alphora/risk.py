@@ -27,7 +27,10 @@ def _bounded_policy_fraction(value: Decimal, ceiling: Decimal) -> bool:
             or parts.exponent > 64):
         return False
     # Tuple bounds ensure formatting costs at most 129 characters.
-    return len(format(value, "f")) <= 64
+    # Canonicalize only trailing fractional zeros, matching PaperRiskConfig.
+    literal = format(value, "f")
+    canonical = literal.rstrip("0").rstrip(".") if "." in literal else literal
+    return len(canonical) <= 64
 
 
 # Operator-configurable PAPER limits may only tighten the owner's hard caps.
