@@ -173,10 +173,28 @@ function App() {
             <div><dt>Reconciliation</dt><dd>NOT VERIFIED</dd></div>
             <div><dt>Effective policy revision</dt><dd>NOT AVAILABLE</dd></div>
           </dl>
-          <div className="monitor-journal" aria-label="Decision journal">
-            <h3>Paper decision journal</h3>
-            <p>No authenticated decision records or journal endpoint connected. Nothing in this view is an order, fill or recommendation.</p>
-          </div>
+          <section className="monitor-records" aria-labelledby="monitor-positions-title">
+            <h3 id="monitor-positions-title">Positions and pending exposure</h3>
+            <p>Read-only account holdings and working reservations require a verified ledger and independent marks.</p>
+            <div className="monitor-table-scroll" role="region" aria-label="Positions and pending exposure table, horizontally scrollable" tabIndex="0">
+              <table>
+                <caption>Unavailable paper positions and pending-order reservations</caption>
+                <thead><tr><th scope="col">Instrument</th><th scope="col">Shares</th><th scope="col">Verified mark</th><th scope="col">Pending exposure</th><th scope="col">Reconciliation</th></tr></thead>
+                <tbody><tr><td className="monitor-empty-row" colSpan="5"><strong>UNAVAILABLE — NOT ZERO POSITIONS.</strong> No authenticated portfolio snapshot, mark provenance or pending-order ledger is connected.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+          <section className="monitor-records monitor-journal" aria-labelledby="monitor-journal-title">
+            <h3 id="monitor-journal-title">Paper decision journal</h3>
+            <p>Read-only decision and fill evidence needs server-attested intent IDs, session identity, reconciliation verdicts and durable event receipts.</p>
+            <div className="monitor-table-scroll" role="region" aria-label="Decision journal table, horizontally scrollable" tabIndex="0">
+              <table>
+                <caption>Unavailable authenticated paper decision journal</caption>
+                <thead><tr><th scope="col">Event time</th><th scope="col">Intent / revision</th><th scope="col">Decision</th><th scope="col">Risk &amp; reconciliation</th><th scope="col">Outcome / receipt</th></tr></thead>
+                <tbody><tr><td className="monitor-empty-row" colSpan="5"><strong>NOT VERIFIED — NOT AN EMPTY JOURNAL.</strong> No authenticated event stream or cursor is connected. This does not prove no orders or fills occurred.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
         </section>
         <section className="panel risk-draft-panel" aria-labelledby="risk-draft-title">
           <div>
