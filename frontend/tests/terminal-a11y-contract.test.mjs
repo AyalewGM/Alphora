@@ -70,3 +70,10 @@ test("validated settings expose only an accessible, un-applied comparison, not e
   assert.match(css, /\.draft-review-wrap:focus-visible\{outline:3px/);
   assert.doesNotMatch(jsx, /fetch\(.*(?:orders|settings\/apply|broker)/);
 });
+
+test("local draft reset cannot be confused with portfolio reset; controls retain touch targets", () => {
+  assert.match(jsx, /<button type="button" onClick=\{resetRiskDraft\}>Reset local draft inputs only<\/button>/);
+  assert.doesNotMatch(jsx, /<button[^>]*>Reset defaults<\/button>/);
+  assert.match(css, /\.risk-draft-panel input,\.risk-draft-panel select\{[^}]*min-height:44px\}/);
+  assert.match(css, /\.draft-actions button\{[^}]*min-height:44px/);
+});
