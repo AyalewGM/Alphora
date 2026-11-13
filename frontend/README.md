@@ -31,6 +31,8 @@ The **Draft paper-risk settings** form now previews the full six-key `paper-risk
 - **Portfolio monitor:** cash, equity, positions, P&L, emergency halt, reconciliation, effective policy revision, and decision journal explicitly display **UNAVAILABLE / UNKNOWN / NOT VERIFIED** until a separate independently reviewed backend contract is available. Initial virtual equity in the policy header is not the cash or equity balance.
 - The [proposed contract](docs/paper-monitor-contract.md) documents required authoritative read-only account/journal state and backend responsibilities. It is not an available endpoint or execution feature.
 - Validation failures identify the invalid field, focus it for keyboard correction, and announce actionable guidance. Percent entries accept up to four decimal places (a conservative UI subset of the backend wire domain).
+- Keyboard access: a visible-on-focus **Skip to main content** link avoids decorative shell navigation; selected research tabs and demo watchlist rows expose `aria-pressed`, with visible focus styles. Decorative rail glyphs are hidden from assistive technology. Static checks in `terminal-a11y-contract.test.mjs` guard this markup but **do not replace manual keyboard, mobile or screen-reader verification**.
+- A successful `GET /v1/risk/policy` + `GET /v1/system/capabilities` check is labeled **reference GET verified, portfolio unverified**. It is never evidence of effective account policy, balances, journal or emergency-halt status.
 - Run `npm test` and `npm run build` locally. Verify keyboard navigation, narrow viewports, and no activation or broker/network paths. Independent review remains required.
 
 ## Local historical daily-chart preview
