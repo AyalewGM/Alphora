@@ -33,6 +33,12 @@ The draft form renders the six-key, exact-decimal string `paper-risk-proposal-v1
 
 Any future settings-write functionality requires independently reviewed authenticated optimistic revision checks, auditable operator action, explicit confirm, atomic effective-session activation, persistence and rollback protection; a draft `to_wire()` or receipt is **not** an effective policy revision.
 
+## Unsaved draft comparison (frontend only)
+
+The locally validated risk proposal now has a five-row read-only comparison of **approved defaults/hard ceilings** versus the **unapplied proposed values** (new-portfolio starting equity, per-trade risk, instrument allocation, daily-loss limit and rebalancing cadence). It uses exact decimal-string/BigInt arithmetic rather than JavaScript floating point for limit and percentage comparisons. A proposal can only be **at** or **tighter than** the owner-approved percentage ceilings; larger values fail validation before a comparison is rendered.
+
+The table is keyboard-accessible and horizontally scrollable at mobile widths. Its references are not effective account risk settings: no signed policy revision, attested session state, authoritative ledger, order journal, or actual scheduler is connected. Changing the form clears the prior preview. Successful local validation cannot apply settings, clear a halt, reset a ledger or bypass reconciliation.
+
 ## Backend and review handoff
 
 Before wiring the frontend to additional backend reads, Backend/Risk must finalize #42 multi-session opening-equity and restart-safe halt, immutable session/reconciliation provenance, read-only auth scheme and stable schema. Independent Financial QA verifies precision/ledger invariants, stale marks, crash/restart, source authenticity and negative tests. Independent Security verifies principal/scoping, replay/caching and mutation boundary. Frontend reviews keyboard/mobile/readability and all missing/partial snapshot scenarios.
