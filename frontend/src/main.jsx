@@ -150,9 +150,14 @@ function App() {
         <section className="panel risk-draft-panel" aria-labelledby="risk-draft-title">
           <div>
             <h2 id="risk-draft-title">Draft paper-risk settings</h2>
-            <p>Preview limits for a future unattended local simulator. These values are <strong>not active</strong>, not saved, and never sent to the backend. Active displayed policy remains unchanged.</p>
+            <p>Prepare a <strong>local, unsaved proposal only</strong> for a future paper simulator. Validation never applies settings or changes the existing account. Multi-session execution remains blocked pending issue #42.</p>
           </div>
           <form onSubmit={previewRiskDraft} noValidate>
+            <label>Starting capital for a new simulated portfolio (USD)
+              <input aria-label="Draft new portfolio starting equity USD" inputMode="decimal" type="text"
+                value={riskDraft.startingEquityUsd} onChange={event => changeRiskDraft("startingEquityUsd", event.target.value)}
+                aria-describedby="draft-limit-note" />
+            </label>
             <label>Planned risk per trade (%)
               <input aria-label="Draft planned risk per trade percent" inputMode="decimal" type="text"
                 value={riskDraft.perTradePct} onChange={event => changeRiskDraft("perTradePct", event.target.value)}
@@ -163,16 +168,29 @@ function App() {
                 value={riskDraft.allocationPct} onChange={event => changeRiskDraft("allocationPct", event.target.value)}
                 aria-describedby="draft-limit-note" />
             </label>
+            <label>Daily-loss shutdown (%)
+              <input aria-label="Draft daily loss shutdown percent" inputMode="decimal" type="text"
+                value={riskDraft.dailyLossPct} onChange={event => changeRiskDraft("dailyLossPct", event.target.value)}
+                aria-describedby="draft-limit-note" />
+            </label>
+            <label>Rebalancing cadence
+              <select aria-label="Draft rebalancing cadence" value={riskDraft.rebalanceFrequency}
+                onChange={event => changeRiskDraft("rebalanceFrequency", event.target.value)} aria-describedby="draft-limit-note">
+                <option value="daily">Daily (default)</option>
+                <option value="weekly">Weekly (proposal only)</option>
+                <option value="manual">Manual (proposal only)</option>
+              </select>
+            </label>
             <div className="draft-actions">
               <button type="submit">Validate preview</button>
               <button type="button" onClick={resetRiskDraft}>Reset defaults</button>
             </div>
           </form>
-          <p id="draft-limit-note">Validated ranges: planned trade risk greater than 0% and at most 2%; allocation greater than 0% and at most 100%. The 2% daily-loss shutdown remains fixed. These are technical bounds, not recommended settings.</p>
+          <p id="draft-limit-note">Hard ceilings: trade risk &gt; 0% and ≤ 0.5%, allocation &gt; 0% and ≤ 10%, daily-loss limit &gt; 0% and ≤ 2%. Starting capital must be positive dollars with at most two decimals and applies only to a <strong>future new portfolio</strong>. Rebalancing frequency is proposal metadata until backend review. No configuration can clear a halt.</p>
           {riskDraftError && <p className="draft-error" role="alert">{riskDraftError}</p>}
           {riskPreview && <div className="draft-result" role="status">
             <strong>Validated preview — NOT APPLIED</strong>
-            <p>Risk fraction: {riskPreview.max_planned_trade_risk_fraction}; allocation fraction: {riskPreview.max_instrument_allocation_fraction}. No settings have been persisted or activated.</p>
+            <p>New-portfolio equity: USD {riskPreview.starting_equity_usd}; planned risk fraction: {riskPreview.risk_per_trade_fraction}; allocation fraction: {riskPreview.max_instrument_fraction}; daily-loss fraction: {riskPreview.daily_loss_fraction}; rebalance: {riskPreview.rebalance_frequency}. Schema: {riskPreview.schema}. <strong>No settings have been saved, sent, or activated.</strong></p>
           </div>}
         </section>
         <section className="panel chart-panel">
