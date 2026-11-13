@@ -52,6 +52,11 @@ class TestRisk(unittest.TestCase):
                 tiny = RiskPolicy(D("1e-62"), D("0.10"))
                 self.assertEqual(tiny.fingerprint(), expected)
                 self.assertEqual(RiskPolicy().fingerprint(), "0.005|0.1")
+                # Trailing zeros may make the raw fixed-point text longer
+                # than 64 chars even while its exact canonical ID is short.
+                padded = RiskPolicy(D("0.005" + "0" * 60),
+                                    D("0.1" + "0" * 62))
+                self.assertEqual(padded.fingerprint(), "0.005|0.1")
 
     def test_paper_policy_never_loosens_approved_hard_limits(self):
         # Caller-provided policies can tighten but never exceed the
