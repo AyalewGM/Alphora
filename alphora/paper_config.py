@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
+import re
 
 from .risk import (
     INITIAL_EQUITY, RISK_FRACTION, MAX_INSTRUMENT_FRACTION,
@@ -16,6 +17,11 @@ from .risk import (
 
 _ALLOWED_CADENCES = frozenset(("daily", "weekly", "manual"))
 _CENT = Decimal("0.01")
+_SCHEMA = "paper-risk-proposal-v1"
+_DECIMAL_TEXT = re.compile(r"(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?\\Z")
+_DECIMAL_FIELDS = ("starting_equity_usd", "risk_per_trade_fraction",
+                   "max_instrument_fraction", "daily_loss_fraction")
+_WIRE_KEYS = frozenset(("schema", "rebalance_frequency", *_DECIMAL_FIELDS))
 
 
 def _canonical(value: Decimal) -> str:
@@ -71,16 +77,46 @@ class PaperRiskConfig:
         return RiskPolicy(self.risk_per_trade_fraction,
                           self.max_instrument_fraction)
 
-    def receipt(self) -> str:
-        """Stable proposal receipt, not proof of application or authorization."""
-        payload = {
-            "schema": "paper-risk-proposal-v1",
+    def to_wire(self) -> dict[str, str]:
+        """Strict versioned proposal payload; all amounts are decimal *strings*.
+
+        This is a data-transfer representation, never an active risk policy.
+        """
+        return {
+            "schema": _SCHEMA,
             "starting_equity_usd": _canonical(self.starting_equity_usd),
             "risk_per_trade_fraction": _canonical(self.risk_per_trade_fraction),
             "max_instrument_fraction": _canonical(self.max_instrument_fraction),
             "daily_loss_fraction": _canonical(self.daily_loss_fraction),
             "rebalance_frequency": self.rebalance_frequency,
         }
-        packed = json.dumps(payload, sort_keys=True, separators=(",", ":"),
+
+    @classmethod
+    def from_wire(cls, payload: dict[str, str]) -> "PaperRiskConfig":
+        """Fail closed on malformed, partial, unknown or imprecise JSON input.
+
+        Float/number coercion is intentionally prohibited: the UI/API must
+        send strings, preserving exact Decimal bounds and fingerprints.
+        """
+        if (type(payload) is not dict or payload.keys() != _WIRE_KEYS
+                or payload.get("schema") != _SCHEMA
+                or type(payload.get("rebalance_frequency")) is not str):
+            raise ValueError("INVALID_PAPER_RISK_CONFIG")
+        for name in _DECIMAL_FIELDS:
+            value = payload[name]
+            if (type(value) is not str or len(value) > 64
+                    or not _DECIMAL_TEXT.fullmatch(value)):
+                raise ValueError("INVALID_PAPER_RISK_CONFIG")
+        return cls(
+            starting_equity_usd=Decimal(payload["starting_equity_usd"]),
+            risk_per_trade_fraction=Decimal(payload["risk_per_trade_fraction"]),
+            max_instrument_fraction=Decimal(payload["max_instrument_fraction"]),
+            daily_loss_fraction=Decimal(payload["daily_loss_fraction"]),
+            rebalance_frequency=payload["rebalance_frequency"],
+        )
+
+    def receipt(self) -> str:
+        """Stable proposal receipt, not proof of application or authorization."""
+        packed = json.dumps(self.to_wire(), sort_keys=True, separators=(",", ":"),
                             ensure_ascii=True)
         return hashlib.sha256(packed.encode("ascii")).hexdigest()
