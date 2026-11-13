@@ -233,7 +233,7 @@ function App() {
             </label>
             <div className="draft-actions">
               <button type="submit">Validate preview</button>
-              <button type="button" onClick={resetRiskDraft}>Reset defaults</button>
+              <button type="button" onClick={resetRiskDraft}>Reset local draft inputs only</button>
             </div>
           </form>
           <p id="draft-limit-note">Hard ceilings: trade risk &gt; 0% and ≤ 0.5%, allocation &gt; 0% and ≤ 10%, daily-loss limit &gt; 0% and ≤ 2%. Starting capital must be positive dollars with at most two decimals and applies only to a <strong>future new portfolio</strong>. Percentages accept up to four decimal places. Rebalancing frequency is proposal metadata until backend review. No configuration can clear a halt.</p>
