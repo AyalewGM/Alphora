@@ -1,0 +1,156 @@
+"""Synthetic P0 contract tests, not approval of live or unattended runner."""
+import sqlite3
+import tempfile
+import unittest
+from decimal import Decimal as D, localcontext
+from pathlib import Path
+
+from alphora.session_equity import SessionEquityCheckpoint
+
+A = "a" * 64
+B = "b" * 64
+C = "c" * 64
+
+
+class SessionEquityCheckpointTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.file = str(Path(self.tmp.name) / "checkpoint.sqlite")
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=FULL")
+        self.store = SessionEquityCheckpoint(self.conn)
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def initial(self, equity="100000"):
+        return self.store.bootstrap("2026-11-02", D(equity), A, proven_new_book=True)
+
+    def mark(self, equity, receipt=B):
+        return self.store.observe(session_id=self.store.snapshot().session_id,
+                                  equity=D(equity), receipt=receipt,
+                                  expected_revision=self.store.snapshot().revision,
+                                  reconciled=True, marks_verified=True)
+
+    def rollover(self, opening, receipt=C):
+        old = self.store.snapshot()
+        return self.store.rollover(previous_session=old.session_id,
+                                   next_session="2026-11-03",
+                                   opening_equity=D(opening), opening_receipt=receipt,
+                                   expected_revision=old.revision,
+                                   reconciled=True, zero_pending=True,
+                                   verified_calendar=True)
+
+    def test_pristine_only_and_deleted_row_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "FRESH_BOOK_EVIDENCE_REQUIRED"):
+            self.store.bootstrap("2026-11-02", D("100000"), A)
+        self.initial()
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_EXISTS"):
+            self.initial()
+        self.conn.execute("DELETE FROM session_equity_checkpoint")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_EXISTS"):
+            self.initial()
+
+    def test_exact_105k_and_95k_boundaries_with_cents(self):
+        for opening, above, floor, down in (("105000", "102900.01", "102900.00", "102000.00"),
+                                            ("95000", "93100.01", "93100.00", "93099.99")):
+            with self.subTest(opening=opening):
+                self.conn.close()
+                self.conn = sqlite3.connect(":memory:", isolation_level=None)
+                self.store = SessionEquityCheckpoint(self.conn)
+                self.initial(opening)
+                with localcontext() as ctx:
+                    ctx.prec = 3
+                    self.assertFalse(self.mark(above).halted)
+                    self.assertTrue(self.mark(floor, C).halted)
+                    self.assertTrue(self.mark(down, "d" * 64).halted)
+                    self.assertTrue(self.mark(opening, "e" * 64).halted)
+
+    def test_fee_inclusive_observation_and_persistent_restart(self):
+        self.initial("105000")
+        self.assertFalse(self.mark("102900.01").halted)
+        # $0.02 additional simulated fees bring marked equity below the floor.
+        self.assertTrue(self.mark("102899.99", C).halted)
+        self.conn.close()
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.store = SessionEquityCheckpoint(self.conn)
+        self.assertTrue(self.store.snapshot().halted)
+        with self.assertRaisesRegex(ValueError, "PERSISTED_SAFETY_HALT"):
+            self.rollover("102899.99")
+
+    def test_rollover_requires_final_verified_mark_and_no_pending(self):
+        self.initial()
+        with self.assertRaisesRegex(ValueError, "ROLLOVER_NOT_VERIFIED"):
+            self.rollover("100000")
+        self.mark("105000")
+        old = self.store.snapshot()
+        for kwargs in ({"zero_pending": False}, {"reconciled": False},
+                       {"verified_calendar": False}):
+            with self.subTest(kwargs=kwargs):
+                params = dict(previous_session=old.session_id,
+                              next_session="2026-11-03", opening_equity=D("105000"),
+                              opening_receipt=C, expected_revision=old.revision,
+                              reconciled=True, zero_pending=True, verified_calendar=True)
+                params.update(kwargs)
+                with self.assertRaisesRegex(ValueError, "ROLLOVER_NOT_VERIFIED"):
+                    self.store.rollover(**params)
+        with self.assertRaisesRegex(ValueError, "OPENING_EQUITY_MISMATCH"):
+            self.rollover("104999.99")
+        next_state = self.rollover("105000")
+        self.assertEqual(next_state.opening_equity, D("105000"))
+        self.assertEqual(next_state.revision, old.revision + 1)
+        self.assertEqual(next_state.observations, 0)
+        self.assertEqual(self.rollover("105000"), next_state)  # duplicate exact idempotent
+        with self.assertRaisesRegex(ValueError, "CONFLICTING_SESSION_REPLAY"):
+            self.rollover("105000", "d" * 64)
+        self.assertTrue(self.mark("102000").halted)
+
+    def test_stale_revision_replay_and_bad_provenance_fail_closed(self):
+        self.initial()
+        old = self.store.snapshot()
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_SESSION_MARK"):
+            self.store.observe(session_id=old.session_id, equity=D("95000"),
+                               receipt=B, expected_revision=old.revision, reconciled=False,
+                               marks_verified=True)
+        self.assertEqual(self.store.snapshot(), old)
+        after = self.mark("99000")
+        self.assertEqual(self.mark("99000"), after)
+        with self.assertRaisesRegex(ValueError, "CONFLICTING_SESSION_MARK_REPLAY"):
+            self.mark("99000.01")
+        with self.assertRaisesRegex(ValueError, "STALE_SESSION_REVISION"):
+            self.store.observe(session_id=old.session_id, equity=D("98000"),
+                               receipt=C, expected_revision=old.revision,
+                               reconciled=True, marks_verified=True)
+        self.assertEqual(self.store.snapshot(), after)
+
+    def test_corruption_and_same_transaction_atomic_rollback(self):
+        self.initial()
+        before = self.store.snapshot()
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.store.observe(session_id=before.session_id, equity=D("98000"),
+                           receipt=B, expected_revision=before.revision,
+                           reconciled=True, marks_verified=True)
+        self.assertTrue(self.store.snapshot().halted)
+        self.conn.execute("ROLLBACK")  # same DB transaction as eventual OMS book
+        self.assertEqual(self.store.snapshot(), before)
+        self.conn.execute("UPDATE session_equity_checkpoint SET opening_equity='nan'")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+
+    def test_strict_decimal_and_session_id_input(self):
+        for value in (D("1.001"), D("NaN"), -D("1"), 100000):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "INVALID_SESSION_EQUITY"):
+                    self.store.bootstrap("2026-11-02", value, A, proven_new_book=True)
+        for sid in ("2026-11-31", "2026-11-2", "2026-11-03T00:00:00Z"):
+            with self.subTest(sid=sid):
+                with self.assertRaisesRegex(ValueError, "INVALID_EXCHANGE_SESSION"):
+                    self.store.bootstrap(sid, D("100000"), A, proven_new_book=True)
+
+
+if __name__ == "__main__":
+    unittest.main()
