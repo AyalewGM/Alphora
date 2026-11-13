@@ -5,6 +5,7 @@ market marks, or authorize unattended paper execution or broker connectivity.
 """
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal as D
 from pathlib import Path
@@ -117,11 +118,27 @@ class RestartContainmentTests(unittest.TestCase):
             any(a.startswith(("ENTRY:", "EXIT:")) for a in replay.days[0].actions),
             replay.days[0].actions,
         )
-        self.assertEqual((self.book.snapshot(), self.ledger.orders()), persisted)
+        before_book, before_orders = persisted
+        after_book = self.book.snapshot()
+        # A FATAL reconciliation may durably arm the one-way safety halt,
+        # as proposed in #58. That is the ONLY permitted book mutation:
+        # the replay must not change cash, positions, reserved funds, pending
+        # intents, or the ledger to hide the lost venue state.
+        self.assertEqual(
+            replace(after_book, halted=before_book.halted), before_book,
+        )
+        self.assertEqual(self.ledger.orders(), before_orders)
+        self.assertEqual(replay.halted, after_book.halted)
         self.assertEqual(self.venue.positions(), ())
         self.assertEqual(self.venue.open_orders(), ())
-        # A FATAL report does not establish restart-safe replay, durable
-        # recovery or a persistent reconciliation halt. #42/#58 remain open.
+        # In either implementation, verify the halt state was not merely
+        # an in-memory flag that disappears on SQLite reopening.
+        self._restart()
+        self.assertEqual(self.book.snapshot().halted, after_book.halted)
+        self.assertEqual(self.ledger.orders(), before_orders)
+        # A separate integrated #58/#69 exact-head regression must REQUIRE
+        # FATAL -> halted=True; this standalone #69 test also runs on main,
+        # where that fix is not yet merged. No safe session rollover exists.
 
     def test_one_way_manual_halt_survives_reopening_sqlite(self):
         self.runner.run((asserted_day(2, enter=True),))
