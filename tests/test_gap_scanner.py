@@ -39,6 +39,26 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(result.rvol, D("3"))
         self.assertLess(result.spread_pct, D("1"))
 
+    def test_default_price_floor_is_ten_dollars_without_implicit_trade_approval(self):
+        # A strong gap, liquidity, verified catalyst and tight spread must
+        # not turn a $9.99 candidate into the default WATCHLIST.
+        self.assertEqual(ScannerPolicy().min_price, D("10"))
+        below = fixture(previous_close=D("9.50"), reference_price=D("9.99"),
+                        bid=D("9.98"), ask=D("10.00"))
+        result = screen_one(below)
+        self.assertEqual(result.classification, "EXCLUDED")
+        self.assertIn("PRICE_BELOW_MINIMUM", result.reasons)
+        self.assertGreaterEqual(result.gap_pct, D("3"))
+        self.assertNotIn("GAP_BELOW_MINIMUM", result.reasons)
+        # Exactly at the default floor remains eligible for a *research*
+        # watchlist, not for automated trading or real-world orders.
+        at_floor = fixture(previous_close=D("9.50"),
+                           reference_price=D("10.00"),
+                           bid=D("9.99"), ask=D("10.01"))
+        eligible = screen_one(at_floor)
+        self.assertEqual(eligible.classification, "WATCHLIST")
+        self.assertNotIn("PRICE_BELOW_MINIMUM", eligible.reasons)
+
     def test_promotional_stock_excluded_even_with_good_volume(self):
         result = screen_one(fixture(promotion_signal=True,
                                     premarket_volume=1_200_000, reference_price=D("11.8")))

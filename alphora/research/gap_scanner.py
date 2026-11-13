@@ -15,7 +15,9 @@ _SYMBOL = re.compile(r"^[A-Z][A-Z0-9.-]{0,9}$")
 
 @dataclass(frozen=True)
 class ScannerPolicy:
-    min_price: D = D("5")
+    # Conservative default excludes lower-priced names from WATCHLIST.
+    # Research-only; this is not a broker/order eligibility certificate.
+    min_price: D = D("10")
     min_gap_pct: D = D("3")
     min_adv20: int = 1_000_000
     min_avg_daily_dollar_volume: D = D("20000000")
