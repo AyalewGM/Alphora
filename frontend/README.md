@@ -22,6 +22,16 @@ Run `npm test` to execute dependency-free Node contract tests. The terminal mark
 Before enabling operational portfolio displays: implement separately reviewed, authenticated, timestamp-validated read-only API contracts for point-in-time bars, symbols, signed equity snapshots, watchlists, decisions, and journals. Replace demo bars completely; add source/as-of/warmup/staleness indicators, authorization and accessibility tests. The frontend must never compute or override authoritative risk controls.
 
 
+## Draft-only configurable paper limits (issue #65)
+
+The **Draft paper-risk settings** form now previews the full six-key `paper-risk-proposal-v1` structure from backend draft PR #66. Fields are **new-portfolio starting virtual equity**, planned risk per trade, instrument allocation ceiling, daily-loss halt threshold, and rebalancing cadence. Existing approved policy defaults remain USD 100,000 / 0.5% / 10% / 2% / daily.
+
+- Every proposed risk limit can only **tighten** the owner's current hard ceilings: trade risk at most 0.5%, per-instrument allocation at most 10%, daily loss at most 2%. Percentages and USD cents use BigInt/decimal-string validation; malformed, oversized, missing, unknown, non-finite and float representations fail closed. No JavaScript floating-point comparisons are used for policy authority.
+- The UI **never** sends, saves, applies, executes or persists these proposed values. Nothing in the UI can change an existing paper portfolio balance, activate a policy or release a halt. Weekly/manual scheduling is not yet wired.
+- **Portfolio monitor:** cash, equity, positions, P&L, emergency halt, reconciliation, effective policy revision, and decision journal explicitly display **UNAVAILABLE / UNKNOWN / NOT VERIFIED** until a separate independently reviewed backend contract is available. Initial virtual equity in the policy header is not the cash or equity balance.
+- The [proposed contract](docs/paper-monitor-contract.md) documents required authoritative read-only account/journal state and backend responsibilities. It is not an available endpoint or execution feature.
+- Run `npm test` and `npm run build` locally. Verify keyboard navigation, narrow viewports, and no activation or broker/network paths. Independent review remains required.
+
 ## Local historical daily-chart preview
 
 Use **Import JSON** to select a small user-supplied, offline daily-bar snapshot. This is a client-side preview only; the file is not uploaded. The historical view is identified as **USER-SUPPLIED** and **NOT AUTHENTICATED**, unlike the synthetic demo watchlist. A declared SHA-256 receipt is shown only as metadata: the frontend does **not** independently recompute, verify or authenticate it. Never regard this as trading-grade or independently vendor-verified history.
