@@ -186,26 +186,26 @@ function App() {
             <label>Starting capital for a new simulated portfolio (USD)
               <input aria-label="Draft new portfolio starting equity USD" inputMode="decimal" type="text"
                 name="startingEquityUsd" aria-invalid={riskDraftInvalidField === "startingEquityUsd"} value={riskDraft.startingEquityUsd} onChange={event => changeRiskDraft("startingEquityUsd", event.target.value)}
-                aria-describedby="draft-limit-note" />
+                aria-describedby={riskDraftInvalidField === "startingEquityUsd" ? "draft-limit-note draft-error" : "draft-limit-note"} />
             </label>
             <label>Planned risk per trade (%)
               <input aria-label="Draft planned risk per trade percent" inputMode="decimal" type="text"
                 name="perTradePct" aria-invalid={riskDraftInvalidField === "perTradePct"} value={riskDraft.perTradePct} onChange={event => changeRiskDraft("perTradePct", event.target.value)}
-                aria-describedby="draft-limit-note" />
+                aria-describedby={riskDraftInvalidField === "perTradePct" ? "draft-limit-note draft-error" : "draft-limit-note"} />
             </label>
             <label>Maximum per-instrument allocation (%)
               <input aria-label="Draft maximum instrument allocation percent" inputMode="decimal" type="text"
                 name="allocationPct" aria-invalid={riskDraftInvalidField === "allocationPct"} value={riskDraft.allocationPct} onChange={event => changeRiskDraft("allocationPct", event.target.value)}
-                aria-describedby="draft-limit-note" />
+                aria-describedby={riskDraftInvalidField === "allocationPct" ? "draft-limit-note draft-error" : "draft-limit-note"} />
             </label>
             <label>Daily-loss shutdown (%)
               <input aria-label="Draft daily loss shutdown percent" inputMode="decimal" type="text"
                 name="dailyLossPct" aria-invalid={riskDraftInvalidField === "dailyLossPct"} value={riskDraft.dailyLossPct} onChange={event => changeRiskDraft("dailyLossPct", event.target.value)}
-                aria-describedby="draft-limit-note" />
+                aria-describedby={riskDraftInvalidField === "dailyLossPct" ? "draft-limit-note draft-error" : "draft-limit-note"} />
             </label>
             <label>Rebalancing cadence
               <select aria-label="Draft rebalancing cadence" name="rebalanceFrequency" aria-invalid={riskDraftInvalidField === "rebalanceFrequency"} value={riskDraft.rebalanceFrequency}
-                onChange={event => changeRiskDraft("rebalanceFrequency", event.target.value)} aria-describedby="draft-limit-note">
+                onChange={event => changeRiskDraft("rebalanceFrequency", event.target.value)} aria-describedby={riskDraftInvalidField === "rebalanceFrequency" ? "draft-limit-note draft-error" : "draft-limit-note"}>
                 <option value="daily">Daily (default)</option>
                 <option value="weekly">Weekly (proposal only)</option>
                 <option value="manual">Manual (proposal only)</option>
@@ -216,7 +216,7 @@ function App() {
               <button type="button" onClick={resetRiskDraft}>Reset defaults</button>
             </div>
           </form>
-          <p id="draft-limit-note">Hard ceilings: trade risk &gt; 0% and ≤ 0.5%, allocation &gt; 0% and ≤ 10%, daily-loss limit &gt; 0% and ≤ 2%. Starting capital must be positive dollars with at most two decimals; percentages use up to four decimals and applies only to a <strong>future new portfolio</strong>. Rebalancing frequency is proposal metadata until backend review. No configuration can clear a halt.</p>
+          <p id="draft-limit-note">Hard ceilings: trade risk &gt; 0% and ≤ 0.5%, allocation &gt; 0% and ≤ 10%, daily-loss limit &gt; 0% and ≤ 2%. Starting capital must be positive dollars with at most two decimals and applies only to a <strong>future new portfolio</strong>. Percentages accept up to four decimal places. Rebalancing frequency is proposal metadata until backend review. No configuration can clear a halt.</p>
           {riskDraftError && <p id="draft-error" className="draft-error" role="alert">{riskDraftError}</p>}
           {riskPreview && <div className="draft-result" role="status">
             <strong>Validated preview — NOT APPLIED</strong>
