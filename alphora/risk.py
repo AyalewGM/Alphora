@@ -14,6 +14,22 @@ REBALANCE_FREQUENCY = "daily"
 # Keep the direct risk boundary aligned with the persisted offline book.
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 
+# A policy fingerprint is persisted in the SQLite book. Validate the
+# Decimal tuple *before* converting it to a plain string: even a positive,
+# finite, tightening value like 1e-100000 could otherwise expand to an
+# unbounded fingerprint. Match the inert paper-config 64-character domain.
+def _bounded_policy_fraction(value: Decimal, ceiling: Decimal) -> bool:
+    if (type(value) is not Decimal or not value.is_finite()
+            or not Decimal("0") < value <= ceiling):
+        return False
+    parts = value.as_tuple()
+    if (len(parts.digits) > 64 or parts.exponent < -64
+            or parts.exponent > 64):
+        return False
+    # Tuple bounds ensure formatting costs at most 129 characters.
+    return len(format(value, "f")) <= 64
+
+
 # Operator-configurable PAPER limits may only tighten the owner's hard caps.
 # The separate 2% daily-loss shutdown is not a per-trade risk allowance.
 @dataclass(frozen=True)
@@ -22,12 +38,9 @@ class RiskPolicy:
     max_instrument_fraction: Decimal = MAX_INSTRUMENT_FRACTION
 
     def __post_init__(self):
-        if (type(self.risk_per_trade_fraction) is not Decimal
-                or not self.risk_per_trade_fraction.is_finite()
-                or not Decimal("0") < self.risk_per_trade_fraction <= RISK_FRACTION
-                or type(self.max_instrument_fraction) is not Decimal
-                or not self.max_instrument_fraction.is_finite()
-                or not Decimal("0") < self.max_instrument_fraction <= MAX_INSTRUMENT_FRACTION):
+        if (not _bounded_policy_fraction(self.risk_per_trade_fraction, RISK_FRACTION)
+                or not _bounded_policy_fraction(self.max_instrument_fraction,
+                                                MAX_INSTRUMENT_FRACTION)):
             raise ValueError("INVALID_RISK_POLICY")
 
     def fingerprint(self) -> str:
