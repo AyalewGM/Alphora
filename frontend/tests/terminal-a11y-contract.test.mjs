@@ -77,3 +77,14 @@ test("local draft reset cannot be confused with portfolio reset; controls retain
   assert.match(css, /\.risk-draft-panel input,\.risk-draft-panel select\{[^}]*min-height:44px\}/);
   assert.match(css, /\.draft-actions button\{[^}]*min-height:44px/);
 });
+
+test("risk preview announces a short persistent status, not the entire comparison table", () => {
+  // A live region surrounding an entire scrollable table can announce all rows
+  // after each validation. Keep feedback present and separate from the data.
+  assert.ok(jsx.includes('<p className="draft-feedback" role="status" aria-live="polite">'));
+  assert.ok(jsx.includes('riskPreview ? <strong>Validated local preview — NOT APPLIED</strong>'));
+  assert.ok(jsx.includes('Draft not validated or applied.'));
+  assert.ok(jsx.includes('{riskPreview && <div className="draft-result">'));
+  assert.ok(!jsx.includes('className="draft-result" role="status"'));
+  assert.ok(jsx.includes('role="region" aria-label="Draft risk comparison table, horizontally scrollable"'));
+});
