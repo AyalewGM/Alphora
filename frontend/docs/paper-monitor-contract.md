@@ -38,3 +38,10 @@ Any future settings-write functionality requires independently reviewed authenti
 Before wiring the frontend to additional backend reads, Backend/Risk must finalize #42 multi-session opening-equity and restart-safe halt, immutable session/reconciliation provenance, read-only auth scheme and stable schema. Independent Financial QA verifies precision/ledger invariants, stale marks, crash/restart, source authenticity and negative tests. Independent Security verifies principal/scoping, replay/caching and mutation boundary. Frontend reviews keyboard/mobile/readability and all missing/partial snapshot scenarios.
 
 **No Alpaca connection, broker credentials, order endpoints, deployment, auto-merge or real-money trading.**
+
+
+## Read-only empty-state table presentation
+
+The dashboard now reserves accessible, horizontally scrollable **positions/pending exposure** and **decision journal** tables. Header columns are present so operators can understand the future evidence dimensions, but their only row explicitly states **UNAVAILABLE — NOT ZERO POSITIONS** or **NOT VERIFIED — NOT AN EMPTY JOURNAL**. These are not mock portfolios, zero-balance claims, order execution histories or evidence of a clear halt. A keyboard-focusable scrolling region makes all headers reachable on narrow screens. No new GETs, persistence, credentials or trade controls were introduced.
+
+Before replacing those rows with actual records, Backend and independent QA must agree on authenticated scoped snapshots, exact decimals, pending order reservations, revision/cursor continuity, session and timestamp/mark provenance, freshness, reconciled state and fail-closed handling of partial or stale evidence. Static source-contract tests are not a substitute for browser/mobile/screen-reader validation.
