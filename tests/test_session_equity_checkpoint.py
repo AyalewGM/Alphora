@@ -166,6 +166,57 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
             self.store.snapshot()
 
+    def test_rejects_unobserved_equity_tampering_even_without_mark_receipt(self):
+        before = self.initial()
+        for value in ("98000.00", "90000.00"):
+            with self.subTest(persisted_last=value):
+                self.conn.execute("UPDATE session_equity_checkpoint SET last_equity=?",
+                                  (value,))
+                with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+                    self.store.snapshot()
+                self.conn.execute("UPDATE session_equity_checkpoint SET last_equity=?",
+                                  (str(before.last_equity),))
+        self.assertEqual(self.store.snapshot(), before)
+
+    def test_rejects_unhalted_observed_loss_at_inclusive_floor(self):
+        self.initial()
+        valid = self.mark("99000.00")
+        for value, valid_unhalted in (("98000.01", True),
+                                      ("98000.00", False),
+                                      ("97999.99", False),
+                                      ("90000", False)):
+            with self.subTest(persisted_last=value):
+                self.conn.execute("UPDATE session_equity_checkpoint "
+                                  "SET last_equity=?, halted=0", (value,))
+                if valid_unhalted:
+                    self.assertFalse(self.store.snapshot().halted)
+                else:
+                    with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+                        self.store.snapshot()
+                self.conn.execute("UPDATE session_equity_checkpoint "
+                                  "SET last_equity=?, halted=0",
+                                  (str(valid.last_equity),))
+        self.assertEqual(self.store.snapshot(), valid)
+        # Existing one-way halt may remain true after a later rebound.
+        self.assertTrue(self.store.halt().halted)
+        self.conn.execute("UPDATE session_equity_checkpoint SET last_equity='90000'")
+        self.assertTrue(self.store.snapshot().halted)
+
+    def test_rejects_unbounded_persisted_numbers_and_impossible_revision(self):
+        self.initial()
+        for invalid in ("9" * 65, "1E+999999999", "not-a-decimal"):
+            with self.subTest(invalid=invalid[:24]):
+                self.conn.execute("UPDATE session_equity_checkpoint "
+                                  "SET opening_equity=?", (invalid,))
+                with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+                    self.store.snapshot()
+                self.conn.execute("UPDATE session_equity_checkpoint "
+                                  "SET opening_equity='100000'")
+        self.mark("99000")
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=0")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+
     def test_strict_decimal_and_session_id_input(self):
         for value in (D("1.001"), D("NaN"), -D("1"), 100000):
             with self.subTest(value=value):
