@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from decimal import Decimal as D, localcontext
+from datetime import date, timedelta
 from pathlib import Path
 
 from alphora.session_equity import SessionEquityCheckpoint
@@ -25,8 +26,26 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         self.conn.close()
         self.tmp.cleanup()
 
-    def initial(self, equity="100000"):
-        return self.store.bootstrap("2026-11-02", D(equity), A, proven_new_book=True)
+    def initial(self):
+        return self.store.bootstrap("2026-11-02", D("100000"), A, proven_new_book=True)
+
+    def reach_next_open(self, target):
+        """Reach next opening equity without ever violating a prior daily 2% halt."""
+        self.initial()
+        closes = (["105000"] if target == "105000" else
+                  ["98500", "97000", "95600", "95000"])
+        for close in closes:
+            prior = self.store.snapshot()
+            result = self.mark(close)
+            self.assertFalse(result.halted)
+            session = (date.fromisoformat(prior.session_id) + timedelta(days=1)).isoformat()
+            following = self.store.rollover(
+                previous_session=prior.session_id, next_session=session,
+                opening_equity=D(close), opening_receipt=C,
+                expected_revision=result.revision, reconciled=True,
+                zero_pending=True, verified_calendar=True)
+            self.assertEqual(following.opening_equity, D(close))
+        self.assertEqual(self.store.snapshot().opening_equity, D(target))
 
     def mark(self, equity, receipt=B):
         return self.store.observe(session_id=self.store.snapshot().session_id,
@@ -62,7 +81,7 @@ class SessionEquityCheckpointTests(unittest.TestCase):
                 self.conn.close()
                 self.conn = sqlite3.connect(":memory:", isolation_level=None)
                 self.store = SessionEquityCheckpoint(self.conn)
-                self.initial(opening)
+                self.reach_next_open(opening)
                 with localcontext() as ctx:
                     ctx.prec = 3
                     self.assertFalse(self.mark(above).halted)
@@ -71,7 +90,7 @@ class SessionEquityCheckpointTests(unittest.TestCase):
                     self.assertTrue(self.mark(opening, "e" * 64).halted)
 
     def test_fee_inclusive_observation_and_persistent_restart(self):
-        self.initial("105000")
+        self.reach_next_open("105000")
         self.assertFalse(self.mark("102900.01").halted)
         # $0.02 additional simulated fees bring marked equity below the floor.
         self.assertTrue(self.mark("102899.99", C).halted)
@@ -80,7 +99,13 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         self.store = SessionEquityCheckpoint(self.conn)
         self.assertTrue(self.store.snapshot().halted)
         with self.assertRaisesRegex(ValueError, "PERSISTED_SAFETY_HALT"):
-            self.rollover("102899.99")
+            old = self.store.snapshot()
+            self.store.rollover(previous_session=old.session_id,
+                                next_session="2026-11-04",
+                                opening_equity=D("102899.99"),
+                                opening_receipt=C, expected_revision=old.revision,
+                                reconciled=True, zero_pending=True,
+                                verified_calendar=True)
 
     def test_rollover_requires_final_verified_mark_and_no_pending(self):
         self.initial()
@@ -146,6 +171,8 @@ class SessionEquityCheckpointTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "INVALID_SESSION_EQUITY"):
                     self.store.bootstrap("2026-11-02", value, A, proven_new_book=True)
+        with self.assertRaisesRegex(ValueError, "INVALID_SESSION_STARTING_EQUITY"):
+            self.store.bootstrap("2026-11-02", D("95000"), A, proven_new_book=True)
         for sid in ("2026-11-31", "2026-11-2", "2026-11-03T00:00:00Z"):
             with self.subTest(sid=sid):
                 with self.assertRaisesRegex(ValueError, "INVALID_EXCHANGE_SESSION"):
