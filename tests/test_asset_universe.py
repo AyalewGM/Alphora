@@ -50,6 +50,16 @@ class UniverseContractTests(unittest.TestCase):
                         TickerPeriod("ALT", date(2024, 1, 1))))
         self.assertNotEqual(inspect((changed,)).sha256, baseline.sha256)
 
+    def test_future_ticker_alias_and_delisting_rejected(self):
+        future_alias = asset(ticker_history=(
+            TickerPeriod("OLD", date(2020, 1, 1), date(2024, 1, 1)),
+            TickerPeriod("NEW", date(2024, 1, 1), date(2027, 1, 1)),
+            TickerPeriod("NEXT", date(2027, 1, 1))))
+        with self.assertRaisesRegex(ValueError, "FUTURE_TICKER_HISTORY"):
+            inspect((future_alias,))
+        with self.assertRaisesRegex(ValueError, "FUTURE_DELISTING_EVENT"):
+            inspect((asset(delisting_date=date(2027, 1, 1)),))
+
     def test_future_membership_evidence_rejected(self):
         with self.assertRaisesRegex(ValueError, "INVALID_ASSET_RECORD"):
             inspect((asset(membership_available_at=AS_OF + timedelta(seconds=1)),))
