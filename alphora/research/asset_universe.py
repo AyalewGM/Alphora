@@ -109,12 +109,23 @@ def inspect_universe(assets, *, as_of, source, revision, license_claim,
                     or (i and previous_end != item.start)
                     or (i < len(asset.ticker_history) - 1 and item.end_exclusive is None)):
                 raise ValueError("INVALID_TICKER_HISTORY")
+            # A historical as-of snapshot must never embed a rename that
+            # only becomes effective after the snapshot date. Explicitly
+            # not-yet-listed exclusions are the sole future-date exception.
+            if (asset.exclusion_reason != "NOT_YET_LISTED"
+                    and (item.start > day or
+                         (item.end_exclusive is not None and item.end_exclusive > day))):
+                raise ValueError("FUTURE_TICKER_HISTORY")
             if item.start <= day and (item.end_exclusive is None or day < item.end_exclusive):
                 active_symbol = item.symbol
             previous_end = item.end_exclusive
             symbols.append({"symbol": item.symbol, "start": item.start.isoformat(),
                             "end_exclusive": (item.end_exclusive.isoformat()
                                               if item.end_exclusive else None)})
+        # A future-dated delisting known only from a later historical
+        # dataset cannot be smuggled into an included as-of membership.
+        if asset.delisting_date is not None and asset.delisting_date > day:
+            raise ValueError("FUTURE_DELISTING_EVENT")
         # A delisted asset's last ticker interval must end immediately
         # after its stated last listing day. An open-ended ticker alias
         # would contradict the delisting event and distort survivorship.
