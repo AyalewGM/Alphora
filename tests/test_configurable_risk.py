@@ -32,26 +32,29 @@ class ConfigurableRiskTests(unittest.TestCase):
         self.assertTrue(validate_buy(account(), proposal,
                                      expected_session_id=SESSION).permitted)
 
-    def test_explicit_tighter_or_higher_policy_affects_risk_guard(self):
-        proposal = BuyProposal("SPY", D("40"), D("500"), D("475"))
-        self.assertEqual(
-            validate_buy(account(), proposal, expected_session_id=SESSION).reason,
-            "TRADE_RISK_EXCEEDED")
-        loose = RiskPolicy(D("0.01"), D("0.20"))
-        self.assertTrue(validate_buy(account(), proposal,
-                                     expected_session_id=SESSION, policy=loose).permitted)
+    def test_explicit_tighter_only_policy_affects_risk_guard(self):
+        # Approved ceilings are hard maximums. A caller may tighten them,
+        # not authorize a $20k instrument or $1k planned loss.
+        proposal = BuyProposal("SPY", D("20"), D("500"), D("475"))
+        self.assertTrue(validate_buy(
+            account(), proposal, expected_session_id=SESSION).permitted)
         self.assertEqual(validate_buy(account(), proposal,
-            expected_session_id=SESSION, policy=RiskPolicy(D("0.01"), D("0.10"))).reason,
+            expected_session_id=SESSION,
+            policy=RiskPolicy(D("0.0025"), D("0.10"))).reason,
+            "TRADE_RISK_EXCEEDED")
+        self.assertEqual(validate_buy(account(), proposal,
+            expected_session_id=SESSION,
+            policy=RiskPolicy(D("0.005"), D("0.05"))).reason,
             "INSTRUMENT_ALLOCATION_EXCEEDED")
-        self.assertEqual(validate_buy(account(), proposal,
-            expected_session_id=SESSION, policy=RiskPolicy(D("0.005"), D("0.20"))).reason,
-            "TRADE_RISK_EXCEEDED")
+        with self.assertRaisesRegex(ValueError, "INVALID_RISK_POLICY"):
+            RiskPolicy(D("0.01"), D("0.20"))
 
     def test_malformed_or_out_of_range_policies_fail_closed(self):
         for risk, alloc in [
             (D("0"), D("0.1")), (D("0.021"), D("0.1")),
             (D("NaN"), D("0.1")), (D("0.005"), D("0")),
             (D("0.005"), D("1.01")), (D("0.005"), D("Infinity")),
+            (D("0.01"), D("0.10")), (D("0.005"), D("0.20")),
             (0.005, D("0.1")), (D("0.005"), 0.1),
         ]:
             with self.subTest(risk=str(risk), allocation=str(alloc)):
@@ -62,7 +65,7 @@ class ConfigurableRiskTests(unittest.TestCase):
             expected_session_id=SESSION, policy=None).reason, "INVALID_RISK_POLICY")
         self.assertEqual(validate_buy(account(), proposal,
             expected_session_id=SESSION, mode="live",
-            policy=RiskPolicy(D("0.01"), D("0.2"))).reason, "REAL_TRADING_DISABLED")
+            policy=RiskPolicy(D("0.005"), D("0.1"))).reason, "REAL_TRADING_DISABLED")
 
     def test_entry_sizing_uses_same_policy_as_final_guard(self):
         now = datetime(2026, 11, 2, 15, tzinfo=timezone.utc)
@@ -74,25 +77,24 @@ class ConfigurableRiskTests(unittest.TestCase):
         tighter = RiskPolicy(D("0.0025"), D("0.05"))
         self.assertEqual(propose_entry(account(), c, policy=tighter,
                                        **kwargs).proposal.quantity, D("100"))
-        bigger = RiskPolicy(D("0.01"), D("0.20"))
-        self.assertEqual(propose_entry(account(), c, policy=bigger,
-                                       **kwargs).proposal.quantity, D("400"))
+        with self.assertRaisesRegex(ValueError, "INVALID_RISK_POLICY"):
+            RiskPolicy(D("0.01"), D("0.20"))
         self.assertFalse(propose_entry(account(), c, policy=None, **kwargs).permitted)
 
     def test_ledger_policy_is_pinned_across_restarts(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "book.sqlite"
-            policy = RiskPolicy(D("0.01"), D("0.20"))
-            proposal = BuyProposal("SPY", D("40"), D("500"), D("475"))
+            policy = RiskPolicy(D("0.0025"), D("0.05"))
+            proposal = BuyProposal("SPY", D("10"), D("500"), D("475"))
             with_policy = OfflineReservations(path, session_id=SESSION, policy=policy)
             reserved = with_policy.reserve_buy("large-paper", account(),
                                                proposal, reconciled=True)
-            self.assertEqual(reserved.reserved_cash, D("20000"))
+            self.assertEqual(reserved.reserved_cash, D("5000"))
             with_policy.close()
             with self.assertRaisesRegex(ValueError, "BOOK_REOPEN_MISMATCH"):
                 OfflineReservations(path, session_id=SESSION)
             reopened = OfflineReservations(path, session_id=SESSION,
-                                          policy=RiskPolicy(D("0.0100"), D("0.200")))
+                                          policy=RiskPolicy(D("0.002500"), D("0.0500")))
             self.assertEqual(reopened.snapshot(), reserved)
             reopened.close()
 

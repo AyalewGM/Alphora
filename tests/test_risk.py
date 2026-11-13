@@ -33,6 +33,24 @@ class TestRisk(unittest.TestCase):
                     tightened.fingerprint(), "0.00499999999999999999999999|0.1")
                 self.assertNotEqual(tightened.fingerprint(), original.fingerprint())
 
+    def test_paper_policy_never_loosens_approved_hard_limits(self):
+        # Caller-provided policies can tighten but never exceed the
+        # owner's 0.5% per-trade and 10% single-instrument ceilings.
+        for risk, allocation in (
+            (D("0.02"), D("0.10")),
+            (D("0.005"), D("1")),
+            (D("0.00500000000000000000000001"), D("0.10")),
+            (D("0.005"), D("0.10000000000000000000000001")),
+        ):
+            with self.subTest(risk=risk, allocation=allocation):
+                with self.assertRaisesRegex(ValueError, "INVALID_RISK_POLICY"):
+                    RiskPolicy(risk, allocation)
+        self.assertEqual(RiskPolicy(), RiskPolicy(D("0.005"), D("0.10")))
+        tightened = RiskPolicy(D("0.0025"), D("0.05"))
+        self.assertEqual(tightened.risk_per_trade_fraction, D("0.0025"))
+        self.assertEqual(tightened.max_instrument_fraction, D("0.05"))
+        self.assertTrue(self.decide().permitted)
+
     def test_boundary_500_risk_and_10000_allocation(self):
         self.assertTrue(self.decide().permitted)
 
