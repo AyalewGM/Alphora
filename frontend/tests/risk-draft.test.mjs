@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { DEFAULT_RISK_DRAFT, validateRiskDraft } from "../src/risk-draft.js";
+import { DEFAULT_RISK_DRAFT, validateRiskDraft, describeRiskDraftError } from "../src/risk-draft.js";
 
 test("default proposal matches backend paper-risk-proposal-v1 wire fields", () => {
   assert.deepEqual(DEFAULT_RISK_DRAFT, {
@@ -84,4 +84,37 @@ test("wire proposal never contains execution, approval, halt-clear or persistenc
        "revision","applied_at"]) {
     assert.equal(Object.hasOwn(preview,forbidden), false, forbidden);
   }
+});
+
+test("invalid controls identify the field and provide accessible guidance", () => {
+  for (const [field, value, code] of [
+    ["startingEquityUsd", "100.001", "INVALID_STARTING_EQUITY"],
+    ["perTradePct", "0.5001", "PERCENT_OUT_OF_BOUNDS"],
+    ["allocationPct", "11", "PERCENT_OUT_OF_BOUNDS"],
+    ["dailyLossPct", "3", "PERCENT_OUT_OF_BOUNDS"],
+    ["rebalanceFrequency", "hourly", "INVALID_REBALANCE_FREQUENCY"]
+  ]) {
+    assert.throws(
+      () => validateRiskDraft({ ...DEFAULT_RISK_DRAFT, [field]: value }),
+      error => {
+        assert.equal(error.field, field);
+        assert.equal(error.message, code);
+        assert.ok(describeRiskDraftError(error).length > 30);
+        assert.equal(describeRiskDraftError(error).includes(code), false);
+        return true;
+      },
+      field
+    );
+  }
+});
+
+test("incomplete draft errors never suggest activation or broker access", () => {
+  let failure;
+  try { validateRiskDraft({ perTradePct: "0.5" }); }
+  catch (error) { failure = error; }
+  assert.equal(failure.message, "INVALID_RISK_DRAFT");
+  assert.equal(failure.field, undefined);
+  const text = describeRiskDraftError(failure);
+  assert.match(text, /incomplete|unsupported/i);
+  assert.doesNotMatch(text, /apply|authorize|enable trading/i);
 });
