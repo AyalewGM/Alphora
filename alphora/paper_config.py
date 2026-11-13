@@ -5,7 +5,7 @@ dispatch. The paper execution engine must explicitly opt in through a separate,
 reviewed migration after the durable session-loss gate is accepted (#42).
 """
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 
@@ -47,8 +47,18 @@ class PaperRiskConfig:
 
     def __post_init__(self) -> None:
         equity = self.starting_equity_usd
-        if (type(equity) is not Decimal or not equity.is_finite()
-                or equity <= 0 or equity != equity.quantize(_CENT)
+        # Check the cent quantum exactly even under a low ambient Decimal
+        # precision. Reject pathological inputs rather than raising an
+        # unexpected decimal exception.
+        valid_equity = False
+        if type(equity) is Decimal and equity.is_finite() and equity > 0:
+            try:
+                with localcontext() as ctx:
+                    ctx.prec = max(28, len(equity.as_tuple().digits) + 2)
+                    valid_equity = equity == equity.quantize(_CENT)
+            except (InvalidOperation, OverflowError):
+                valid_equity = False
+        if (not valid_equity
                 or not _fraction(self.risk_per_trade_fraction, RISK_FRACTION)
                 or not _fraction(self.max_instrument_fraction, MAX_INSTRUMENT_FRACTION)
                 or not _fraction(self.daily_loss_fraction, DAILY_LOSS_FRACTION)
