@@ -32,9 +32,25 @@ def _canonical(value: Decimal) -> str:
     return "0" if literal in ("-0", "") else literal
 
 
+def _fits_wire_decimal(value: Decimal) -> bool:
+    """Bound cost before decimal-to-plain-string expansion.
+
+    Every accepted constructor value must serialize to a strict <=64-character
+    decimal accepted by from_wire(). A finite 1e-1000000 is *not* safe to
+    expand before validating its tuple exponent.
+    """
+    if type(value) is not Decimal or not value.is_finite() or value <= 0:
+        return False
+    parts = value.as_tuple()
+    if (len(parts.digits) > 64 or parts.exponent < -64
+            or parts.exponent > 64):
+        return False
+    literal = _canonical(value)
+    return len(literal) <= 64 and _DECIMAL_TEXT.fullmatch(literal) is not None
+
+
 def _fraction(value: Decimal, maximum: Decimal) -> bool:
-    return (type(value) is Decimal and value.is_finite()
-            and Decimal("0") < value <= maximum)
+    return _fits_wire_decimal(value) and value <= maximum
 
 
 @dataclass(frozen=True)
@@ -57,7 +73,7 @@ class PaperRiskConfig:
         # precision. Reject pathological inputs rather than raising an
         # unexpected decimal exception.
         valid_equity = False
-        if type(equity) is Decimal and equity.is_finite() and equity > 0:
+        if _fits_wire_decimal(equity):
             try:
                 with localcontext() as ctx:
                     ctx.prec = max(28, len(equity.as_tuple().digits) + 2)
