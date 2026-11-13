@@ -127,6 +127,12 @@ class SessionEquityCheckpoint:
             (key, sid, opening, last, opening_hash, mark_hash,
              revision, observations, halted) = rows[0]
             _session(sid)
+            # SQLite accepts arbitrary text despite TEXT affinity. Bound stored
+            # Decimal representations before parsing/multiplication: an oversized
+            # or malformed persisted amount is corrupt, never a clean risk state.
+            if (type(opening) is not str or type(last) is not str
+                    or len(opening) > 64 or len(last) > 64):
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             opening = _amount(D(opening), positive=True)
             last = _amount(D(last))
             _receipt(opening_hash)
@@ -135,7 +141,18 @@ class SessionEquityCheckpoint:
             if (key != 1 or type(revision) is not int or revision < 0
                     or type(observations) is not int or observations < 0
                     or halted not in (0, 1) or type(halted) is not int
-                    or (observations == 0) != (mark_hash is None)):
+                    or (observations == 0) != (mark_hash is None)
+                    or revision < observations):
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            # No observation may change the opening mark. Once a verified mark
+            # reaches the inclusive 2% loss floor, the halt must be durable;
+            # a stored unhalted row below that floor is never trusted.
+            with localcontext() as ctx:
+                ctx.prec = 80
+                ctx.traps[Inexact] = True
+                floor = opening * (D(1) - DAILY_LOSS_FRACTION)
+            if ((observations == 0 and last != opening)
+                    or (observations > 0 and last <= floor and halted == 0)):
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             return SessionEquityState(sid, opening, last, opening_hash,
                                       mark_hash, revision, observations, bool(halted))
