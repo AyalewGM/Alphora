@@ -108,12 +108,28 @@ class RunnerTests(unittest.TestCase):
                             client_order_id="z" * 64)
         report = self.runner.run((day(2, "50", {"SPY": WATCH}),))
         d = report.days[0]
-        # The unknown paper-venue order is expired during EOD cleanup,
-        # so report the terminal certificate, not the earlier FATAL one.
+        # The rogue order expires during EOD cleanup, making terminal
+        # reconciliation CLEAN. The *earlier* FATAL must still be durably
+        # latched; automatic expiry is not independently reviewed recovery.
         self.assertEqual(d.recon_status, "CLEAN")
-        self.assertFalse(d.halted)
+        self.assertTrue(d.halted)
+        self.assertTrue(self.book.snapshot().halted)
         self.assertTrue(any(a.startswith("ENTRY_VETO:SPY")
                             for a in d.actions), d.actions)
+
+    def test_transient_fatal_halt_survives_sqlite_reopen(self):
+        from alphora.broker.base import DispatchRequest
+        self.venue.dispatch(DispatchRequest("QQQ", "BUY", 1, D("10")),
+                            client_order_id="z" * 64)
+        first = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        self.assertEqual(first.days[0].recon_status, "CLEAN")
+        self.assertTrue(first.halted)
+        original_orders = self.ledger.orders()
+        self.book.close()
+        self.book = OfflineReservations(
+            Path(self.tmp.name) / "book.sqlite", session_id="2026-11-02")
+        self.assertTrue(self.book.snapshot().halted)
+        self.assertEqual(self.ledger.orders(), original_orders)
 
     def test_first_entry_uses_reconciliation_after_exit_sync(self):
         # No historical pre-exit certificate may be reused after settlement.
@@ -211,6 +227,10 @@ class RunnerTests(unittest.TestCase):
                             for a in actions), actions)
         self.assertEqual(len(called), 1)
         self.assertEqual({o.symbol for o in self.ledger.orders()}, {"QQQ"})
+        # The newly observed FATAL must stay latched even if expiration
+        # removes the unknown venue order before terminal reconciliation.
+        self.assertTrue(report.halted)
+        self.assertTrue(self.book.snapshot().halted)
 
     def test_terminal_reconciliation_detects_new_post_expiration_discrepancy(self):
         # Post-expiration rogue venue order must be exposed by final
