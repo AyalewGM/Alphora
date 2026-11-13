@@ -112,6 +112,36 @@ class UniverseContractTests(unittest.TestCase):
             with self.subTest(candidate=candidate), self.assertRaises(ValueError):
                 inspect((candidate,))
 
+    def test_delisting_day_is_included_through_last_listing_day(self):
+        # Synthetic as-of is the last listed trading date. A closed interval
+        # ends at the *next* calendar day (exclusive) by construction; this
+        # must not be mistaken for future ticker evidence.
+        last_day_as_of = datetime(2026, 10, 30, 16, 0, tzinfo=UTC)
+        terminal = replace(
+            asset(), delisting_date=date(2026, 10, 30),
+            ticker_history=(
+                TickerPeriod("OLD", date(2020, 1, 1), date(2024, 1, 1)),
+                TickerPeriod("NEW", date(2024, 1, 1), date(2026, 10, 31)),
+            ),
+            membership_available_at=last_day_as_of - timedelta(minutes=1),
+        )
+        receipt = inspect_universe(
+            (terminal,), as_of=last_day_as_of, source="synthetic",
+            revision="revision-1", license_claim="synthetic-only",
+        )
+        self.assertEqual(receipt.assets, (terminal,))
+        # Any extension beyond the exclusive close still represents a
+        # future-dated ticker event and must be rejected.
+        future_close = replace(terminal, ticker_history=(
+            terminal.ticker_history[0],
+            TickerPeriod("NEW", date(2024, 1, 1), date(2026, 11, 1)),
+        ))
+        with self.assertRaisesRegex(ValueError, "FUTURE_TICKER_HISTORY"):
+            inspect_universe(
+                (future_close,), as_of=last_day_as_of, source="synthetic",
+                revision="revision-1", license_claim="synthetic-only",
+            )
+
     def test_aware_timestamp_and_explicit_license_claim_required(self):
         with self.assertRaisesRegex(ValueError, "INVALID_UNIVERSE_METADATA"):
             inspect_universe((asset(),), as_of=datetime(2026, 11, 2),
