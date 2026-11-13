@@ -274,6 +274,24 @@ class PaperSessionRunner:
                 executable_stops[sym] = stop
             self._last_day = day.day
             now = day.mark_time
+            # An interrupted/restarted session may have book/ledger state
+            # that the simulated venue cannot recover. Inspect that state
+            # BEFORE advancing venue marks or fills, or an unknown venue
+            # order might execute before its FATAL divergence is detected.
+            startup_recon = self._reconcile_observed(at=now)
+            if self._fatal_recon_seen or startup_recon.status == "FATAL":
+                # Quarantine, but do NOT set book_meta.halted here: previously
+                # ACKed fills still require an operator-supervised settlement
+                # path. The durable FATAL/CHECKING guard already blocks BUYs.
+                state = self._book.snapshot()
+                account = self._account(state, marks)
+                reports.append(DayReport(
+                    day.day, account.equity, state.cash, state.positions,
+                    len(self._ledger.open_orders()),
+                    tuple(f"ENTRY_VETO:{sym}:FATAL_RECONCILIATION"
+                          for sym in sorted(day.signals) if sym in marks),
+                    "FATAL", True))
+                continue
             actions = [f"FILL:{e.broker_order_id}"
                        for e in self._mgr.advance(marks, at=now)]
             self._mgr.sync(now=now)
