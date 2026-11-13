@@ -80,3 +80,15 @@
 .monitor-table-scroll td{padding:13px 10px;color:#aebdd1;font-size:11px;line-height:1.6}
 .monitor-table-scroll .monitor-empty-row{white-space:normal}
 .monitor-empty-row strong{color:#f4c786}
+
+/* Only an inert, validated settings comparison: never an active policy table.
+   Keep columns keyboard-reachable on narrow screens. */
+.draft-review-wrap{max-width:100%;overflow-x:auto;margin-top:12px;border:1px solid #425b79;border-radius:6px}
+.draft-review-wrap:focus-visible{outline:3px solid #87b6ff;outline-offset:2px}
+.draft-review-table{width:100%;min-width:640px;text-align:left;border-collapse:collapse}
+.draft-review-table caption{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.draft-review-table th,.draft-review-table td{padding:11px 10px;font-size:11px;line-height:1.45;border-bottom:1px solid #34445b;vertical-align:top}
+.draft-review-table thead th{color:#c4d9f3;background:#1c3047;font-weight:700}
+.draft-review-table tbody th{color:#c3d8f2;font-weight:650}
+.draft-review-table tbody td{color:#d0deed}
+.draft-review-table tbody tr:last-child th,.draft-review-table tbody tr:last-child td{border-bottom:0}
