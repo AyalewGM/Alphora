@@ -123,8 +123,11 @@ def inspect_daily_snapshot(
         literal = format(value, "f")
         return literal.rstrip("0").rstrip(".") if "." in literal else literal
 
+    # Canonicalization changed in v2: previously rounded distinct Decimal
+    # values could collide. Prior v1 receipts must be independently re-pinned;
+    # a new digest is not an authenticated source revision.
     document = {
-        "schema": 1,
+        "schema": 2,
         "symbol": symbol,
         "asset_type": asset_type,
         "source": source,
