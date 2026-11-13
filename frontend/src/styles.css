@@ -65,3 +65,18 @@
   .chart-footer { gap:8px }
   .chart-footer>span:first-child { min-width:0; overflow-wrap:anywhere }
 }
+
+
+/* Future read-only account tables: truthful unavailable states; no mock fills or
+   zero-balance defaults. Focusable scrolling regions preserve keyboard access. */
+.monitor-records{margin-top:14px;border-top:1px solid #34445b;padding-top:13px}
+.monitor-records h3{font-size:13px;margin:0 0 7px}
+.monitor-records p{font-size:11px;color:#9eb1c9;line-height:1.6;margin:0 0 10px}
+.monitor-table-scroll{max-width:100%;overflow-x:auto;border:1px solid #34445b;border-radius:6px}
+.monitor-table-scroll:focus-visible{outline:3px solid #87b6ff;outline-offset:2px}
+.monitor-table-scroll table{width:100%;min-width:620px;border-collapse:collapse;text-align:left}
+.monitor-table-scroll caption{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.monitor-table-scroll th{padding:10px;color:#afc3da;font-size:11px;font-weight:700;background:#1c2a3b;border-bottom:1px solid #34445b;white-space:nowrap}
+.monitor-table-scroll td{padding:13px 10px;color:#aebdd1;font-size:11px;line-height:1.6}
+.monitor-table-scroll .monitor-empty-row{white-space:normal}
+.monitor-empty-row strong{color:#f4c786}
