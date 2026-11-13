@@ -98,7 +98,8 @@ def inspect_session_calendar(days, *, venue_mic, start, end, source, revision,
                 or item.kind not in _KINDS
                 or not _aware(item.information_available_at)
                 or item.information_available_at > as_of
-                or type(item.venue_halts) is not tuple):
+                or type(item.venue_halts) is not tuple
+                or len(item.venue_halts) > 32):
             raise ValueError("INVALID_CALENDAR_DAY")
         closed = item.kind == "CLOSED"
         if closed:
@@ -147,8 +148,20 @@ def inspect_session_calendar(days, *, venue_mic, start, end, source, revision,
 
 def require_exact_session_coverage(receipt, observed_days):
     """Reject missing/duplicate/closed-date observations, without guessing days."""
-    if (not isinstance(receipt, CalendarReceipt)
-            or type(observed_days) not in (tuple, list)
+    if not isinstance(receipt, CalendarReceipt):
+        raise ValueError("SESSION_CALENDAR_MISMATCH")
+    # Dataclass immutability is not a signature: a caller can construct or
+    # replace a receipt. Re-check its bytes against the pinned SHA before use.
+    try:
+        inspect_session_calendar(
+            receipt.days, venue_mic=receipt.venue_mic, start=receipt.start,
+            end=receipt.end, source=receipt.source, revision=receipt.revision,
+            license_claim=receipt.license_claim, as_of=receipt.as_of,
+            expected_sha256=receipt.sha256,
+        )
+    except (ValueError, TypeError, AttributeError, OverflowError) as exc:
+        raise ValueError("SESSION_CALENDAR_MISMATCH") from exc
+    if (type(observed_days) not in (tuple, list)
             or any(type(day) is not date for day in observed_days)
             or tuple(observed_days) != receipt.session_days):
         raise ValueError("SESSION_CALENDAR_MISMATCH")
