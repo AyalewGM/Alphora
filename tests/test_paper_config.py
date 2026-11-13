@@ -59,5 +59,56 @@ class TestPaperRiskConfig(unittest.TestCase):
         self.assertNotEqual(alternative.receipt(), PaperRiskConfig().receipt())
 
 
+    def test_wire_roundtrip_preserves_exact_policy_and_receipt(self):
+        config = PaperRiskConfig(starting_equity_usd=D("25000.00"),
+                                 risk_per_trade_fraction=D("0.00250"),
+                                 max_instrument_fraction=D("0.05"),
+                                 daily_loss_fraction=D("0.01"),
+                                 rebalance_frequency="manual")
+        wire = config.to_wire()
+        self.assertEqual(wire["schema"], "paper-risk-proposal-v1")
+        self.assertEqual(wire["starting_equity_usd"], "25000")
+        self.assertEqual(wire["risk_per_trade_fraction"], "0.0025")
+        self.assertEqual(set(wire), {"schema", "starting_equity_usd",
+                                    "risk_per_trade_fraction",
+                                    "max_instrument_fraction",
+                                    "daily_loss_fraction",
+                                    "rebalance_frequency"})
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                decoded = PaperRiskConfig.from_wire(wire)
+                self.assertEqual(decoded, config)
+                self.assertEqual(decoded.receipt(), config.receipt())
+
+    def test_wire_rejects_partial_unknown_wrong_version_and_float_coercion(self):
+        good = PaperRiskConfig().to_wire()
+        bad = [
+            {key: value for key, value in good.items() if key != "daily_loss_fraction"},
+            {**good, "extra": "injected"},
+            {**good, "schema": "paper-risk-proposal-v2"},
+            {**good, "risk_per_trade_fraction": 0.005},
+            {**good, "starting_equity_usd": True},
+            {**good, "max_instrument_fraction": None},
+            {**good, "rebalance_frequency": "HOURLY"},
+            {**good, "daily_loss_fraction": "0.02000000001"},
+            {**good, "starting_equity_usd": "100000.001"},
+            {**good, "starting_equity_usd": "1e5"},
+            {**good, "starting_equity_usd": " 100000"},
+            {**good, "starting_equity_usd": "+100000"},
+            {**good, "starting_equity_usd": "-100000"},
+            {**good, "starting_equity_usd": "000100000"},
+            {**good, "starting_equity_usd": "9" * 65},
+            {**good, "daily_loss_fraction": "NaN"},
+            {**good, "daily_loss_fraction": "Infinity"},
+            {**good, "daily_loss_fraction": "0.01\\n"},
+            [],
+            None,
+        ]
+        for payload in bad:
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ValueError, "INVALID_PAPER_RISK_CONFIG"):
+                    PaperRiskConfig.from_wire(payload)
+
 if __name__ == "__main__":
     unittest.main()
