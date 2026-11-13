@@ -29,6 +29,10 @@ test("risk settings cannot be weakened or interpreted from floats", () => {
     {max_instrument_allocation_fraction:"0.2"},
     {daily_loss_shutdown_fraction:"0.04"},
     {max_planned_trade_risk_fraction:0.005},
+    {max_planned_trade_risk_fraction:"0.0050000000000000000000001"},
+    {max_instrument_allocation_fraction:"0.10000000000000000000001"},
+    {daily_loss_shutdown_fraction:"0.020000000000000000000001"},
+    {max_planned_trade_risk_fraction:"00.005"},
     {rebalance_frequency:"weekly"}
   ]) {
     assert.throws(() => validateBackendStatus({...policy,...change},capabilities));
@@ -52,4 +56,17 @@ test("local GET-only API uses exactly two same-origin endpoints", async () => {
 test("HTTP failures and invalid JSON contracts do not establish connection", async () => {
   await assert.rejects(loadLocalReadOnlyStatus(async () => ({ok:false})));
   await assert.rejects(loadLocalReadOnlyStatus(async () => ({ok:true,json:async()=>({})})));
+});
+
+test("read-only risk validation accepts exact numerically equivalent decimal strings", () => {
+  const equivalent = {
+    ...policy,
+    starting_virtual_equity:"100000.00",
+    max_planned_trade_risk_fraction:"0.00500",
+    max_instrument_allocation_fraction:"0.1000",
+    daily_loss_shutdown_fraction:"0.02000"
+  };
+  const result = validateBackendStatus(equivalent, capabilities);
+  assert.equal(result.policy.max_planned_trade_risk_fraction, "0.005");
+  assert.equal(result.policy.starting_virtual_equity, "100000");
 });
