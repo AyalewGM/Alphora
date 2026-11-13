@@ -43,3 +43,10 @@
 @media(max-width:1000px){.monitor-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:650px){.monitor-safety{grid-template-columns:1fr}.monitor-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:370px){.monitor-grid{grid-template-columns:1fr}}
+
+/* Reach the workspace without traversing the full terminal header/navigation. */
+.skip-link{position:absolute;left:12px;top:-100px;z-index:1000;padding:11px 16px;background:#dceaff;color:#122035;border:2px solid #122035;border-radius:6px;font-weight:700}
+.skip-link:focus{top:9px;outline:3px solid #87b6ff;outline-offset:2px}
+#main-content:focus{outline:none}
+/* Selected states are conveyed by aria-pressed; keep keyboard focus visible. */
+.timeframes button:focus-visible,.tabbar button:focus-visible,.watchrow:focus-visible,.clearbutton:focus-visible{outline:3px solid #87b6ff;outline-offset:2px}
