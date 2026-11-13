@@ -10,6 +10,7 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from alphora.broker.base import DispatchRequest
 from alphora.broker.paper import PaperBrokerAdapter
@@ -316,6 +317,53 @@ class DurableReconciliationQuarantineTests(unittest.TestCase):
                                   reconciled=True)
         self.assertEqual(self.book.snapshot(), prior)
 
+
+    def test_rogue_venue_order_is_quarantined_before_advance_or_expire(self):
+        # An unknown synthetic venue order must not fill or disappear through
+        # automatic expiration before its first FATAL reconciliation.
+        self.venue.dispatch(
+            DispatchRequest("QQQ", "BUY", 1, D("10")),
+            client_order_id="z" * 64)
+        prior_venue = self.venue.open_orders()
+        prior_book, prior_ledger = self.book.snapshot(), self.ledger.orders()
+        with (patch.object(self.runner._mgr, "advance",
+                           side_effect=AssertionError("ADVANCED_BEFORE_RECON")),
+              patch.object(self.runner._mgr, "expire_session",
+                           side_effect=AssertionError("EXPIRED_BEFORE_RECON"))):
+            report = self.runner.run((session_day(),))
+        self.assertEqual(report.days[0].recon_status, "FATAL")
+        self.assertTrue(report.halted)
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.venue.open_orders(), prior_venue)
+        self.assertEqual(self.ledger.orders(), prior_ledger)
+        self.assertEqual(
+            replace(self.book.snapshot(), halted=prior_book.halted),
+            prior_book)
+        self.assertFalse(any(a.startswith(("ENTRY:", "EXIT:", "FILL:"))
+                             for a in report.days[0].actions))
+        self._restart()
+        self.assertTrue(self.book.snapshot().halted)
+
+    def test_cold_restart_is_quarantined_before_venue_mark_advance(self):
+        # Keep accepted fills in the book, lose only simulated venue memory.
+        first = self.runner.run((session_day(),))
+        self.assertIn("ENTRY:SPY:ACKED", first.days[0].actions)
+        recorded_book, recorded_orders = (
+            self.book.snapshot(), self.ledger.orders())
+        self._restart(cold_venue=True)
+        with patch.object(self.runner._mgr, "advance",
+                          side_effect=AssertionError("ADVANCED_BEFORE_RECON")):
+            report = self.runner.run((session_day(),))
+        self.assertEqual(report.days[0].recon_status, "FATAL")
+        self.assertTrue(report.halted)
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(
+            replace(self.book.snapshot(), halted=recorded_book.halted),
+            recorded_book)
+        self.assertEqual(self.ledger.orders(), recorded_orders)
+        self.assertEqual(self.venue.positions(), ())
+        self._restart()
+        self.assertTrue(self.book.snapshot().halted)
 
 if __name__ == "__main__":
     unittest.main()
