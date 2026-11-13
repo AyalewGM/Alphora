@@ -147,8 +147,10 @@ def _input_fingerprint(
     cost_literal = "0" if cost_bps.is_zero() else format(cost_bps, "f")
     if "." in cost_literal:
         cost_literal = cost_literal.rstrip("0").rstrip(".")
+    # Exact Decimal canonicalization is v2. Previously pinned v1 research
+    # fingerprints are intentionally incompatible and require a fresh review.
     canonical = {
-        "schema": 1,
+        "schema": 2,
         "kind": kind,
         "candidate_snapshot_sha256": candidate_sha256,
         "spy_snapshot_sha256": spy_sha256,
