@@ -14,8 +14,8 @@ REBALANCE_FREQUENCY = "daily"
 # Keep the direct risk boundary aligned with the persisted offline book.
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
 
-# Bounded operator-configurable PAPER risk parameters. Defaults unchanged.
-# The 2% daily-loss shutdown is independently enforced and is not configurable here.
+# Operator-configurable PAPER limits may only tighten the owner's hard caps.
+# The separate 2% daily-loss shutdown is not a per-trade risk allowance.
 @dataclass(frozen=True)
 class RiskPolicy:
     risk_per_trade_fraction: Decimal = RISK_FRACTION
@@ -24,10 +24,10 @@ class RiskPolicy:
     def __post_init__(self):
         if (type(self.risk_per_trade_fraction) is not Decimal
                 or not self.risk_per_trade_fraction.is_finite()
-                or not Decimal("0") < self.risk_per_trade_fraction <= DAILY_LOSS_FRACTION
+                or not Decimal("0") < self.risk_per_trade_fraction <= RISK_FRACTION
                 or type(self.max_instrument_fraction) is not Decimal
                 or not self.max_instrument_fraction.is_finite()
-                or not Decimal("0") < self.max_instrument_fraction <= Decimal("1")):
+                or not Decimal("0") < self.max_instrument_fraction <= MAX_INSTRUMENT_FRACTION):
             raise ValueError("INVALID_RISK_POLICY")
 
     def fingerprint(self) -> str:
