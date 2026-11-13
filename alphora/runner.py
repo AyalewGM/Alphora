@@ -337,16 +337,25 @@ class PaperSessionRunner:
             for broker_id in self._mgr.expire_session(at=now):
                 actions.append(f"EXPIRED:{broker_id}")
             # Entries may fill after the first observation (with simulated
-            # fees). Report and observe the *settled* account, not the
-            # pre-entry account, or the day's P&L can be overstated.
+            # fees). Value terminal cash/holdings at verified session marks.
             final = self._book.snapshot()
             settled_account = self._account(final, marks)
-            self._book.observe_daily_loss(settled_account, reconciled=True)
+            # The certificate used before order dispatch does not attest
+            # terminal fills, cancellations or expiration. Never report it
+            # as the final portfolio reconciliation.
+            final_recon = reconcile(self._book, self._ledger,
+                                    self._adapter, at=now)
+            if final_recon.status == "CLEAN":
+                self._book.observe_daily_loss(settled_account, reconciled=True)
+            else:
+                # Uncertain terminal state cannot certify a loss observation.
+                # Persist a one-way fail-closed pause for all new paper buys.
+                self._book.halt()
             final = self._book.snapshot()
             reports.append(DayReport(
                 day.day, settled_account.equity, final.cash, final.positions,
                 len(self._ledger.open_orders()), tuple(actions),
-                recon.status, final.halted))
+                final_recon.status, final.halted))
         return RunReport(tuple(reports),
                          reports[-1].equity if reports else INITIAL_EQUITY,
                          bool(reports and reports[-1].halted))

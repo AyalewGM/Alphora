@@ -108,7 +108,10 @@ class RunnerTests(unittest.TestCase):
                             client_order_id="z" * 64)
         report = self.runner.run((day(2, "50", {"SPY": WATCH}),))
         d = report.days[0]
-        self.assertEqual(d.recon_status, "FATAL")
+        # The unknown paper-venue order is expired during EOD cleanup,
+        # so report the terminal certificate, not the earlier FATAL one.
+        self.assertEqual(d.recon_status, "CLEAN")
+        self.assertFalse(d.halted)
         self.assertTrue(any(a.startswith("ENTRY_VETO:SPY")
                             for a in d.actions), d.actions)
 
@@ -208,6 +211,38 @@ class RunnerTests(unittest.TestCase):
                             for a in actions), actions)
         self.assertEqual(len(called), 1)
         self.assertEqual({o.symbol for o in self.ledger.orders()}, {"QQQ"})
+
+    def test_terminal_reconciliation_detects_new_post_expiration_discrepancy(self):
+        # Post-expiration rogue venue order must be exposed by final
+        # reconciliation rather than reported as a stale CLEAN snapshot.
+        from alphora.broker.base import DispatchRequest
+        mgr = self.runner._mgr
+        original_expire = mgr.expire_session
+
+        def conflicting_expire(*, at):
+            result = original_expire(at=at)
+            self.venue.dispatch(DispatchRequest("QQQ", "BUY", 1, D("10")),
+                                client_order_id="z" * 64)
+            return result
+
+        mgr.expire_session = conflicting_expire
+        report = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        self.assertIn("ENTRY:SPY:ACKED", report.days[0].actions)
+        self.assertEqual(report.days[0].recon_status, "FATAL")
+        self.assertTrue(report.days[0].halted)
+        self.assertTrue(self.book.snapshot().halted)
+
+    def test_clean_terminal_reconciliation_allows_precise_fee_loss_observation(self):
+        # The paper report must value settled positions and the order fee,
+        # then independently attest its terminal portfolio state.
+        self.venue = PaperBrokerAdapter(fee_per_order=D("1"))
+        self.runner = PaperSessionRunner(
+            book=self.book, ledger=self.ledger, adapter=self.venue,
+            take_profit_pct=D("50"), fee_budget=D("1"))
+        report = self.runner.run((day(2, "30", {"SPY": WATCH}),))
+        self.assertEqual(report.days[0].recon_status, "CLEAN")
+        self.assertEqual(report.final_equity, D("99999"))
+        self.assertFalse(report.halted)
 
     def test_missing_held_symbol_mark_is_never_treated_as_break_even(self):
         self.runner.run((day(2, "50", {"SPY": WATCH}),))
