@@ -2,7 +2,7 @@
 import unittest
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal as D
+from decimal import Decimal as D, localcontext
 from zoneinfo import ZoneInfo
 
 from alphora.research.backtest import Bar
@@ -60,6 +60,34 @@ class PointInTimeReceiptTests(unittest.TestCase):
         self.assertNotEqual(inspect(a, b).sha256,
                             inspect(a, replace(b, version_available_at=b.version_available_at +
                                                timedelta(minutes=1))).sha256)
+
+    def test_tiny_vendor_revisions_have_distinct_hashes_at_any_precision(self):
+        # Both prices are valid synthetic bars, but normalize() at precision
+        # 3 or 28 used to round them to the same canonical hash input.
+        first, second = self.bars
+        old_close = D("100.0000000000000000000000000000000001")
+        revised_close = D("100.0000000000000000000000000000000002")
+        earlier = replace(second, bar=replace(second.bar, close=old_close))
+        revised = replace(second, bar=replace(second.bar, close=revised_close))
+        equivalent = replace(second, bar=replace(
+            second.bar, close=D("100.000000000000000000000000000000000100")))
+        for precision in (3, 28, 80):
+            with self.subTest(precision=precision), localcontext() as context:
+                context.prec = precision
+                pinned = inspect(first, earlier).sha256
+                self.assertNotEqual(pinned, inspect(first, revised).sha256)
+                self.assertEqual(pinned, inspect(first, equivalent).sha256)
+                with self.assertRaisesRegex(ValueError, "SNAPSHOT_HASH_MISMATCH"):
+                    inspect(first, revised, expected_sha256=pinned)
+
+    def test_v2_receipt_requires_explicit_repin_of_v1_hashes(self):
+        # Known synthetic fixture digests freeze the canonicalization schema.
+        # A v1 receipt must be rejected rather than silently treated as v2.
+        legacy_digest = "788f90d65cdd6820d694e69f69cc374a4f20eaa8d1930f2e19f3016ab4cea922"
+        v2_digest = "37a502dbbf9bf3c37ea73c34db7534d54e9a545548e3e1087ebaad78743c6533"
+        self.assertEqual(inspect(*self.bars).sha256, v2_digest)
+        with self.assertRaisesRegex(ValueError, "SNAPSHOT_HASH_MISMATCH"):
+            inspect(*self.bars, expected_sha256=legacy_digest)
 
     def test_expected_hash_fails_closed(self):
         digest = inspect(*self.bars).sha256

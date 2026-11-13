@@ -1,15 +1,15 @@
 """Offline-only synthetic replay contract; never touches market or broker APIs."""
 import unittest
 from dataclasses import replace
-from datetime import date, datetime, timedelta
-from decimal import Decimal as D
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal as D, localcontext
 from zoneinfo import ZoneInfo
 
 from alphora.research.backtest import Bar, backtest
 from alphora.research.data_provenance import ObservedDailyBar, inspect_daily_snapshot
 from alphora.research.replay import (
     replay_candidate_snapshot, compare_candidate_snapshots,
-    session_manifest_sha256,
+    session_manifest_sha256, _input_fingerprint,
 )
 
 ET = ZoneInfo("America/New_York")
@@ -414,6 +414,65 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
                          second.input_fingerprint_sha256)
         self.assertEqual(second.input_fingerprint_sha256,
                          third.input_fingerprint_sha256)
+
+    def test_research_fingerprint_preserves_tiny_fee_changes_at_any_precision(self):
+        # Two distinct assumed fee rates are different research trials,
+        # even when Decimal.normalize() rounds both values to 5.
+        common = dict(
+            kind="single_asset", strategy="buy_hold",
+            candidate_sha256=self.spy.sha256, spy_sha256=None,
+            as_of=self.spy.as_of, lookback=20,
+            manifest_sha256=None, manifest_pinned=False,
+        )
+        first = D("5.0000000000000000000000000000000001")
+        revised = D("5.0000000000000000000000000000000002")
+        equivalent = D("5.000000000000000000000000000000000100")
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                original = _input_fingerprint(cost_bps=first, **common)
+                self.assertNotEqual(
+                    original, _input_fingerprint(cost_bps=revised, **common))
+                self.assertEqual(
+                    original, _input_fingerprint(cost_bps=equivalent, **common))
+
+    def test_v2_research_input_receipt_requires_repin_of_v1(self):
+        # Stable synthetic example: exact Decimal encoding changed the receipt
+        # schema, so even ordinary v1 fingerprint pins must be revalidated.
+        common = dict(
+            kind="single_asset", strategy="buy_hold",
+            candidate_sha256="a" * 64, spy_sha256=None,
+            as_of=datetime(2026, 11, 2, 14, tzinfo=timezone.utc),
+            cost_bps=D("5"), lookback=20,
+            manifest_sha256=None, manifest_pinned=False,
+        )
+        digest = _input_fingerprint(**common)
+        self.assertEqual(
+            digest,
+            "d014aea94f4a8cd4f29d4d534fbb26e572b4e24f1b9790161c388854fd5b4e5a",
+        )
+        self.assertNotEqual(
+            digest,
+            "d8f6d133788f03983883ccdac0ed7eae800be836c16cff3e5c7187f2d6e29faf",
+        )
+
+    def test_research_fingerprint_canonicalizes_signed_zero_fees(self):
+        # Negative zero is a valid Decimal research fee input, economically
+        # identical to +0. The reproducibility receipt must not falsely
+        # distinguish equivalent offline simulations at any caller precision.
+        common = dict(
+            kind="single_asset", strategy="buy_hold",
+            candidate_sha256=self.spy.sha256, spy_sha256=None,
+            as_of=self.spy.as_of, lookback=20,
+            manifest_sha256=None, manifest_pinned=False,
+        )
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                original = _input_fingerprint(cost_bps=D("0"), **common)
+                for equivalent in (D("0.000"), D("-0"), D("-0.000"), D("-0E+4")):
+                    self.assertEqual(
+                        original, _input_fingerprint(cost_bps=equivalent, **common))
 
     def test_research_fingerprint_changes_with_strategy_cost_and_lookback(self):
         base = replay_candidate_snapshot(

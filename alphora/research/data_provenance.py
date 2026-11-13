@@ -116,10 +116,18 @@ def inspect_daily_snapshot(
             raise ValueError("NEXT_OPEN_LOOKAHEAD")
 
     def decimal_string(value):
-        return format(value.normalize(), "f")
+        # Decimal.normalize() rounds to the ambient precision. Two distinct
+        # vendor bar versions could otherwise receive the same pinned hash.
+        # Preserve every significant digit, while removing only insignificant
+        # fractional trailing zeroes for equivalent Decimal representations.
+        literal = format(value, "f")
+        return literal.rstrip("0").rstrip(".") if "." in literal else literal
 
+    # Canonicalization changed in v2: previously rounded distinct Decimal
+    # values could collide. Prior v1 receipts must be independently re-pinned;
+    # a new digest is not an authenticated source revision.
     document = {
-        "schema": 1,
+        "schema": 2,
         "symbol": symbol,
         "asset_type": asset_type,
         "source": source,
