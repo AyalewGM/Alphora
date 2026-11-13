@@ -110,5 +110,32 @@ class TestPaperRiskConfig(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "INVALID_PAPER_RISK_CONFIG"):
                     PaperRiskConfig.from_wire(payload)
 
+
+    def test_constructor_rejects_values_outside_versioned_wire_domain(self):
+        # #65 independent QA: construction previously accepted 1e-70,
+        # while to_wire emitted 72 chars and from_wire rejected >64.
+        good = PaperRiskConfig()
+        for field in ("risk_per_trade_fraction",
+                      "max_instrument_fraction", "daily_loss_fraction"):
+            for value in (D("1e-63"), D("1e-70"), D("1e-1000000")):
+                with self.subTest(field=field, value=str(value)):
+                    with self.assertRaisesRegex(ValueError, "INVALID_PAPER_RISK_CONFIG"):
+                        replace(good, **{field: value})
+        for value in (D("1e65"), D("1e1000000")):
+            with self.subTest(starting_equity_usd=str(value)):
+                with self.assertRaisesRegex(ValueError, "INVALID_PAPER_RISK_CONFIG"):
+                    replace(good, starting_equity_usd=value)
+
+    def test_tiny_but_representable_risk_is_exactly_roundtrippable(self):
+        # Longest permitted '0.<zeros>1' wire string (64 characters).
+        tiny = PaperRiskConfig(risk_per_trade_fraction=D("1e-62"))
+        payload = tiny.to_wire()
+        self.assertEqual(len(payload["risk_per_trade_fraction"]), 64)
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                self.assertEqual(PaperRiskConfig.from_wire(payload), tiny)
+                self.assertEqual(PaperRiskConfig.from_wire(payload).receipt(), tiny.receipt())
+
 if __name__ == "__main__":
     unittest.main()
