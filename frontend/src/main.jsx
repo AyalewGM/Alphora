@@ -4,7 +4,7 @@ import "./styles.css";
 import { APPROVED_POLICY, loadLocalReadOnlyStatus } from "./api.js";
 import { parseLocalDailySnapshot } from "./local-bars.js";
 import { normalizedVolumeHeights } from "./chart-scale.js";
-import { DEFAULT_RISK_DRAFT, validateRiskDraft } from "./risk-draft.js";
+import { DEFAULT_RISK_DRAFT, validateRiskDraft, describeRiskDraftError } from "./risk-draft.js";
 
 const WATCHLIST = [
   { symbol: "SPY", name: "S&P 500 ETF", base: 582.40, change: 0.82 },
@@ -75,25 +75,33 @@ function App() {
   const [riskDraft, setRiskDraft] = useState({ ...DEFAULT_RISK_DRAFT });
   const [riskPreview, setRiskPreview] = useState(null);
   const [riskDraftError, setRiskDraftError] = useState("");
+  const [riskDraftInvalidField, setRiskDraftInvalidField] = useState(null);
   function previewRiskDraft(event) {
     event.preventDefault();
     try {
       setRiskPreview(validateRiskDraft(riskDraft));
       setRiskDraftError("");
+      setRiskDraftInvalidField(null);
     } catch (error) {
       setRiskPreview(null);
-      setRiskDraftError(`Preview rejected: ${error.message}`);
+      setRiskDraftInvalidField(error.field ?? null);
+      setRiskDraftError(describeRiskDraftError(error));
+      // Move keyboard focus to the invalid control, without discarding input.
+      const control = error.field && event.currentTarget.elements.namedItem(error.field);
+      if (control && typeof control.focus === "function") control.focus();
     }
   }
   function resetRiskDraft() {
     setRiskDraft({ ...DEFAULT_RISK_DRAFT });
     setRiskPreview(null);
     setRiskDraftError("");
+    setRiskDraftInvalidField(null);
   }
   function changeRiskDraft(key, value) {
     setRiskDraft(current => ({ ...current, [key]: value }));
     setRiskPreview(null);
     setRiskDraftError("");
+    setRiskDraftInvalidField(null);
   }
   async function onSnapshotFile(event) {
     setImportError("");
@@ -177,26 +185,26 @@ function App() {
           <form onSubmit={previewRiskDraft} noValidate>
             <label>Starting capital for a new simulated portfolio (USD)
               <input aria-label="Draft new portfolio starting equity USD" inputMode="decimal" type="text"
-                value={riskDraft.startingEquityUsd} onChange={event => changeRiskDraft("startingEquityUsd", event.target.value)}
+                name="startingEquityUsd" aria-invalid={riskDraftInvalidField === "startingEquityUsd"} value={riskDraft.startingEquityUsd} onChange={event => changeRiskDraft("startingEquityUsd", event.target.value)}
                 aria-describedby="draft-limit-note" />
             </label>
             <label>Planned risk per trade (%)
               <input aria-label="Draft planned risk per trade percent" inputMode="decimal" type="text"
-                value={riskDraft.perTradePct} onChange={event => changeRiskDraft("perTradePct", event.target.value)}
+                name="perTradePct" aria-invalid={riskDraftInvalidField === "perTradePct"} value={riskDraft.perTradePct} onChange={event => changeRiskDraft("perTradePct", event.target.value)}
                 aria-describedby="draft-limit-note" />
             </label>
             <label>Maximum per-instrument allocation (%)
               <input aria-label="Draft maximum instrument allocation percent" inputMode="decimal" type="text"
-                value={riskDraft.allocationPct} onChange={event => changeRiskDraft("allocationPct", event.target.value)}
+                name="allocationPct" aria-invalid={riskDraftInvalidField === "allocationPct"} value={riskDraft.allocationPct} onChange={event => changeRiskDraft("allocationPct", event.target.value)}
                 aria-describedby="draft-limit-note" />
             </label>
             <label>Daily-loss shutdown (%)
               <input aria-label="Draft daily loss shutdown percent" inputMode="decimal" type="text"
-                value={riskDraft.dailyLossPct} onChange={event => changeRiskDraft("dailyLossPct", event.target.value)}
+                name="dailyLossPct" aria-invalid={riskDraftInvalidField === "dailyLossPct"} value={riskDraft.dailyLossPct} onChange={event => changeRiskDraft("dailyLossPct", event.target.value)}
                 aria-describedby="draft-limit-note" />
             </label>
             <label>Rebalancing cadence
-              <select aria-label="Draft rebalancing cadence" value={riskDraft.rebalanceFrequency}
+              <select aria-label="Draft rebalancing cadence" name="rebalanceFrequency" aria-invalid={riskDraftInvalidField === "rebalanceFrequency"} value={riskDraft.rebalanceFrequency}
                 onChange={event => changeRiskDraft("rebalanceFrequency", event.target.value)} aria-describedby="draft-limit-note">
                 <option value="daily">Daily (default)</option>
                 <option value="weekly">Weekly (proposal only)</option>
@@ -208,8 +216,8 @@ function App() {
               <button type="button" onClick={resetRiskDraft}>Reset defaults</button>
             </div>
           </form>
-          <p id="draft-limit-note">Hard ceilings: trade risk &gt; 0% and ≤ 0.5%, allocation &gt; 0% and ≤ 10%, daily-loss limit &gt; 0% and ≤ 2%. Starting capital must be positive dollars with at most two decimals and applies only to a <strong>future new portfolio</strong>. Rebalancing frequency is proposal metadata until backend review. No configuration can clear a halt.</p>
-          {riskDraftError && <p className="draft-error" role="alert">{riskDraftError}</p>}
+          <p id="draft-limit-note">Hard ceilings: trade risk &gt; 0% and ≤ 0.5%, allocation &gt; 0% and ≤ 10%, daily-loss limit &gt; 0% and ≤ 2%. Starting capital must be positive dollars with at most two decimals; percentages use up to four decimals and applies only to a <strong>future new portfolio</strong>. Rebalancing frequency is proposal metadata until backend review. No configuration can clear a halt.</p>
+          {riskDraftError && <p id="draft-error" className="draft-error" role="alert">{riskDraftError}</p>}
           {riskPreview && <div className="draft-result" role="status">
             <strong>Validated preview — NOT APPLIED</strong>
             <p>New-portfolio equity: USD {riskPreview.starting_equity_usd}; planned risk fraction: {riskPreview.risk_per_trade_fraction}; allocation fraction: {riskPreview.max_instrument_fraction}; daily-loss fraction: {riskPreview.daily_loss_fraction}; rebalance: {riskPreview.rebalance_frequency}. Schema: {riskPreview.schema}. <strong>No settings have been saved, sent, or activated.</strong></p>
