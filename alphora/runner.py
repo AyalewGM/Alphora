@@ -107,6 +107,9 @@ class PaperSessionRunner:
         self._mark = mark_price
         self._versions = {}
         self._last_day = None
+        # Conservatively remember any observed FATAL through EOD settlement.
+        # Do not halt the book until already ACKed synthetic fills are settled.
+        self._fatal_recon_seen = False
 
     def _marks(self, day: SessionDay):
         return {sym: getattr(bar, self._mark)
@@ -132,16 +135,16 @@ class PaperSessionRunner:
         return PaperAccount(equity, INITIAL_EQUITY, snap.cash,
                             day_pnl, snap.session_id)
 
-    def _reconcile_or_halt(self, *, at):
-        """Latch any observed FATAL reconciliation, even if it later clears.
+    def _reconcile_observed(self, *, at):
+        """Remember FATAL through terminal settlement, even if drift clears.
 
-        A venue discrepancy that disappears during automatic EOD expiry is
-        not independently verified recovery. A one-way durable halt prevents
-        later BUYs or a restarted runner from treating it as harmless.
+        Prematurely halting the book would reject fills of previously ACKed
+        BUYs; persistence therefore occurs after those fills settle at EOD.
+        A crash before terminal settlement is NOT restart-safe recovery (#42).
         """
         certificate = reconcile(self._book, self._ledger, self._adapter, at=at)
         if certificate.status == "FATAL":
-            self._book.halt()
+            self._fatal_recon_seen = True
         return certificate
 
     def _stop_of(self, symbol):
@@ -262,7 +265,7 @@ class PaperSessionRunner:
             self._mgr.sync(now=now)
             snap = self._book.snapshot()
             account = self._account(snap, marks)
-            recon = self._reconcile_or_halt(at=now)
+            recon = self._reconcile_observed(at=now)
             # Exits first: they free shares and cash for same-day re-entry.
             for sym, qty, cost in snap.positions:
                 if sym not in marks:
@@ -284,7 +287,7 @@ class PaperSessionRunner:
                 try:
                     # A previous exit can mutate the venue, ledger and book.
                     # Refresh the certificate before each distinct SELL dispatch.
-                    recon = self._reconcile_or_halt(at=now)
+                    recon = self._reconcile_observed(at=now)
                     view = self._mgr.execute_exit(
                         plan, symbol=sym, limit_price=marks[sym],
                         recon=recon, fee_budget=self._fee, now=now)
@@ -298,7 +301,7 @@ class PaperSessionRunner:
             self._mgr.sync(now=now)
             # A pre-exit certificate cannot attest the post-exit state.
             # Recheck after settlement before any new BUY decisions.
-            recon = self._reconcile_or_halt(at=now)
+            recon = self._reconcile_observed(at=now)
             # Exits settle first, THEN the daily mark is observed as a real
             # equity mark: risk-reducing liquidation is never blocked by the
             # one-way loss halt it may arm. New intents face the armed halt.
@@ -310,6 +313,9 @@ class PaperSessionRunner:
                 if sym not in marks:
                     continue
                 snap = self._book.snapshot()
+                if self._fatal_recon_seen:
+                    actions.append(f"ENTRY_VETO:{sym}:FATAL_RECONCILIATION")
+                    break
                 if snap.halted:
                     actions.append(f"ENTRY_VETO:{sym}:PAPER_BOOK_HALTED")
                     break
@@ -332,7 +338,7 @@ class PaperSessionRunner:
                     # A previous BUY may have changed cash, reserved cash or
                     # open orders. A fresh certificate is required for *each*
                     # attempted dispatch, not merely once per daily mark.
-                    recon = self._reconcile_or_halt(at=now)
+                    recon = self._reconcile_observed(at=now)
                     view = self._mgr.execute_entry(
                         plan, self._account(snap, marks), recon=recon,
                         fee_budget=self._fee, now=now, reconciled=True)
@@ -353,18 +359,20 @@ class PaperSessionRunner:
             # The certificate used before order dispatch does not attest
             # terminal fills, cancellations or expiration. Never report it
             # as the final portfolio reconciliation.
-            final_recon = self._reconcile_or_halt(at=now)
-            if final_recon.status == "CLEAN":
+            final_recon = self._reconcile_observed(at=now)
+            if final_recon.status == "CLEAN" and not self._fatal_recon_seen:
                 self._book.observe_daily_loss(settled_account, reconciled=True)
             else:
-                # Uncertain terminal state cannot certify a loss observation.
-                # Persist a one-way fail-closed pause for all new paper buys.
+                # A FATAL encountered earlier is not cleared merely because
+                # the venue auto-expired its unknown order. Settle already
+                # accepted fills first; then durably latch the one-way pause.
                 self._book.halt()
             final = self._book.snapshot()
             reports.append(DayReport(
                 day.day, settled_account.equity, final.cash, final.positions,
                 len(self._ledger.open_orders()), tuple(actions),
-                final_recon.status, final.halted))
+                "FATAL" if self._fatal_recon_seen else final_recon.status,
+                final.halted))
         return RunReport(tuple(reports),
                          reports[-1].equity if reports else INITIAL_EQUITY,
                          bool(reports and reports[-1].halted))
