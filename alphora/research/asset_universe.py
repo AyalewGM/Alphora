@@ -112,9 +112,21 @@ def inspect_universe(assets, *, as_of, source, revision, license_claim,
             # A historical as-of snapshot must never embed a rename that
             # only becomes effective after the snapshot date. Explicitly
             # not-yet-listed exclusions are the sole future-date exception.
+            # end_exclusive is the first *non-listed* date. For a
+            # delisting that occurs on the as-of date, its final period
+            # correctly ends tomorrow; this is a boundary marker, not a
+            # future ticker rename. Other future endpoints remain invalid.
+            terminal_delisting_close = (
+                i == len(asset.ticker_history) - 1
+                and asset.delisting_date == day
+                and item.end_exclusive is not None
+                and (item.end_exclusive - day).days == 1
+            )
             if (asset.exclusion_reason != "NOT_YET_LISTED"
                     and (item.start > day or
-                         (item.end_exclusive is not None and item.end_exclusive > day))):
+                         (item.end_exclusive is not None
+                          and item.end_exclusive > day
+                          and not terminal_delisting_close))):
                 raise ValueError("FUTURE_TICKER_HISTORY")
             if item.start <= day and (item.end_exclusive is None or day < item.end_exclusive):
                 active_symbol = item.symbol
