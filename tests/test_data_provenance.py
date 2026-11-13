@@ -80,6 +80,15 @@ class PointInTimeReceiptTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "SNAPSHOT_HASH_MISMATCH"):
                     inspect(first, revised, expected_sha256=pinned)
 
+    def test_v2_receipt_requires_explicit_repin_of_v1_hashes(self):
+        # Known synthetic fixture digests freeze the canonicalization schema.
+        # A v1 receipt must be rejected rather than silently treated as v2.
+        legacy_digest = "788f90d65cdd6820d694e69f69cc374a4f20eaa8d1930f2e19f3016ab4cea922"
+        v2_digest = "37a502dbbf9bf3c37ea73c34db7534d54e9a545548e3e1087ebaad78743c6533"
+        self.assertEqual(inspect(*self.bars).sha256, v2_digest)
+        with self.assertRaisesRegex(ValueError, "SNAPSHOT_HASH_MISMATCH"):
+            inspect(*self.bars, expected_sha256=legacy_digest)
+
     def test_expected_hash_fails_closed(self):
         digest = inspect(*self.bars).sha256
         self.assertEqual(inspect(*self.bars, expected_sha256=digest).sha256, digest)
