@@ -39,3 +39,20 @@ test("narrow viewport preserves status text and keyboard-reachable research tabs
   assert.match(responsive, /\.tabbar button \{ flex:0 0 auto; min-height:44px/);
   assert.match(jsx, /<span role="status" aria-live="polite">\{apiState\}<\/span>/);
 });
+
+
+test("paper account tables distinguish unavailable evidence from empty exposure or order history", () => {
+  assert.match(jsx, /<h3 id="monitor-positions-title">Positions and pending exposure<\/h3>/);
+  assert.match(jsx, /<h3 id="monitor-journal-title">Paper decision journal<\/h3>/);
+  assert.match(jsx, /UNAVAILABLE — NOT ZERO POSITIONS/);
+  assert.match(jsx, /NOT VERIFIED — NOT AN EMPTY JOURNAL/);
+  assert.match(jsx, /This does not prove no orders or fills occurred/);
+  assert.match(jsx, /<th scope="col">Pending exposure<\/th>/);
+  assert.match(jsx, /<th scope="col">Risk &amp; reconciliation<\/th>/);
+  assert.match(jsx, /role="region" aria-label="Positions and pending exposure table, horizontally scrollable" tabIndex="0"/);
+  assert.match(jsx, /role="region" aria-label="Decision journal table, horizontally scrollable" tabIndex="0"/);
+  assert.match(css, /\.monitor-table-scroll\{max-width:100%;overflow-x:auto;/);
+  assert.match(css, /\.monitor-table-scroll:focus-visible\{outline:3px/);
+  // The monitor must not imply that placeholders attest actual holdings or fills.
+  assert.doesNotMatch(jsx, /No open positions|No orders (?:have been )?placed|Halt is clear/);
+});
