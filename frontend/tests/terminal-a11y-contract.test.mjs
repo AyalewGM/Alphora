@@ -56,3 +56,17 @@ test("paper account tables distinguish unavailable evidence from empty exposure 
   // The monitor must not imply that placeholders attest actual holdings or fills.
   assert.doesNotMatch(jsx, /No open positions|No orders (?:have been )?placed|Halt is clear/);
 });
+
+test("validated settings expose only an accessible, un-applied comparison, not effective policy", () => {
+  assert.match(jsx, /setRiskPreview\(buildRiskReview\(riskDraft\)\)/);
+  assert.match(jsx, /Validated local preview — NOT APPLIED/);
+  assert.match(jsx, /not the account's effective policy/);
+  assert.match(jsx, /<th scope="col">Approved reference<\/th>/);
+  assert.match(jsx, /<th scope="col">Local proposal<\/th>/);
+  assert.match(jsx, /riskPreview\.rows\.map\(row =>/);
+  assert.match(jsx, /role="region" aria-label="Draft risk comparison table, horizontally scrollable" tabIndex="0"/);
+  assert.match(jsx, /Nothing was saved, sent, activated or scheduled/);
+  assert.match(css, /\.draft-review-wrap\{max-width:100%;overflow-x:auto;/);
+  assert.match(css, /\.draft-review-wrap:focus-visible\{outline:3px/);
+  assert.doesNotMatch(jsx, /fetch\(.*(?:orders|settings\/apply|broker)/);
+});
