@@ -238,8 +238,11 @@ function App() {
           </form>
           <p id="draft-limit-note">Hard ceilings: trade risk &gt; 0% and ≤ 0.5%, allocation &gt; 0% and ≤ 10%, daily-loss limit &gt; 0% and ≤ 2%. Starting capital must be positive dollars with at most two decimals and applies only to a <strong>future new portfolio</strong>. Percentages accept up to four decimal places. Rebalancing frequency is proposal metadata until backend review. No configuration can clear a halt.</p>
           {riskDraftError && <p id="draft-error" className="draft-error" role="alert">{riskDraftError}</p>}
-          {riskPreview && <div className="draft-result" role="status" aria-label="Validated unsaved paper risk proposal comparison">
-            <strong>Validated local preview — NOT APPLIED</strong>
+          <p className="draft-feedback" role="status" aria-live="polite">
+            {riskPreview ? <strong>Validated local preview — NOT APPLIED</strong> : "Draft not validated or applied."}
+          </p>
+          {riskPreview && <div className="draft-result">
+            <strong>Local comparison only — NOT EFFECTIVE POLICY</strong>
             <p>This is a comparison with approved <strong>hard ceilings and new-portfolio defaults</strong>, not the account's effective policy. No effective revision or account snapshot has been verified.</p>
             <div className="draft-review-wrap" role="region" aria-label="Draft risk comparison table, horizontally scrollable" tabIndex="0">
               <table className="draft-review-table">
