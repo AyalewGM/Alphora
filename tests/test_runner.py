@@ -108,10 +108,9 @@ class RunnerTests(unittest.TestCase):
                             client_order_id="z" * 64)
         report = self.runner.run((day(2, "50", {"SPY": WATCH}),))
         d = report.days[0]
-        # The rogue order expires during EOD cleanup, making terminal
-        # reconciliation CLEAN. The *earlier* FATAL must still be durably
-        # latched; automatic expiry is not independently reviewed recovery.
-        self.assertEqual(d.recon_status, "CLEAN")
+        # The rogue order expires during EOD cleanup, but the worst
+        # observed reconciliation remains FATAL and the pause persists.
+        self.assertEqual(d.recon_status, "FATAL")
         self.assertTrue(d.halted)
         self.assertTrue(self.book.snapshot().halted)
         self.assertTrue(any(a.startswith("ENTRY_VETO:SPY")
@@ -122,7 +121,7 @@ class RunnerTests(unittest.TestCase):
         self.venue.dispatch(DispatchRequest("QQQ", "BUY", 1, D("10")),
                             client_order_id="z" * 64)
         first = self.runner.run((day(2, "50", {"SPY": WATCH}),))
-        self.assertEqual(first.days[0].recon_status, "CLEAN")
+        self.assertEqual(first.days[0].recon_status, "FATAL")
         self.assertTrue(first.halted)
         original_orders = self.ledger.orders()
         self.book.close()
@@ -223,7 +222,7 @@ class RunnerTests(unittest.TestCase):
             mgr.execute_entry = real_entry
         actions = report.days[0].actions
         self.assertIn("ENTRY:QQQ:ACKED", actions)
-        self.assertTrue(any(a.startswith("ENTRY_VETO:SPY:STALE_OR_UNCLEAN")
+        self.assertTrue(any(a.startswith("ENTRY_VETO:SPY:FATAL_RECONCILIATION")
                             for a in actions), actions)
         self.assertEqual(len(called), 1)
         self.assertEqual({o.symbol for o in self.ledger.orders()}, {"QQQ"})
