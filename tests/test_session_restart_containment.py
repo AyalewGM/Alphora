@@ -98,6 +98,31 @@ class RestartContainmentTests(unittest.TestCase):
         self.assertEqual(self.venue.open_orders(), ())
         self.assertIsNone(self.runner._last_day)
 
+    def test_same_session_cold_restart_surfaces_fatal_drift_without_new_orders(self):
+        # A complete process restart loses the in-memory paper venue.
+        # Replaying the *same* date must not fabricate a clean venue/account
+        # state or dispatch more orders based on the persisted book alone.
+        # This is a bounded regression only: the runner currently reports
+        # FATAL rather than refusing this replay before the venue is marked.
+        first = self.runner.run((asserted_day(2, enter=True),))
+        self.assertIn("ENTRY:SPY:ACKED", first.days[0].actions)
+        persisted = (self.book.snapshot(), self.ledger.orders())
+        self.book.close()
+        self.ledger.close()
+        self.venue = PaperBrokerAdapter()  # no recovered fills/positions
+        self._open()
+        replay = self.runner.run((asserted_day(2, enter=True),))
+        self.assertEqual(replay.days[0].recon_status, "FATAL")
+        self.assertFalse(
+            any(a.startswith(("ENTRY:", "EXIT:")) for a in replay.days[0].actions),
+            replay.days[0].actions,
+        )
+        self.assertEqual((self.book.snapshot(), self.ledger.orders()), persisted)
+        self.assertEqual(self.venue.positions(), ())
+        self.assertEqual(self.venue.open_orders(), ())
+        # A FATAL report does not establish restart-safe replay, durable
+        # recovery or a persistent reconciliation halt. #42/#58 remain open.
+
     def test_one_way_manual_halt_survives_reopening_sqlite(self):
         self.runner.run((asserted_day(2, enter=True),))
         self.book.halt()
