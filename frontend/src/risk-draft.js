@@ -29,7 +29,7 @@ export function describeRiskDraftError(error) {
     case "PERCENT_OUT_OF_BOUNDS":
       return "Enter a value above 0 within the approved ceilings: 0.5% trade risk, 10% allocation, 2% daily loss.";
     case "INVALID_PERCENT_FORMAT":
-      return "Enter a nonnegative percentage using digits and up to four decimal places, without a percent sign.";
+      return "Enter a positive percentage using digits and up to four decimal places, without a percent sign.";
     case "INVALID_STARTING_EQUITY":
       return "Enter positive USD starting capital using at most two decimal places; it applies to new portfolios only.";
     case "INVALID_REBALANCE_FREQUENCY":
