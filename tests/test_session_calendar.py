@@ -157,5 +157,24 @@ class SessionCalendarTests(unittest.TestCase):
             inspect(good)
 
 
+    def test_forged_receipt_cannot_bypass_pinned_sha(self):
+        original = inspect()
+        changed_days = (replace(original.days[0],
+                                information_available_at=AVAILABLE + timedelta(hours=1)),
+                        *original.days[1:])
+        for fake in (replace(original, revision="changed-after-inspection"),
+                     replace(original, days=changed_days)):
+            with self.subTest(fake=fake.revision), self.assertRaisesRegex(
+                    ValueError, "SESSION_CALENDAR_MISMATCH"):
+                require_exact_session_coverage(fake, fake.session_days)
+
+    def test_venue_halts_must_be_bounded(self):
+        good = list(sample())
+        halt = VenueHalt(at(good[0].day,10), at(good[0].day,10,15))
+        good[0] = replace(good[0], venue_halts=(halt,) * 33)
+        with self.assertRaisesRegex(ValueError, "INVALID_CALENDAR_DAY"):
+            inspect(good)
+
+
 if __name__ == "__main__":
     unittest.main()
