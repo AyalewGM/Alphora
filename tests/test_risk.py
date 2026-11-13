@@ -33,6 +33,26 @@ class TestRisk(unittest.TestCase):
                     tightened.fingerprint(), "0.00499999999999999999999999|0.1")
                 self.assertNotEqual(tightened.fingerprint(), original.fingerprint())
 
+    def test_direct_policy_bounds_fingerprint_before_formatting(self):
+        # #65: positive finite Decimals can carry enormous exponents; do
+        # not expand them into unbounded persisted policy identities.
+        default = RiskPolicy()
+        for field in ("risk_per_trade_fraction", "max_instrument_fraction"):
+            for value in (D("1e-63"), D("1e-100000"),
+                          D("0.004" + "9" * 65)):
+                with self.subTest(field=field, value=str(value)[:80]):
+                    with self.assertRaisesRegex(ValueError, "INVALID_RISK_POLICY"):
+                        replace(default, **{field: value})
+        # Preserve the same exact 64-character positive wire boundary as
+        # paper-risk-proposal-v1, independent of ambient Decimal precision.
+        expected = "0." + "0" * 61 + "1|0.1"
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as context:
+                context.prec = precision
+                tiny = RiskPolicy(D("1e-62"), D("0.10"))
+                self.assertEqual(tiny.fingerprint(), expected)
+                self.assertEqual(RiskPolicy().fingerprint(), "0.005|0.1")
+
     def test_paper_policy_never_loosens_approved_hard_limits(self):
         # Caller-provided policies can tighten but never exceed the
         # owner's 0.5% per-trade and 10% single-instrument ceilings.
