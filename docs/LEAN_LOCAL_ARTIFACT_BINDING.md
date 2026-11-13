@@ -1,7 +1,9 @@
 # Locally binding LEAN research receipts to artifact bytes
 
 This is an **optional, offline byte-integrity stage** for issue #20,
-stacked on the existing metadata-only LEAN receipts in PR #26.
+building on the merged metadata-only LEAN receipts in PR #26 and local
+artifact binding in PR #33. These utilities are present on `main`; none
+of them constitutes evidence of an actual LEAN engine run.
 
 The PR #3 LEAN research sample is merged but is **not** evidence of an
 executed LEAN backtest. Existing `lean_evidence.py` checks only the
@@ -74,11 +76,30 @@ protected runtime logs and exit codes, and reconcile dated results, cost
 assumptions and allocation limits against the reference simulator.
 The per-file integrity bindings are not a substitute for those steps.
 
-PRs #17 (offline replay), #19 (loader guards), #21 (manifest) and #26
-(receipt metadata) remain separate review dependencies. Do not merge
-without independent qualified human financial and QA acceptance and
-current-head checks. No broker connections, paper orders, deployed
-services, real-money or automated merge.
+## Integration versus research-release acceptance (2026-11-12)
+
+Offline replay #17, loader guards #19, metadata receipts #26, local
+artifact binding #33, bounded market manifest #21, and the weekend
+corporate-action correction #39 are merged. PR #21 merged on
+2026-11-11 and PR #39 merged on 2026-11-12. Both establish only
+offline synthetic-data validation; neither establishes real-market data
+authenticity, an authoritative exchange calendar or an actual LEAN engine
+execution. Recheck branch base, dependency integration and fresh CI for
+all remaining changes before owner-directed integration.
+
+For **offline, synthetic-only engineering PRs**, governance issue #11
+requires exact-head Devin **or** Muse `APPROVED`, successful exact-head
+GitHub Actions and reviewed dependencies; a separate qualified human
+approval is **not** a merge prerequisite. Only the owner may deliberately
+merge reviewed PRs. Engineering must never auto-merge, bypass review or
+push directly to `main`.
+
+**Research/release acceptance is separate:** independently verified licensed
+point-in-time data, authoritative calendar/corporate-action evidence,
+actual isolated offline LEAN runs, reconciled benchmark/portfolio financial
+results and independent QA remain outstanding under #20 and #8. No broker
+connection, credentials, paper orders, deployment, unattended execution or
+real-money trading is authorized by this document or by a PR merge.
 
 ## Repeated three-leg suite binding (offline-only extension)
 
@@ -106,6 +127,8 @@ fabricated artifacts; metadata or file hashes cannot establish that six
 independent LEAN processes ran. This also cannot authenticate licensed
 sources, prevent all path/rename races, verify parent-directory safety,
 prove reproducible performance or reconcile engine numerical outputs.
-Independent human QA must examine actual engine logs and execution
-provenance in addition to these byte-level guards. Never commit real
-licensed input data or credentials to GitHub.
+Independent financial/QA acceptance must examine actual engine logs and
+execution provenance in addition to these byte-level guards before
+claiming research results or authorizing operation. This is not a
+human-review prerequisite for merging offline synthetic-only code.
+Never commit real licensed input data or credentials to GitHub.
