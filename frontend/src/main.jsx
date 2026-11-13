@@ -4,7 +4,8 @@ import "./styles.css";
 import { APPROVED_POLICY, loadLocalReadOnlyStatus } from "./api.js";
 import { parseLocalDailySnapshot } from "./local-bars.js";
 import { normalizedVolumeHeights } from "./chart-scale.js";
-import { DEFAULT_RISK_DRAFT, validateRiskDraft, describeRiskDraftError } from "./risk-draft.js";
+import { DEFAULT_RISK_DRAFT, describeRiskDraftError } from "./risk-draft.js";
+import { buildRiskReview } from "./risk-review.js";
 
 const WATCHLIST = [
   { symbol: "SPY", name: "S&P 500 ETF", base: 582.40, change: 0.82 },
@@ -79,7 +80,7 @@ function App() {
   function previewRiskDraft(event) {
     event.preventDefault();
     try {
-      setRiskPreview(validateRiskDraft(riskDraft));
+      setRiskPreview(buildRiskReview(riskDraft));
       setRiskDraftError("");
       setRiskDraftInvalidField(null);
     } catch (error) {
@@ -237,9 +238,17 @@ function App() {
           </form>
           <p id="draft-limit-note">Hard ceilings: trade risk &gt; 0% and ≤ 0.5%, allocation &gt; 0% and ≤ 10%, daily-loss limit &gt; 0% and ≤ 2%. Starting capital must be positive dollars with at most two decimals and applies only to a <strong>future new portfolio</strong>. Percentages accept up to four decimal places. Rebalancing frequency is proposal metadata until backend review. No configuration can clear a halt.</p>
           {riskDraftError && <p id="draft-error" className="draft-error" role="alert">{riskDraftError}</p>}
-          {riskPreview && <div className="draft-result" role="status">
-            <strong>Validated preview — NOT APPLIED</strong>
-            <p>New-portfolio equity: USD {riskPreview.starting_equity_usd}; planned risk fraction: {riskPreview.risk_per_trade_fraction}; allocation fraction: {riskPreview.max_instrument_fraction}; daily-loss fraction: {riskPreview.daily_loss_fraction}; rebalance: {riskPreview.rebalance_frequency}. Schema: {riskPreview.schema}. <strong>No settings have been saved, sent, or activated.</strong></p>
+          {riskPreview && <div className="draft-result" role="status" aria-label="Validated unsaved paper risk proposal comparison">
+            <strong>Validated local preview — NOT APPLIED</strong>
+            <p>This is a comparison with approved <strong>hard ceilings and new-portfolio defaults</strong>, not the account's effective policy. No effective revision or account snapshot has been verified.</p>
+            <div className="draft-review-wrap" role="region" aria-label="Draft risk comparison table, horizontally scrollable" tabIndex="0">
+              <table className="draft-review-table">
+                <caption>Approved reference versus locally validated, unapplied paper-risk proposal</caption>
+                <thead><tr><th scope="col">Setting</th><th scope="col">Approved reference</th><th scope="col">Local proposal</th><th scope="col">Meaning</th></tr></thead>
+                <tbody>{riskPreview.rows.map(row => <tr key={row.label}><th scope="row">{row.label}</th><td>{row.reference}</td><td>{row.proposed}</td><td>{row.meaning}</td></tr>)}</tbody>
+              </table>
+            </div>
+            <p>Wire schema: {riskPreview.wire.schema}. <strong>Nothing was saved, sent, activated or scheduled.</strong> P0 #42 and separate backend/independent approval remain required.</p>
           </div>}
         </section>
         <section className="panel chart-panel">
