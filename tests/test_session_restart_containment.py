@@ -74,6 +74,30 @@ class RestartContainmentTests(unittest.TestCase):
              self.venue.positions(), self.venue.open_orders()), before,
         )
 
+    def test_new_session_fails_closed_after_cold_venue_restart(self):
+        # Unlike the warm restart test, this loses the entire in-memory
+        # simulated venue. It verifies containment only, NOT order recovery.
+        first = self.runner.run((asserted_day(2, enter=True),))
+        self.assertIn("ENTRY:SPY:ACKED", first.days[0].actions)
+        persisted = (self.book.snapshot(), self.ledger.orders())
+        self.book.close()
+        self.ledger.close()
+        self.venue = PaperBrokerAdapter()  # no positions/orders recovered
+        self._open()
+        self.assertEqual(
+            (self.book.snapshot(), self.ledger.orders()), persisted,
+        )
+        self.assertEqual(self.venue.positions(), ())
+        self.assertEqual(self.venue.open_orders(), ())
+        with self.assertRaisesRegex(ValueError, "SESSION_ROLLOVER_UNSUPPORTED"):
+            self.runner.run((asserted_day(3, enter=True),))
+        self.assertEqual(
+            (self.book.snapshot(), self.ledger.orders()), persisted,
+        )
+        self.assertEqual(self.venue.positions(), ())
+        self.assertEqual(self.venue.open_orders(), ())
+        self.assertIsNone(self.runner._last_day)
+
     def test_one_way_manual_halt_survives_reopening_sqlite(self):
         self.runner.run((asserted_day(2, enter=True),))
         self.book.halt()
