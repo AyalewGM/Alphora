@@ -28,3 +28,14 @@ test("reference API checks must not be represented as verified portfolio state",
   assert.match(jsx, /<dt>Reconciliation<\/dt><dd>NOT VERIFIED<\/dd>/);
   assert.match(jsx, /<dt>Effective policy revision<\/dt><dd>NOT AVAILABLE<\/dd>/);
 });
+
+test("narrow viewport preserves status text and keyboard-reachable research tabs", () => {
+  // Structural CSS contracts only: physical 320px browser + screen-reader QA is separate.
+  const responsive = css.slice(css.indexOf("/* Responsive keyboard access:"));
+  assert.match(responsive, /@media \(max-width:560px\)/);
+  assert.match(responsive, /\.topbar \{ height:auto; min-height:66px; flex-wrap:wrap;/);
+  assert.match(responsive, /\.top-right \[role="status"\] \{ min-width:0; overflow-wrap:anywhere;/);
+  assert.match(responsive, /\.tabbar \{ overflow-x:auto; white-space:nowrap;/);
+  assert.match(responsive, /\.tabbar button \{ flex:0 0 auto; min-height:44px/);
+  assert.match(jsx, /<span role="status" aria-live="polite">\{apiState\}<\/span>/);
+});
