@@ -5,7 +5,7 @@ accounting, broker API, or order execution. This is a validation CONTRACT, not
 proof that an asset was actually available or licensed at an historical date.
 """
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import re
@@ -115,6 +115,13 @@ def inspect_universe(assets, *, as_of, source, revision, license_claim,
             symbols.append({"symbol": item.symbol, "start": item.start.isoformat(),
                             "end_exclusive": (item.end_exclusive.isoformat()
                                               if item.end_exclusive else None)})
+        # A delisted asset's last ticker interval must end immediately
+        # after its stated last listing day. An open-ended ticker alias
+        # would contradict the delisting event and distort survivorship.
+        if asset.delisting_date is not None:
+            if (asset.delisting_date == date.max
+                    or previous_end != asset.delisting_date + timedelta(days=1)):
+                raise ValueError("INVALID_DELISTED_TICKER_HISTORY")
         is_listed = (asset.listing_date <= day and
                      (asset.delisting_date is None or day <= asset.delisting_date))
         if asset.included:
