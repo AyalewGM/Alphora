@@ -147,6 +147,28 @@ function App() {
           <div className="metric"><span>Instrument allocation cap</span><strong>{pct(policy.max_instrument_allocation_fraction)}</strong><small>Per ticker including reservations</small></div>
           <div className="metric"><span>Daily loss shutdown</span><strong>{pct(policy.daily_loss_shutdown_fraction)}</strong><small>Not continuously monitored here</small></div>
         </div>
+        <section className="panel portfolio-monitor" aria-labelledby="paper-monitor-title">
+          <div className="monitor-heading">
+            <h2 id="paper-monitor-title">Paper portfolio monitor</h2>
+            <span className="chip amber">NO VERIFIED ACCOUNT SNAPSHOT</span>
+          </div>
+          <p>Account balance, positions, profit/loss and safety status require a separately reviewed authenticated read-only snapshot. These placeholders are <strong>not account data</strong>; initial virtual equity above is policy reference only.</p>
+          <div className="monitor-grid" aria-label="Portfolio account figures unavailable">
+            <div><span>Available cash</span><strong>Unavailable</strong><small>No verified ledger</small></div>
+            <div><span>Portfolio equity</span><strong>Unavailable</strong><small>No verified marks</small></div>
+            <div><span>Session profit/loss</span><strong>Unavailable</strong><small>No authoritative session baseline</small></div>
+            <div><span>Open positions</span><strong>Unavailable</strong><small>No attested holdings</small></div>
+          </div>
+          <dl className="monitor-safety" aria-label="Paper execution safety status">
+            <div><dt>Emergency halt</dt><dd>UNKNOWN — not attested</dd></div>
+            <div><dt>Reconciliation</dt><dd>NOT VERIFIED</dd></div>
+            <div><dt>Effective policy revision</dt><dd>NOT AVAILABLE</dd></div>
+          </dl>
+          <div className="monitor-journal" aria-label="Decision journal">
+            <h3>Paper decision journal</h3>
+            <p>No authenticated decision records or journal endpoint connected. Nothing in this view is an order, fill or recommendation.</p>
+          </div>
+        </section>
         <section className="panel risk-draft-panel" aria-labelledby="risk-draft-title">
           <div>
             <h2 id="risk-draft-title">Draft paper-risk settings</h2>
