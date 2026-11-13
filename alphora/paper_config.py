@@ -18,7 +18,7 @@ from .risk import (
 _ALLOWED_CADENCES = frozenset(("daily", "weekly", "manual"))
 _CENT = Decimal("0.01")
 _SCHEMA = "paper-risk-proposal-v1"
-_DECIMAL_TEXT = re.compile(r"(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?\\Z")
+_DECIMAL_TEXT = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?\Z")
 _DECIMAL_FIELDS = ("starting_equity_usd", "risk_per_trade_fraction",
                    "max_instrument_fraction", "daily_loss_fraction")
 _WIRE_KEYS = frozenset(("schema", "rebalance_frequency", *_DECIMAL_FIELDS))
