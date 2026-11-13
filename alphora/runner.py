@@ -107,9 +107,10 @@ class PaperSessionRunner:
         self._mark = mark_price
         self._versions = {}
         self._last_day = None
-        # Conservatively remember any observed FATAL through EOD settlement.
-        # Do not halt the book until already ACKed synthetic fills are settled.
-        self._fatal_recon_seen = False
+        # A prior crash in reconciliation (or durably observed FATAL) must
+        # remain a BUY veto after a cold restart. Already ACKed fills may
+        # still settle while the quarantine is active.
+        self._fatal_recon_seen = book.reconciliation_guarded()
 
     def _marks(self, day: SessionDay):
         return {sym: getattr(bar, self._mark)
@@ -136,14 +137,27 @@ class PaperSessionRunner:
                             day_pnl, snap.session_id)
 
     def _reconcile_observed(self, *, at):
-        """Remember FATAL through terminal settlement, even if drift clears.
+        """Quarantine dispatch before inspection; persist FATAL immediately.
 
-        Prematurely halting the book would reject fills of previously ACKed
-        BUYs; persistence therefore occurs after those fills settle at EOD.
-        A crash before terminal settlement is NOT restart-safe recovery (#42).
+        A CHECKING guard survives interruption at any point before a verdict.
+        A FATAL guard is irreversible by later CLEAN certificates. We do not
+        set book_meta.halted until already-ACKed fills finish settling, but the
+        guard makes snapshot().halted true to veto every new BUY meanwhile.
         """
-        certificate = reconcile(self._book, self._ledger, self._adapter, at=at)
-        if certificate.status == "FATAL":
+        token = self._book.begin_reconciliation()
+        if token is None:
+            # A prior crash or another active runner owns the check: do not
+            # infer that a fresh CLEAN certificate can lift its safety stop.
+            self._fatal_recon_seen = True
+        try:
+            certificate = reconcile(self._book, self._ledger, self._adapter, at=at)
+        except BaseException:
+            # Leave the persisted CHECKING token unresolved on any exception.
+            self._fatal_recon_seen = True
+            raise
+        guarded = self._book.finish_reconciliation(
+            token, fatal=(certificate.status == "FATAL"))
+        if guarded:
             self._fatal_recon_seen = True
         return certificate
 
