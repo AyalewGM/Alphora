@@ -1,7 +1,7 @@
 """Offline-only synthetic replay contract; never touches market or broker APIs."""
 import unittest
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal as D, localcontext
 from zoneinfo import ZoneInfo
 
@@ -435,6 +435,26 @@ class OfflineSnapshotReplayTests(unittest.TestCase):
                     original, _input_fingerprint(cost_bps=revised, **common))
                 self.assertEqual(
                     original, _input_fingerprint(cost_bps=equivalent, **common))
+
+    def test_v2_research_input_receipt_requires_repin_of_v1(self):
+        # Stable synthetic example: exact Decimal encoding changed the receipt
+        # schema, so even ordinary v1 fingerprint pins must be revalidated.
+        common = dict(
+            kind="single_asset", strategy="buy_hold",
+            candidate_sha256="a" * 64, spy_sha256=None,
+            as_of=datetime(2026, 11, 2, 14, tzinfo=timezone.utc),
+            cost_bps=D("5"), lookback=20,
+            manifest_sha256=None, manifest_pinned=False,
+        )
+        digest = _input_fingerprint(**common)
+        self.assertEqual(
+            digest,
+            "d014aea94f4a8cd4f29d4d534fbb26e572b4e24f1b9790161c388854fd5b4e5a",
+        )
+        self.assertNotEqual(
+            digest,
+            "d8f6d133788f03983883ccdac0ed7eae800be836c16cff3e5c7187f2d6e29faf",
+        )
 
     def test_research_fingerprint_canonicalizes_signed_zero_fees(self):
         # Negative zero is a valid Decimal research fee input, economically
