@@ -81,9 +81,17 @@ class UniverseContractTests(unittest.TestCase):
                         ticker_history=(TickerPeriod("NEW", date(2026, 11, 3)),),
                         included=False, exclusion_reason="NOT_YET_LISTED")
         self.assertFalse(inspect((early,)).assets[0].included)
-        historical = replace(asset(), delisting_date=date(2026, 10, 30),
-                             included=False, exclusion_reason="DELISTED")
+        historical = replace(
+            asset(), delisting_date=date(2026, 10, 30),
+            ticker_history=(
+                TickerPeriod("OLD", date(2020, 1, 1), date(2024, 1, 1)),
+                TickerPeriod("NEW", date(2024, 1, 1), date(2026, 10, 31))),
+            included=False, exclusion_reason="DELISTED")
         self.assertFalse(inspect((historical,)).assets[0].included)
+        # An open-ended ticker history contradicts a completed delisting.
+        with self.assertRaisesRegex(ValueError, "INVALID_DELISTED_TICKER_HISTORY"):
+            inspect((asset(delisting_date=date(2026, 10, 30),
+                           included=False, exclusion_reason="DELISTED"),))
         for candidate in (
             asset(delisting_date=date(2026, 10, 30)),
             replace(early, included=True, exclusion_reason=None),
