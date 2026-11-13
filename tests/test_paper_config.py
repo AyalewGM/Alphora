@@ -136,6 +136,12 @@ class TestPaperRiskConfig(unittest.TestCase):
                 ctx.prec = precision
                 self.assertEqual(PaperRiskConfig.from_wire(payload), tiny)
                 self.assertEqual(PaperRiskConfig.from_wire(payload).receipt(), tiny.receipt())
+                # The direct policy used by the offline book must accept
+                # every proposal-domain fraction that remains representable.
+                self.assertEqual(
+                    PaperRiskConfig.from_wire(payload).risk_policy().fingerprint(),
+                    tiny.risk_policy().fingerprint(),
+                )
 
 if __name__ == "__main__":
     unittest.main()
