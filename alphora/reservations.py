@@ -67,6 +67,11 @@ class OfflineReservations:
         # a running/reopened book without creating a new reviewed session.
         if not policy.fingerprint():
             raise ValueError("INVALID_PAPER_BOOK")
+        # Only an absent SQLite path can bootstrap a new CLEAR guard. Any
+        # pre-existing unversioned database is ambiguous: even a flat book
+        # may have seen FATAL before this guard schema was introduced.
+        # Never infer a safe prior reconciliation from empty positions.
+        fresh_storage = not Path(path).exists()
         self._db = sqlite3.connect(str(path), timeout=5, isolation_level=None)
         try:
             self._db.execute("PRAGMA busy_timeout=5000")
@@ -92,7 +97,12 @@ class OfflineReservations:
                     basis_retired TEXT NOT NULL
                 )""")
                 meta = dict(self._db.execute("SELECT key,value FROM book_meta"))
+                fresh_bootstrap = False
                 if not meta:
+                    # Missing metadata in a pre-existing file could indicate
+                    # deletion/corruption of the prior book, not a new one.
+                    if not fresh_storage:
+                        raise ValueError("BOOK_STATE_CORRUPT")
                     if (self._db.execute("SELECT 1 FROM buy_intents LIMIT 1").fetchone()
                             or self._db.execute("SELECT 1 FROM hypothetical_fills LIMIT 1").fetchone()
                             or self._db.execute("SELECT 1 FROM hypothetical_sells LIMIT 1").fetchone()):
@@ -102,6 +112,7 @@ class OfflineReservations:
                         ("cash", str(starting_cash)), ("halted", "0"),
                         ("risk_policy", policy.fingerprint()),
                     ])
+                    fresh_bootstrap = True
                 elif (meta.get("session_id") != session_id or
                       _decimal(meta.get("starting_cash", "0")) != starting_cash or
                       (set(meta) != {"session_id", "starting_cash", "cash", "halted", "risk_policy"}
@@ -121,9 +132,14 @@ class OfflineReservations:
                             "SELECT COUNT(*) FROM reconciliation_guard"
                     ).fetchone()[0]:
                         raise ValueError("BOOK_STATE_CORRUPT")
+                    # Upgrade existing v0 books into durable FATAL quarantine,
+                    # including occupied, fully filled, cancelled, or flat
+                    # portfolios. Prior reconciliation safety is unknowable.
+                    # Accepted synthetic fills can still settle while guarded.
+                    state = "CLEAR" if fresh_bootstrap else "FATAL"
                     self._db.execute(
                         "INSERT INTO reconciliation_guard(id,state,token) "
-                        "VALUES(1,'CLEAR',NULL)")
+                        "VALUES(1,?,NULL)", (state,))
                     self._db.execute("PRAGMA user_version=1")
                 elif schema_version != 1:
                     raise ValueError("BOOK_STATE_CORRUPT")
