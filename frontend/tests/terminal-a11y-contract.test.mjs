@@ -143,3 +143,17 @@ test("a replacement snapshot clears previous bars before the read and permits ca
   assert.ok(jsx.includes('className="import-progress" role="status">Reading local snapshot'));
   assert.match(css, /\.import-panel \.import-progress\{flex-basis:100%;/);
 });
+
+
+test("clearing or replacing an imported-only symbol never falls back to a fake zero-price demo chart", () => {
+  // Source-level safeguard; browser event ordering and view rendering need
+  // a separate React test once CI/DevOps restores executable Actions jobs.
+  const fallback = 'setSelected(current => WATCHLIST.some(row => row.symbol === current) ? current : "SPY");';
+  const clearHandler = jsx.slice(jsx.indexOf("function clearLocalImport()"), jsx.indexOf("async function onSnapshotFile"));
+  const replaceHandler = jsx.slice(jsx.indexOf("async function onSnapshotFile"), jsx.indexOf("useEffect(() => {"));
+  assert.ok(clearHandler.includes(fallback), "clearing an imported-only ticker must select a known demo ticker");
+  assert.ok(replaceHandler.includes(fallback), "replacement pending load must not retain imported-only demo quote");
+  assert.ok(clearHandler.indexOf("setImported(null)") < clearHandler.indexOf(fallback));
+  assert.ok(replaceHandler.indexOf("setImported(null)") < replaceHandler.indexOf(fallback));
+  assert.ok(jsx.includes('const showingLocal = imported?.symbol === selected;'));
+});
