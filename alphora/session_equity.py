@@ -222,14 +222,18 @@ class SessionEquityCheckpoint:
             # A historic breach stays binding even after a later price
             # recovery. A manual/FATAL halt must have a non-price witness.
             halt_rows = self._db.execute(
-                "SELECT reason,revision,mark_receipt FROM session_equity_halt_events "
-                "WHERE session_id=?", (sid,)).fetchall()
-            if len(halt_rows) > 1 or bool(halt_rows) != bool(halted):
+                "SELECT session_id,reason,revision,mark_receipt "
+                "FROM session_equity_halt_events").fetchall()
+            # Rollover of a halted session is forbidden. A witness from an
+            # older session cannot be silently bypassed by changing the
+            # checkpoint's active session ID.
+            if (len(halt_rows) > 1 or bool(halt_rows) != bool(halted)
+                    or (halt_rows and halt_rows[0][0] != sid)):
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             if prior_breach and not halted:
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             if halt_rows:
-                reason, event_revision, event_receipt = halt_rows[0]
+                _, reason, event_revision, event_receipt = halt_rows[0]
                 if (type(event_revision) is not int or event_revision < 1
                         or event_revision > revision
                         or (reason == "LOSS" and
