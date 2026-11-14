@@ -70,3 +70,38 @@ test("read-only risk validation accepts exact numerically equivalent decimal str
   assert.equal(result.policy.max_planned_trade_risk_fraction, "0.005");
   assert.equal(result.policy.starting_virtual_equity, "100000");
 });
+
+test("reference GET responses reject unknown fields, conflicting execution hints and non-JSON shapes", () => {
+  // These two endpoints attest only a fixed, inert reference schema. Unknown
+  // fields must not be silently treated as verified capabilities or account
+  // state, particularly if a future backend adds a contradictory order flag.
+  for (const extra of [
+    { paper_orders_enabled: true },
+    { effective_policy_revision: 9 },
+    { clear_halt: true }
+  ]) {
+    assert.throws(() => validateBackendStatus({...policy, ...extra}, capabilities),
+      /UNSAFE_OR_UNVERIFIED_CAPABILITIES/);
+  }
+  for (const extra of [
+    { broker_orders_enabled: true },
+    { execution_mode: "live" },
+    { connected_broker: "unknown" }
+  ]) {
+    assert.throws(() => validateBackendStatus(policy, {...capabilities, ...extra}),
+      /UNSAFE_OR_UNVERIFIED_CAPABILITIES/);
+  }
+  const missingPolicy = {...policy};
+  delete missingPolicy.max_instrument_allocation_fraction;
+  assert.throws(() => validateBackendStatus(missingPolicy, capabilities),
+    /UNSAFE_OR_UNVERIFIED_CAPABILITIES/);
+  const missingCapability = {...capabilities};
+  delete missingCapability.live_orders_enabled;
+  assert.throws(() => validateBackendStatus(policy, missingCapability),
+    /UNSAFE_OR_UNVERIFIED_CAPABILITIES/);
+  for (const malformed of [[], Object.create(null),
+     JSON.parse('{"market":["US_STOCKS","US_ETFS"],"research_enabled":true,"paper_orders_enabled":false,"live_orders_enabled":false,"rebalance_frequency":"daily","__proto__":{}}')]) {
+    assert.throws(() => validateBackendStatus(policy, malformed),
+      /UNSAFE_OR_UNVERIFIED_CAPABILITIES/);
+  }
+});
