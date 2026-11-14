@@ -142,6 +142,21 @@ class SessionEquityCheckpoint:
             self._db.execute("""CREATE TRIGGER session_equity_marks_no_delete
                 BEFORE DELETE ON session_equity_marks
                 BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_MARK'); END""")
+            # One-time, append-only safety halt evidence. A recovered mark
+            # cannot erase an earlier loss breach; non-price/manual halts
+            # require their own durable witness.
+            self._db.execute("""CREATE TABLE session_equity_halt_events (
+                session_id TEXT PRIMARY KEY,
+                reason TEXT NOT NULL CHECK(reason IN ('LOSS','MANUAL')),
+                revision INTEGER NOT NULL CHECK(revision >= 1),
+                mark_receipt TEXT
+            )""")
+            self._db.execute("""CREATE TRIGGER session_equity_halts_no_update
+                BEFORE UPDATE ON session_equity_halt_events
+                BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_HALT'); END""")
+            self._db.execute("""CREATE TRIGGER session_equity_halts_no_delete
+                BEFORE DELETE ON session_equity_halt_events
+                BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_HALT'); END""")
             self._db.execute("INSERT INTO session_equity_checkpoint VALUES"
                              "(1,?,?,?,?,NULL,0,0,0)",
                              (session_id, str(opening_equity), str(opening_equity),
@@ -190,14 +205,38 @@ class SessionEquityCheckpoint:
                 "WHERE session_id=? ORDER BY observation_number", (sid,)).fetchall()
             if len(history) != observations:
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            prior_breach = False
+            breached_receipts = set()
             for index, (past_receipt, past_equity, ordinal) in enumerate(history, start=1):
                 _receipt(past_receipt)
                 if (type(ordinal) is not int or ordinal != index
                         or type(past_equity) is not str or len(past_equity) > 64):
                     raise ValueError("SESSION_CHECKPOINT_CORRUPT")
                 parsed_equity = _amount(D(past_equity))
+                if parsed_equity <= floor:
+                    prior_breach = True
+                    breached_receipts.add(past_receipt)
                 if index == observations and (past_receipt != mark_hash
                                               or parsed_equity != last):
+                    raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            # A historic breach stays binding even after a later price
+            # recovery. A manual/FATAL halt must have a non-price witness.
+            halt_rows = self._db.execute(
+                "SELECT reason,revision,mark_receipt FROM session_equity_halt_events "
+                "WHERE session_id=?", (sid,)).fetchall()
+            if len(halt_rows) > 1 or bool(halt_rows) != bool(halted):
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            if prior_breach and not halted:
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            if halt_rows:
+                reason, event_revision, event_receipt = halt_rows[0]
+                if (type(event_revision) is not int or event_revision < 1
+                        or event_revision > revision
+                        or (reason == "LOSS" and
+                            (event_receipt not in breached_receipts or
+                             type(event_receipt) is not str))
+                        or (reason == "MANUAL" and event_receipt is not None)
+                        or reason not in ("LOSS", "MANUAL")):
                     raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             return SessionEquityState(sid, opening, last, opening_hash,
                                       mark_hash, revision, observations, bool(halted))
@@ -244,6 +283,11 @@ class SessionEquityCheckpoint:
                 "INSERT INTO session_equity_marks "
                 "(session_id,receipt,equity,observation_number) VALUES (?,?,?,?)",
                 (session_id, receipt, str(equity), old.observations + 1))
+            if halted and not old.halted:
+                self._db.execute(
+                    "INSERT INTO session_equity_halt_events "
+                    "(session_id,reason,revision,mark_receipt) VALUES (?,?,?,?)",
+                    (session_id, "LOSS", old.revision + 1, receipt))
             self._db.execute("UPDATE session_equity_checkpoint SET "
                              "last_equity=?,last_mark_receipt=?,revision=?,"
                              "observations=?,halted=? WHERE id=1",
@@ -295,6 +339,10 @@ class SessionEquityCheckpoint:
         with self._atomic():
             old = self._read()
             if not old.halted:
+                self._db.execute(
+                    "INSERT INTO session_equity_halt_events "
+                    "(session_id,reason,revision,mark_receipt) VALUES (?,?,?,NULL)",
+                    (old.session_id, "MANUAL", old.revision + 1))
                 self._db.execute("UPDATE session_equity_checkpoint "
                                  "SET halted=1,revision=? WHERE id=1",
                                  (old.revision + 1,))
