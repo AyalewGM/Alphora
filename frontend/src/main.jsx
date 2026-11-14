@@ -151,6 +151,13 @@ function App() {
       <aside className="rail" aria-hidden="true"><span className="rail-active">▥</span><span>⌁</span><span>◫</span><span>≡</span></aside>
       <main id="main-content" className="main" tabIndex="-1">
         <div className="pagehead"><div><h1>Market workspace</h1><p>Research, review and monitor simulated decisions</p></div><div className="page-actions"><span>US Stocks & ETFs</span><span className="clock">● Market feeds disconnected</span></div></div>
+        <section className="release-gate" aria-labelledby="paper-release-title">
+          <span className="release-gate-symbol" aria-hidden="true">!</span>
+          <div>
+            <h2 id="paper-release-title">Unattended paper execution BLOCKED — P0 #42</h2>
+            <p>Session-opening equity, durable loss halts and multi-session restart safety are not independently accepted. This workspace is research-only. Reference GET checks and local risk previews do not authorize orders; emergency-stop state remains UNKNOWN.</p>
+          </div>
+        </section>
         <div className="metrics">
           <div className="metric"><span>Initial virtual equity</span><strong>${Number(policy.starting_virtual_equity).toLocaleString("en-US")}</strong><small>Policy reference · not account balance</small></div>
           <div className="metric"><span>Planned risk per trade</span><strong>{pct(policy.max_planned_trade_risk_fraction)}</strong><small>Hard policy maximum</small></div>
