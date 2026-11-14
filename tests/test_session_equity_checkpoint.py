@@ -130,7 +130,13 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         self.assertEqual(next_state.opening_equity, D("105000"))
         self.assertEqual(next_state.revision, old.revision + 1)
         self.assertEqual(next_state.observations, 0)
-        self.assertEqual(self.rollover("105000"), next_state)  # duplicate exact idempotent
+        self.assertEqual(self.store.rollover(
+            previous_session=old.session_id, next_session="2026-11-03",
+            opening_equity=D("105000"), opening_receipt=C,
+            expected_revision=old.revision, reconciled=True,
+            zero_pending=True, verified_calendar=True), next_state)
+        # A duplicate must carry its original optimistic-concurrency token,
+        # not the revision after the rollover committed.
         with self.assertRaisesRegex(ValueError, "CONFLICTING_SESSION_REPLAY"):
             self.rollover("105000", "d" * 64)
         self.assertTrue(self.mark("102000").halted)
@@ -554,6 +560,35 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT previous_session,next_session FROM session_equity_rollovers"
         ).fetchall(), [("2026-11-02", "2026-11-03")])
+
+    def test_rollover_replay_requires_original_revision_and_evidence(self):
+        """A retry may be idempotent, but never invent new attestation."""
+        self.initial()
+        self.mark("105000", B)
+        before = self.store.snapshot()
+        done = self.rollover("105000", C)
+        request = dict(
+            previous_session=before.session_id,
+            next_session=done.session_id,
+            opening_equity=D("105000"), opening_receipt=C,
+            expected_revision=before.revision,
+            reconciled=True, zero_pending=True, verified_calendar=True)
+        for stale in (done.revision, before.revision - 1, None, "1"):
+            with self.subTest(stale=stale):
+                with self.assertRaisesRegex(ValueError, "CONFLICTING_SESSION_REPLAY"):
+                    self.store.rollover(**dict(request, expected_revision=stale))
+        for flag in ("reconciled", "zero_pending", "verified_calendar"):
+            with self.subTest(missing_attestation=flag):
+                with self.assertRaisesRegex(ValueError, "CONFLICTING_SESSION_REPLAY"):
+                    self.store.rollover(**dict(request, **{flag: False}))
+        self.assertEqual(self.store.snapshot(), done)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM session_equity_rollovers").fetchone()[0], 1)
+        # The complete original request remains idempotent across restart.
+        self.conn.close()
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.store = SessionEquityCheckpoint(self.conn)
+        self.assertEqual(self.store.rollover(**request), done)
 
     def test_rollover_chain_survives_reopen_and_rejects_forged_opening(self):
         self.initial()
