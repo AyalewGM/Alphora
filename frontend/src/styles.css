@@ -92,3 +92,14 @@
 .draft-review-table tbody th{color:#c3d8f2;font-weight:650}
 .draft-review-table tbody td{color:#d0deed}
 .draft-review-table tbody tr:last-child th,.draft-review-table tbody tr:last-child td{border-bottom:0}
+
+/* P0 release barrier is a persistent, readable fact, never a simulated
+   account status or an interactive control. Do not use color alone. */
+.release-gate{display:flex;align-items:flex-start;gap:12px;padding:14px 16px;
+  margin:0 0 17px;border:1px solid #a27a3e;border-radius:9px;background:#292319}
+.release-gate-symbol{flex:0 0 26px;display:grid;place-items:center;width:26px;
+  height:26px;border:1px solid #d8a96a;border-radius:50%;color:#ffe2aa;font-weight:800}
+.release-gate>div{min-width:0}
+.release-gate h2{margin:0 0 6px;font-size:14px;line-height:1.4;color:#ffe1ab}
+.release-gate p{margin:0;font-size:12px;line-height:1.55;color:#e9d6b9;overflow-wrap:anywhere}
+@media(max-width:560px){.release-gate{padding:12px;gap:9px}}
