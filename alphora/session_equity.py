@@ -10,10 +10,12 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal as D, DecimalException, Inexact, localcontext
 from itertools import count
+import json
 import re
 import sqlite3
 
-from .risk import DAILY_LOSS_FRACTION, INITIAL_EQUITY
+from .paper_config import PaperRiskConfig
+from .risk import DAILY_LOSS_FRACTION
 
 _RECEIPT = re.compile(r"[a-f0-9]{64}\Z")
 _CENT = D("0.01")
@@ -62,6 +64,42 @@ class SessionEquityState:
     revision: int
     observations: int
     halted: bool
+    policy: PaperRiskConfig
+    policy_receipt: str
+
+
+def _policy_record(value):
+    """Bound and canonically fingerprint an inert policy before persistence.
+
+    Proposal values are NOT proof of an applied or authorized policy. The
+    eventual book owner must supply authenticated effective-policy evidence.
+    """
+    if type(value) is not PaperRiskConfig:
+        raise ValueError("INVALID_SESSION_POLICY")
+    scalars = (value.starting_equity_usd, value.risk_per_trade_fraction,
+               value.max_instrument_fraction, value.daily_loss_fraction)
+    for number in scalars:
+        if type(number) is not D or not number.is_finite():
+            raise ValueError("INVALID_SESSION_POLICY")
+        parts = number.as_tuple()
+        if len(parts.digits) > 64 or not -64 <= parts.exponent <= 64:
+            raise ValueError("INVALID_SESSION_POLICY")
+    try:
+        wire = value.to_wire()
+        if any(len(wire[name]) > 64 for name in
+               ("starting_equity_usd", "risk_per_trade_fraction",
+                "max_instrument_fraction", "daily_loss_fraction")):
+            raise ValueError("INVALID_SESSION_POLICY")
+        checked = PaperRiskConfig.from_wire(wire)
+        if checked != value or checked.daily_loss_fraction > DAILY_LOSS_FRACTION:
+            raise ValueError("INVALID_SESSION_POLICY")
+        literal = json.dumps(wire, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=True)
+        if len(literal) > 384:
+            raise ValueError("INVALID_SESSION_POLICY")
+        return literal, checked.receipt(), checked
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("INVALID_SESSION_POLICY") from exc
 
 
 class SessionEquityCheckpoint:
@@ -103,7 +141,8 @@ class SessionEquityCheckpoint:
                 self._db.execute(f"RELEASE SAVEPOINT {savepoint}")
             raise
 
-    def bootstrap(self, session_id, opening_equity, opening_receipt, *, proven_new_book=False):
+    def bootstrap(self, session_id, opening_equity, opening_receipt, *,
+                  proven_new_book=False, policy=None):
         """Only the book constructor may provide a proven fresh-book gate.
 
         Never call this on an old SQLite file, even if currently flat. The
@@ -112,7 +151,12 @@ class SessionEquityCheckpoint:
         _session(session_id)
         _amount(opening_equity, positive=True)
         _receipt(opening_receipt)
-        if opening_equity != INITIAL_EQUITY:
+        # The approved $100k/2% settings remain defaults. A *new* paper
+        # portfolio may request tighter limits or different starting capital;
+        # neither setting can silently reconfigure an existing SQLite book.
+        policy_text, policy_hash, checked = _policy_record(
+            PaperRiskConfig() if policy is None else policy)
+        if opening_equity != checked.starting_equity_usd:
             raise ValueError("INVALID_SESSION_STARTING_EQUITY")
         if proven_new_book is not True:
             raise ValueError("FRESH_BOOK_EVIDENCE_REQUIRED")
@@ -125,7 +169,8 @@ class SessionEquityCheckpoint:
                 session_id TEXT NOT NULL, opening_equity TEXT NOT NULL,
                 last_equity TEXT NOT NULL, opening_receipt TEXT NOT NULL,
                 last_mark_receipt TEXT, revision INTEGER NOT NULL,
-                observations INTEGER NOT NULL, halted INTEGER NOT NULL
+                observations INTEGER NOT NULL, halted INTEGER NOT NULL,
+                policy_json TEXT NOT NULL, policy_receipt TEXT NOT NULL
             )""")
             # Append-only session mark receipts share the book's transaction.
             # A previously used receipt must not overwrite any newer mark.
@@ -158,9 +203,9 @@ class SessionEquityCheckpoint:
                 BEFORE DELETE ON session_equity_halt_events
                 BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_HALT'); END""")
             self._db.execute("INSERT INTO session_equity_checkpoint VALUES"
-                             "(1,?,?,?,?,NULL,0,0,0)",
+                             "(1,?,?,?,?,NULL,0,0,0,?,?)",
                              (session_id, str(opening_equity), str(opening_equity),
-                              opening_receipt))
+                              opening_receipt, policy_text, policy_hash))
             return self._read()
 
     def _read(self):
@@ -169,7 +214,7 @@ class SessionEquityCheckpoint:
             if len(rows) != 1:
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             (key, sid, opening, last, opening_hash, mark_hash,
-             revision, observations, halted) = rows[0]
+             revision, observations, halted, policy_text, policy_hash) = rows[0]
             _session(sid)
             # SQLite accepts arbitrary text despite TEXT affinity. Bound stored
             # Decimal representations before parsing/multiplication: an oversized
@@ -179,6 +224,13 @@ class SessionEquityCheckpoint:
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             opening = _amount(D(opening), positive=True)
             last = _amount(D(last))
+            if type(policy_text) is not str or len(policy_text) > 384:
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            policy_literal, expected_hash, effective = _policy_record(
+                PaperRiskConfig.from_wire(json.loads(policy_text)))
+            _receipt(policy_hash)
+            if policy_literal != policy_text or expected_hash != policy_hash:
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             _receipt(opening_hash)
             if mark_hash is not None:
                 _receipt(mark_hash)
@@ -186,7 +238,8 @@ class SessionEquityCheckpoint:
                     or type(observations) is not int or observations < 0
                     or halted not in (0, 1) or type(halted) is not int
                     or (observations == 0) != (mark_hash is None)
-                    or revision < observations):
+                    or revision < observations
+                    or (revision == 0 and opening != effective.starting_equity_usd)):
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             # No observation may change the opening mark. Once a verified mark
             # reaches the inclusive 2% loss floor, the halt must be durable;
@@ -194,7 +247,7 @@ class SessionEquityCheckpoint:
             with localcontext() as ctx:
                 ctx.prec = 80
                 ctx.traps[Inexact] = True
-                floor = opening * (D(1) - DAILY_LOSS_FRACTION)
+                floor = opening * (D(1) - effective.daily_loss_fraction)
             if ((observations == 0 and last != opening)
                     or (observations > 0 and last <= floor and halted == 0)):
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
@@ -243,7 +296,8 @@ class SessionEquityCheckpoint:
                         or reason not in ("LOSS", "MANUAL")):
                     raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             return SessionEquityState(sid, opening, last, opening_hash,
-                                      mark_hash, revision, observations, bool(halted))
+                                      mark_hash, revision, observations, bool(halted),
+                                      effective, policy_hash)
         except (sqlite3.Error, TypeError, ValueError, ArithmeticError) as exc:
             raise ValueError("SESSION_CHECKPOINT_CORRUPT") from exc
 
@@ -281,7 +335,7 @@ class SessionEquityCheckpoint:
             with localcontext() as ctx:
                 ctx.prec = 80
                 ctx.traps[Inexact] = True
-                floor = old.opening_equity * (D(1) - DAILY_LOSS_FRACTION)
+                floor = old.opening_equity * (D(1) - old.policy.daily_loss_fraction)
                 halted = old.halted or equity <= floor
             self._db.execute(
                 "INSERT INTO session_equity_marks "
