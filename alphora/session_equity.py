@@ -184,6 +184,7 @@ class SessionEquityCheckpoint:
                 session_id TEXT NOT NULL, receipt TEXT NOT NULL,
                 equity TEXT NOT NULL, observation_number INTEGER NOT NULL
                     CHECK(observation_number >= 1),
+                revision INTEGER NOT NULL CHECK(revision >= 1),
                 PRIMARY KEY (session_id, receipt),
                 UNIQUE (session_id, observation_number)
             )""")
@@ -291,17 +292,21 @@ class SessionEquityCheckpoint:
             # Recheck the full durable per-session receipt sequence. Missing,
             # contradictory, out-of-order, or truncated rows fail closed.
             history = self._db.execute(
-                "SELECT receipt,equity,observation_number FROM session_equity_marks "
+                "SELECT receipt,equity,observation_number,revision FROM session_equity_marks "
                 "WHERE session_id=? ORDER BY observation_number", (sid,)).fetchall()
             if len(history) != observations:
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            active_mark_revisions = []
             prior_breach = False
             first_breach = None  # (first offending receipt, mark ordinal)
-            for index, (past_receipt, past_equity, ordinal) in enumerate(history, start=1):
+            for index, (past_receipt, past_equity, ordinal, mark_revision) in enumerate(
+                    history, start=1):
                 _receipt(past_receipt)
                 if (type(ordinal) is not int or ordinal != index
+                        or type(mark_revision) is not int or mark_revision < 1
                         or type(past_equity) is not str or len(past_equity) > 64):
                     raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+                active_mark_revisions.append(mark_revision)
                 parsed_equity = _amount(D(past_equity))
                 if parsed_equity <= floor:
                     prior_breach = True
@@ -349,7 +354,7 @@ class SessionEquityCheckpoint:
                 _receipt(next_receipt)
                 next_equity = _amount(D(next_equity_text), positive=True)
                 prior_marks = self._db.execute(
-                    "SELECT receipt,equity,observation_number "
+                    "SELECT receipt,equity,observation_number,revision "
                     "FROM session_equity_marks WHERE session_id=? "
                     "ORDER BY observation_number", (previous,)).fetchall()
                 if not prior_marks:
@@ -359,9 +364,13 @@ class SessionEquityCheckpoint:
                     ctx.traps[Inexact] = True
                     previous_floor = chain_opening * (
                         D(1) - effective.daily_loss_fraction)
-                for mark_index, (prior_receipt, prior_equity_text, number) in enumerate(
+                for mark_index, (prior_receipt, prior_equity_text, number,
+                                 mark_revision) in enumerate(
                         prior_marks, start=1):
                     if (type(number) is not int or number != mark_index
+                            or type(mark_revision) is not int
+                            or mark_revision != (historical_observations
+                                                 + index - 1 + mark_index)
                             or type(prior_equity_text) is not str
                             or len(prior_equity_text) > 64):
                         raise ValueError("SESSION_CHECKPOINT_CORRUPT")
@@ -427,6 +436,19 @@ class SessionEquityCheckpoint:
             # additional revision. Otherwise corrupt revision bumps can
             # spoof optimistic concurrency or replay state after restart.
             manual_halts = int(bool(halt_rows) and halt_rows[0][1] == "MANUAL")
+            # Each immutable mark is bound to its global revision. A MANUAL
+            # halt consumes one separate revision; marks before it have no
+            # gap, while marks after it must have exactly one. This rejects
+            # a backdated halt witness even if its local trigger was removed.
+            manual_revision = halt_rows[0][2] if manual_halts else None
+            active_base_revision = historical_observations + len(transitions)
+            for number, mark_revision in enumerate(active_mark_revisions, start=1):
+                expected_mark_revision = active_base_revision + number
+                if (manual_revision is not None
+                        and manual_revision <= expected_mark_revision):
+                    expected_mark_revision += 1
+                if mark_revision != expected_mark_revision:
+                    raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             if revision != (historical_observations + observations
                             + len(transitions) + manual_halts):
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
@@ -474,8 +496,10 @@ class SessionEquityCheckpoint:
                 halted = old.halted or equity <= floor
             self._db.execute(
                 "INSERT INTO session_equity_marks "
-                "(session_id,receipt,equity,observation_number) VALUES (?,?,?,?)",
-                (session_id, receipt, str(equity), old.observations + 1))
+                "(session_id,receipt,equity,observation_number,revision) "
+                "VALUES (?,?,?,?,?)",
+                (session_id, receipt, str(equity), old.observations + 1,
+                 old.revision + 1))
             if halted and not old.halted:
                 self._db.execute(
                     "INSERT INTO session_equity_halt_events "
