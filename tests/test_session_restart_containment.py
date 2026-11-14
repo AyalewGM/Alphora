@@ -114,14 +114,17 @@ class RestartContainmentTests(unittest.TestCase):
         self._open()
         replay = self.runner.run((asserted_day(2, enter=True),))
         self.assertEqual(replay.days[0].recon_status, "FATAL")
+        # #58 has landed on main: FATAL must persist a one-way stop.
+        self.assertTrue(replay.halted)
+        self.assertTrue(self.book.snapshot().halted)
         self.assertFalse(
             any(a.startswith(("ENTRY:", "EXIT:")) for a in replay.days[0].actions),
             replay.days[0].actions,
         )
         before_book, before_orders = persisted
         after_book = self.book.snapshot()
-        # A FATAL reconciliation may durably arm the one-way safety halt,
-        # as proposed in #58. That is the ONLY permitted book mutation:
+        # A FATAL reconciliation must durably arm the one-way safety halt.
+        # That is the ONLY permitted book mutation:
         # the replay must not change cash, positions, reserved funds, pending
         # intents, or the ledger to hide the lost venue state.
         self.assertEqual(
@@ -131,14 +134,13 @@ class RestartContainmentTests(unittest.TestCase):
         self.assertEqual(replay.halted, after_book.halted)
         self.assertEqual(self.venue.positions(), ())
         self.assertEqual(self.venue.open_orders(), ())
-        # In either implementation, verify the halt state was not merely
-        # an in-memory flag that disappears on SQLite reopening.
+        # Verify the durable halt is not merely an in-memory flag that
+        # disappears on SQLite reopening.
         self._restart()
-        self.assertEqual(self.book.snapshot().halted, after_book.halted)
+        self.assertTrue(self.book.snapshot().halted)
         self.assertEqual(self.ledger.orders(), before_orders)
-        # A separate integrated #58/#69 exact-head regression must REQUIRE
-        # FATAL -> halted=True; this standalone #69 test also runs on main,
-        # where that fix is not yet merged. No safe session rollover exists.
+        # FATAL -> halted=True is now required here as well as in #58 tests.
+        # This is still single-session containment, not session rollover.
 
     def test_one_way_manual_halt_survives_reopening_sqlite(self):
         self.runner.run((asserted_day(2, enter=True),))
