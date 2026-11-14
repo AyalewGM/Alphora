@@ -103,3 +103,17 @@
 .release-gate h2{margin:0 0 6px;font-size:14px;line-height:1.4;color:#ffe1ab}
 .release-gate p{margin:0;font-size:12px;line-height:1.55;color:#e9d6b9;overflow-wrap:anywhere}
 @media(max-width:560px){.release-gate{padding:12px;gap:9px}}
+
+/* Critical research provenance cannot disappear at tablet/mobile widths.
+   Earlier responsive rules hid the PAPER ONLY and SYNTHETIC/USER-SUPPLIED
+   badges entirely below 850px, leaving a less explicit mobile header. */
+@media (max-width:850px) {
+  .topbar { height:auto; min-height:66px; flex-wrap:wrap; gap:8px; padding-block:10px }
+  .top-center { display:flex; flex-wrap:wrap; gap:8px }
+  .top-right { flex:1 1 100%; min-width:0; justify-content:flex-start }
+  .top-right [role="status"] { min-width:0; overflow-wrap:anywhere; line-height:1.35 }
+}
+@media (max-width:560px) {
+  .top-center { flex:1 1 100% }
+  .top-center .chip { white-space:normal; overflow-wrap:anywhere }
+}
