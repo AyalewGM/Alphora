@@ -181,13 +181,49 @@ class ManagerTests(unittest.TestCase):
                                    now=at(), reconciled=True)
         self.assertEqual(self.ledger.orders(), ())
 
+    def test_warn_recon_blocks_new_entry(self):
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        # Venue fills but the manager has not synced: UNSETTLED_FILLS (WARN).
+        self.venue.advance({"SPY": D("50")}, at=at(1))
+        warn = self.recon(at(1))
+        self.assertEqual(warn.status, "WARN")
+        self.assertIn("UNSETTLED_FILLS", {d.kind for d in warn.diffs})
+        before = (self.ledger.orders(), self.venue.open_orders())
+        with self.assertRaisesRegex(ValueError,
+                                    "STALE_OR_UNCLEAN_RECONCILIATION"):
+            self.mgr.execute_entry(self.entry("d" * 64, symbol="QQQ"),
+                                   self.account(), recon=warn, now=at(1),
+                                   reconciled=True)
+        self.assertEqual((self.ledger.orders(), self.venue.open_orders()),
+                         before)
+
+    def test_own_undelivered_intent_resumes_but_blocks_other_entries(self):
+        plan = self.entry()
+        # Crash after the hold and ledger record, before dispatch.
+        self.book.reserve_buy(KEY, self.account(), plan.proposal,
+                              reconciled=True)
+        self.ledger.create(KEY, symbol="SPY", side="BUY", qty=100,
+                           limit_price=D("50"), stop_price=D("48"), now=at())
+        warn = self.recon(at(1))
+        self.assertEqual(warn.status, "WARN")
+        with self.assertRaisesRegex(ValueError,
+                                    "STALE_OR_UNCLEAN_RECONCILIATION"):
+            self.mgr.execute_entry(self.entry("d" * 64, symbol="QQQ"),
+                                   self.account(), recon=warn, now=at(1),
+                                   reconciled=True)
+        view = self.mgr.execute_entry(plan, self.account(), recon=warn,
+                                      now=at(1), reconciled=True)
+        self.assertEqual(view.status, "ACKED")
+        self.assertEqual(self.recon(at(2)).status, "CLEAN")
+
     def test_entry_requires_fresh_nonfatal_recon(self):
         stale = reconcile(self.book, self.ledger, self.venue,
                           at=at() - timedelta(seconds=200))
         with self.assertRaisesRegex(ValueError, "STALE_OR_UNCLEAN_RECONCILIATION"):
             self.mgr.execute_entry(self.entry(), self.account(), recon=stale,
                                    now=at(), reconciled=True)
-        # A WARN reconcilation (in-flight states) still permits dispatch.
+        # A fresh CLEAN certificate permits dispatch.
         self.mgr.execute_entry(self.entry(), self.account(),
                                recon=self.recon(), now=at(),
                                reconciled=True)

@@ -72,10 +72,9 @@ class PaperOrderManager:
     def _require_clean_recon(self, recon, now, max_age_seconds):
         """Dispatch needs a fresh, non-FATAL Reconciliation — not a bare bool.
 
-        FATAL certificates block dispatch (diverged truths need an operator).
-        WARN diffs are explainable in-flight states and do not block, EXCEPT
-        LOST_ACK: an unresolved SENT order blocks new dispatch per the design;
-        the remedy is sync(), which requires no certificate.
+        FATAL certificates and LOST_ACK block every dispatch here. Entries and
+        exits additionally require CLEAN (see execute_entry/execute_exit);
+        the remedy for WARN is sync(), which requires no certificate.
         """
         if (type(max_age_seconds) is not int
                 or not 0 <= max_age_seconds <= MAX_RECON_AGE_SECONDS):
@@ -117,6 +116,14 @@ class PaperOrderManager:
         if not _aware(now):
             raise ValueError("INVALID_TIMESTAMP")
         self._require_clean_recon(recon, now, max_recon_age_seconds)
+        # A risk-adding BUY needs a CLEAN certificate. The only permitted
+        # discrepancy on idempotent retry is this plan's own never-sent
+        # intent/reservation, which must retain its exact intent key.
+        own = {("UNDELIVERED_INTENT", plan.intent_key),
+               ("UNLINKED_RESERVATION", plan.intent_key)}
+        if (recon.status not in ("CLEAN", "WARN")
+                or any((d.kind, d.detail) not in own for d in recon.diffs)):
+            raise ValueError("STALE_OR_UNCLEAN_RECONCILIATION")
         self._assert_dispatchable()
         proposal = plan.proposal
         # Direct manager callers must satisfy the same executable-tick
