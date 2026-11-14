@@ -391,6 +391,15 @@ class SessionEquityCheckpoint:
                 chain_session, chain_opening, chain_receipt = (
                     following, next_equity, next_receipt)
                 prior_revision = transition_revision
+            # An append-only mark for a non-chain exchange session must not
+            # remain invisible to integrity checks. A foreign/future mark
+            # otherwise survives restart and can pollute eventual rollover.
+            known_sessions = {genesis[0][1]}
+            known_sessions.update(entry[2] for entry in transitions)
+            if any(mark_session not in known_sessions for (mark_session,) in
+                   self._db.execute(
+                       "SELECT DISTINCT session_id FROM session_equity_marks")):
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             if (sid != chain_session or opening != chain_opening
                     or opening_hash != chain_receipt):
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
