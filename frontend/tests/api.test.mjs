@@ -42,15 +42,33 @@ test("risk settings cannot be weakened or interpreted from floats", () => {
 test("local GET-only API uses exactly two same-origin endpoints", async () => {
   const visited = [];
   const fetcher = async (url, init) => {
-    visited.push([url, init.method, init.credentials]);
+    visited.push([url, init.method, init.credentials, init.redirect, init.cache]);
     return {ok:true, json:async()=> url.includes("policy") ? policy : capabilities};
   };
   const result = await loadLocalReadOnlyStatus(fetcher);
   assert.equal(result.capabilities.paper_orders_enabled, false);
   assert.deepEqual(visited, [
-    ["/v1/risk/policy","GET","omit"],
-    ["/v1/system/capabilities","GET","omit"]
+    ["/v1/risk/policy","GET","omit","error","no-store"],
+    ["/v1/system/capabilities","GET","omit","error","no-store"]
   ]);
+});
+
+test("redirected or cached-reference fetches cannot silently attest local-only status", async () => {
+  // redirect:error prevents browser fetch from following 30x to an off-origin
+  // site. A supplied fetcher which reports a followed redirect is also rejected.
+  let calls = 0;
+  const followedRedirect = async (path, init) => {
+    calls++;
+    assert.equal(init.redirect, "error");
+    assert.equal(init.cache, "no-store");
+    return {
+      ok: true, redirected: path.includes("policy"),
+      json: async () => path.includes("policy") ? policy : capabilities
+    };
+  };
+  await assert.rejects(loadLocalReadOnlyStatus(followedRedirect),
+    /LOCAL_API_UNAVAILABLE/);
+  assert.equal(calls, 2);
 });
 
 test("HTTP failures and invalid JSON contracts do not establish connection", async () => {
