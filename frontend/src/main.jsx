@@ -72,6 +72,7 @@ function App() {
   const [search, setSearch] = useState("");
   const [imported, setImported] = useState(null);
   const [importError, setImportError] = useState("");
+  const [importPending, setImportPending] = useState(false);
   // A slow file.text() must not restore data after Clear, symbol switch, or a newer import.
   const importRequestId = useRef(0);
   // Draft-only operator input; deliberately no storage or backend write.
@@ -108,14 +109,21 @@ function App() {
   }
   function clearLocalImport() {
     importRequestId.current += 1;
+    setImportPending(false);
     setImported(null);
     setImportError("");
   }
   async function onSnapshotFile(event) {
-    const requestId = ++importRequestId.current;
-    setImportError("");
-    const file = event.target.files?.[0];
+    const file = event.currentTarget.files?.[0];
     if (!file) return;
+    // Clear the input before awaiting: older reads must never clear a newer
+    // selection, and choosing the same file again must fire a change event.
+    event.currentTarget.value = "";
+    const requestId = ++importRequestId.current;
+    // Invalidate the previous chart/source immediately while a new file loads.
+    setImported(null);
+    setImportError("");
+    setImportPending(true);
     try {
       if (file.size > 512 * 1024) throw new Error("SNAPSHOT_TOO_LARGE");
       const snapshot = parseLocalDailySnapshot(await file.text());
@@ -127,7 +135,7 @@ function App() {
       setImported(null);
       setImportError(`Local import rejected: ${error.message}`);
     } finally {
-      event.target.value = "";
+      if (requestId === importRequestId.current) setImportPending(false);
     }
   }
   useEffect(() => {
@@ -277,7 +285,7 @@ function App() {
           <Candles symbol={selected} timeframe={timeframe} imported={showingLocal ? imported : null} />
           <div className="chart-footer"><span>{showingLocal ? `USER-SUPPLIED ${imported.source} / ${imported.source_revision} · ${imported.price_basis} · Declared receipt ${imported.declared_sha256.slice(0,12)}… (NOT AUTHENTICATED)` : "SIMULATED VISUALIZATION · No live feed or historical vendor data"}</span><span>Read-only</span></div>
         </section>
-        <section className="panel import-panel"><div><strong>Local historical daily snapshot</strong><p>Choose a JSON snapshot with source, revision, availability timestamps and a declared SHA-256 receipt. The source and receipt are not independently authenticated. No file is uploaded.</p></div><label className="filebutton">Import JSON<input aria-label="Import local historical daily snapshot JSON" type="file" accept=".json,application/json" onChange={onSnapshotFile}/></label>{imported && <button type="button" className="clearbutton" onClick={clearLocalImport}>Clear import</button>}{importError && <p className="import-error" role="alert">{importError}</p>}</section>
+        <section className="panel import-panel"><div><strong>Local historical daily snapshot</strong><p>Choose a JSON snapshot with source, revision, availability timestamps and a declared SHA-256 receipt. The source and receipt are not independently authenticated. No file is uploaded.</p></div><label className="filebutton">Import JSON<input aria-label="Import local historical daily snapshot JSON" type="file" accept=".json,application/json" onChange={onSnapshotFile}/></label>{imported && <button type="button" className="clearbutton" onClick={clearLocalImport}>Clear import</button>}{importPending && <button type="button" className="clearbutton" onClick={clearLocalImport}>Cancel pending import</button>}{importPending && <p className="import-progress" role="status">Reading local snapshot — previous source cleared; authenticity NOT VERIFIED.</p>}{importError && <p className="import-error" role="alert">{importError}</p>}</section>
         <section className="panel bottom-panel"><div className="tabbar">{["Overview","Signals","Paper decisions","Research"].map(t=><button key={t} onClick={()=>setTab(t)} className={tab===t?"active":""} aria-pressed={tab===t}>{t}</button>)}</div><div className="empty"><div className="empty-icon">⌁</div><strong>{tab === "Overview" ? "Research workspace ready" : `${tab} integration pending`}</strong><p>{tab === "Overview" ? "Connect validated, point-in-time market datasets to replace all illustrative prices and chart bars." : "No verified dataset or authenticated read-only endpoint is connected. Nothing here represents actual positions, recommendations, or orders."}</p></div></section>
       </main>
       <aside className="sidebar">
