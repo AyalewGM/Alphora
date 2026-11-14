@@ -297,6 +297,100 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT value FROM unrelated ORDER BY value").fetchall(),
                          [(1,), (2,)])
 
+    def test_recovered_equity_never_unlatches_historic_loss_after_restart(self):
+        self.initial()
+        breached = self.mark("98000.00", B)
+        self.assertTrue(breached.halted)  # exact inclusive 2% boundary
+        recovered = self.mark("99000.00", C)
+        self.assertTrue(recovered.halted)  # later rebound cannot lift halt
+        self.assertEqual(self.conn.execute(
+            "SELECT reason,revision,mark_receipt FROM session_equity_halt_events"
+        ).fetchall(), [("LOSS", breached.revision, B)])
+        self.conn.close()
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.store = SessionEquityCheckpoint(self.conn)
+        self.assertEqual(self.store.snapshot(), recovered)
+        # Corrupt only the current flag, leaving the historical mark and
+        # irrevocable halt witness intact: a later $99k mark is NOT clean.
+        self.conn.execute("UPDATE session_equity_checkpoint SET halted=0")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.mark("99500.00", "d" * 64)
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.rollover(previous_session="2026-11-02",
+                                next_session="2026-11-03",
+                                opening_equity=D("99000.00"), opening_receipt=A,
+                                expected_revision=recovered.revision,
+                                reconciled=True, zero_pending=True,
+                                verified_calendar=True)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM session_equity_marks").fetchone()[0], 2)
+
+    def test_manual_halt_without_marks_has_immutable_durable_witness(self):
+        initial = self.initial()
+        manual = self.store.halt()
+        self.assertTrue(manual.halted)
+        self.assertEqual(manual.revision, initial.revision + 1)
+        self.assertEqual(manual.observations, 0)
+        self.assertEqual(self.store.halt(), manual)  # idempotent no new witness
+        self.assertEqual(self.conn.execute(
+            "SELECT reason,revision,mark_receipt FROM session_equity_halt_events"
+        ).fetchall(), [("MANUAL", manual.revision, None)])
+        self.conn.close()
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.store = SessionEquityCheckpoint(self.conn)
+        self.assertEqual(self.store.snapshot(), manual)
+        for query in ("UPDATE session_equity_halt_events SET reason='LOSS'",
+                      "DELETE FROM session_equity_halt_events"):
+            with self.subTest(statement=query):
+                with self.assertRaisesRegex(sqlite3.IntegrityError,
+                                            "IMMUTABLE_SESSION_HALT"):
+                    self.conn.execute(query)
+        self.conn.execute("UPDATE session_equity_checkpoint SET halted=0")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.halt()
+
+    def test_halt_witness_rolls_back_with_outer_book_transaction(self):
+        initial = self.initial()
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.assertTrue(self.store.halt().halted)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM session_equity_halt_events").fetchone()[0], 1)
+        self.conn.execute("ROLLBACK")
+        self.assertEqual(self.store.snapshot(), initial)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM session_equity_halt_events").fetchone()[0], 0)
+        self.conn.execute("BEGIN IMMEDIATE")
+        with patch.object(self.store, "_read",
+                          side_effect=[initial, RuntimeError("injected witness failure")]):
+            with self.assertRaisesRegex(RuntimeError, "injected witness failure"):
+                self.store.halt()
+        # Operation-scoped SAVEPOINT must undo both the evidence insert and
+        # the checkpoint flag even if the outer book transaction continues.
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM session_equity_halt_events").fetchone()[0], 0)
+        self.assertEqual(self.store.snapshot(), initial)
+        self.conn.execute("COMMIT")
+        self.assertEqual(self.store.snapshot(), initial)
+        self.assertTrue(self.mark("98000.00", B).halted)
+        self.conn.execute("UPDATE session_equity_checkpoint "
+                          "SET session_id='2026-11-03', "
+                          "opening_equity='98000.00',last_equity='98000.00', "
+                          "last_mark_receipt=NULL,observations=0")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+
+    def test_missing_halt_witness_is_corrupt_even_with_halted_checkpoint(self):
+        self.initial()
+        self.store.halt()
+        self.conn.execute("DROP TABLE session_equity_halt_events")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+
     def test_strict_decimal_and_session_id_input(self):
         for value in (D("1.001"), D("NaN"), -D("1"), 100000):
             with self.subTest(value=value):
