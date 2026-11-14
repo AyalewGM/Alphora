@@ -391,6 +391,87 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
             self.store.snapshot()
 
+    def test_new_portfolio_tighter_daily_loss_is_persisted_and_one_way(self):
+        from alphora.paper_config import PaperRiskConfig
+
+        policy = PaperRiskConfig(starting_equity_usd=D("120000"),
+                                 daily_loss_fraction=D("0.01"))
+        started = self.store.bootstrap("2026-11-02", D("120000"), A,
+                                       proven_new_book=True, policy=policy)
+        self.assertEqual(started.policy, policy)
+        self.assertEqual(started.policy_receipt, policy.receipt())
+        self.assertEqual(started.opening_equity, D("120000"))
+        # 1% of the *new* starting equity, not 2% of the $100k default.
+        self.assertFalse(self.mark("118800.01", B).halted)
+        breached = self.mark("118800.00", C)
+        self.assertTrue(breached.halted)
+        self.conn.close()
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.store = SessionEquityCheckpoint(self.conn)
+        self.assertEqual(self.store.snapshot(), breached)
+        self.assertTrue(self.mark("119999.99", "d" * 64).halted)
+        self.assertEqual(self.store.snapshot().policy_receipt, policy.receipt())
+
+    def test_tighter_daily_policy_survives_next_session_rollover(self):
+        from alphora.paper_config import PaperRiskConfig
+
+        policy = PaperRiskConfig(starting_equity_usd=D("120000"),
+                                 daily_loss_fraction=D("0.01"))
+        self.store.bootstrap("2026-11-02", D("120000"), A,
+                             proven_new_book=True, policy=policy)
+        self.mark("123000", B)
+        before = self.store.snapshot()
+        after = self.store.rollover(previous_session=before.session_id,
+                                    next_session="2026-11-03",
+                                    opening_equity=D("123000"), opening_receipt=C,
+                                    expected_revision=before.revision,
+                                    reconciled=True, zero_pending=True,
+                                    verified_calendar=True)
+        self.assertEqual(after.policy, policy)
+        self.assertEqual(after.opening_equity, D("123000"))
+        # Next-session 1% floor is $121,770, with a one-cent boundary.
+        self.assertFalse(self.mark("121770.01", "d" * 64).halted)
+        self.assertTrue(self.mark("121770.00", "e" * 64).halted)
+
+    def test_policy_receipt_or_canonical_wire_tamper_fails_closed(self):
+        self.initial()
+        original_json, original_receipt = self.conn.execute(
+            "SELECT policy_json,policy_receipt FROM session_equity_checkpoint"
+        ).fetchone()
+        self.conn.execute("UPDATE session_equity_checkpoint SET policy_json=?",
+                          (original_json.replace('"daily_loss_fraction":"0.02"',
+                                                 '"daily_loss_fraction":"0.01"'),))
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute("UPDATE session_equity_checkpoint SET policy_json=?",
+                          (original_json,))
+        self.assertEqual(self.store.snapshot().policy_receipt, original_receipt)
+        self.conn.execute("UPDATE session_equity_checkpoint SET policy_receipt=?",
+                          ("f" * 64,))
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+
+    def test_extreme_or_mismatched_new_portfolio_proposal_fails_closed(self):
+        from alphora.paper_config import PaperRiskConfig
+
+        policy = PaperRiskConfig(starting_equity_usd=D("120000"),
+                                 daily_loss_fraction=D("0.01"))
+        with self.assertRaisesRegex(ValueError, "INVALID_SESSION_STARTING_EQUITY"):
+            self.store.bootstrap("2026-11-02", D("100000"), A,
+                                 proven_new_book=True, policy=policy)
+        # Older inert-config constructors can accept tiny fractions whose
+        # expanded canonical text exceeds the bounded proposal wire domain.
+        tiny = PaperRiskConfig(risk_per_trade_fraction=D("1e-63"))
+        with self.assertRaisesRegex(ValueError, "INVALID_SESSION_POLICY"):
+            self.store.bootstrap("2026-11-02", D("100000"), A,
+                                 proven_new_book=True, policy=tiny)
+        with self.assertRaisesRegex(ValueError, "INVALID_SESSION_POLICY"):
+            self.store.bootstrap("2026-11-02", D("100000"), A,
+                                 proven_new_book=True, policy=object())
+        self.assertIsNone(self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='session_equity_checkpoint'"
+        ).fetchone())
+
     def test_strict_decimal_and_session_id_input(self):
         for value in (D("1.001"), D("NaN"), -D("1"), 100000):
             with self.subTest(value=value):
