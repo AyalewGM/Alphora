@@ -510,6 +510,51 @@ class SessionEquityCheckpointTests(unittest.TestCase):
                     self.conn.execute(statement)
         self.assertEqual(self.store.snapshot(), first)
 
+    def test_duplicate_rollover_requires_actual_matching_transition(self):
+        # A genesis session is not a completed rollover, even if its opening
+        # equity/receipt happen to match the alleged retry.
+        original = self.initial()
+        with self.assertRaisesRegex(ValueError, "CONFLICTING_SESSION_REPLAY"):
+            self.store.rollover(
+                previous_session="2026-11-01",
+                next_session=original.session_id,
+                opening_equity=original.opening_equity,
+                opening_receipt=original.opening_receipt,
+                expected_revision=original.revision,
+                reconciled=True, zero_pending=True, verified_calendar=True)
+        self.assertEqual(self.store.snapshot(), original)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM session_equity_rollovers").fetchone()[0], 0)
+
+        self.mark("105000", B)
+        completed = self.rollover("105000", C)
+        self.conn.close()
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.store = SessionEquityCheckpoint(self.conn)
+        # A committed, exact request remains idempotent after restart, even
+        # when replayed with the pre-rollover expected revision.
+        repeat = self.store.rollover(
+            previous_session="2026-11-02", next_session="2026-11-03",
+            opening_equity=D("105000.00"), opening_receipt=C,
+            expected_revision=completed.revision - 1,
+            reconciled=True, zero_pending=True, verified_calendar=True)
+        self.assertEqual(repeat, completed)
+        # The same destination/equity/receipt must not falsely attest a
+        # different predecessor or claim an entirely different transition.
+        for wrong_previous in ("2026-11-01", "2026-11-03", "2026-11-04"):
+            with self.subTest(previous=wrong_previous):
+                with self.assertRaisesRegex(ValueError, "CONFLICTING_SESSION_REPLAY"):
+                    self.store.rollover(
+                        previous_session=wrong_previous,
+                        next_session="2026-11-03",
+                        opening_equity=D("105000"), opening_receipt=C,
+                        expected_revision=completed.revision,
+                        reconciled=True, zero_pending=True, verified_calendar=True)
+        self.assertEqual(self.store.snapshot(), completed)
+        self.assertEqual(self.conn.execute(
+            "SELECT previous_session,next_session FROM session_equity_rollovers"
+        ).fetchall(), [("2026-11-02", "2026-11-03")])
+
     def test_rollover_chain_survives_reopen_and_rejects_forged_opening(self):
         self.initial()
         self.mark("105000", B)
