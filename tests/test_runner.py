@@ -108,9 +108,160 @@ class RunnerTests(unittest.TestCase):
                             client_order_id="z" * 64)
         report = self.runner.run((day(2, "50", {"SPY": WATCH}),))
         d = report.days[0]
+        # The rogue order expires during EOD cleanup, but the worst
+        # observed reconciliation remains FATAL and the pause persists.
         self.assertEqual(d.recon_status, "FATAL")
+        self.assertTrue(d.halted)
+        self.assertTrue(self.book.snapshot().halted)
         self.assertTrue(any(a.startswith("ENTRY_VETO:SPY")
                             for a in d.actions), d.actions)
+
+    def test_transient_fatal_halt_survives_sqlite_reopen(self):
+        from alphora.broker.base import DispatchRequest
+        self.venue.dispatch(DispatchRequest("QQQ", "BUY", 1, D("10")),
+                            client_order_id="z" * 64)
+        first = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        self.assertEqual(first.days[0].recon_status, "FATAL")
+        self.assertTrue(first.halted)
+        original_orders = self.ledger.orders()
+        self.book.close()
+        self.book = OfflineReservations(
+            Path(self.tmp.name) / "book.sqlite", session_id="2026-11-02")
+        self.assertTrue(self.book.snapshot().halted)
+        self.assertEqual(self.ledger.orders(), original_orders)
+
+    def test_first_entry_uses_reconciliation_after_exit_sync(self):
+        # No historical pre-exit certificate may be reused after settlement.
+        import alphora.runner as runner_mod
+        log = []
+        real_reconcile, mgr = runner_mod.reconcile, self.runner._mgr
+        real_sync, real_entry = mgr.sync, mgr.execute_entry
+
+        def recording_reconcile(*args, **kwargs):
+            result = real_reconcile(*args, **kwargs)
+            log.append(("recon", result))
+            return result
+
+        def recording_sync(*args, **kwargs):
+            log.append(("sync", None))
+            return real_sync(*args, **kwargs)
+
+        def recording_entry(*args, recon, **kwargs):
+            log.append(("entry", recon))
+            return real_entry(*args, recon=recon, **kwargs)
+
+        runner_mod.reconcile = recording_reconcile
+        mgr.sync, mgr.execute_entry = recording_sync, recording_entry
+        try:
+            report = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        finally:
+            runner_mod.reconcile = real_reconcile
+            mgr.sync, mgr.execute_entry = real_sync, real_entry
+        self.assertIn("ENTRY:SPY:ACKED", report.days[0].actions)
+        entry_at = next(i for i, (kind, _) in enumerate(log) if kind == "entry")
+        before = log[:entry_at]
+        last_recon = max(i for i, (kind, _) in enumerate(before) if kind == "recon")
+        last_sync = max(i for i, (kind, _) in enumerate(before) if kind == "sync")
+        self.assertGreater(last_recon, last_sync)
+        self.assertIs(log[entry_at][1], before[last_recon][1])
+
+    def _two_entry_session(self):
+        return day(2, "50", {"SPY": WATCH, "QQQ": WATCH},
+                   (("QQQ", bar(2, "40", "40", "40", "40")),))
+
+    def test_each_buy_uses_a_distinct_fresh_reconciliation(self):
+        import alphora.runner as runner_mod
+        log = []
+        real_reconcile, mgr = runner_mod.reconcile, self.runner._mgr
+        real_entry = mgr.execute_entry
+
+        def recording_reconcile(*args, **kwargs):
+            result = real_reconcile(*args, **kwargs)
+            log.append(("recon", result))
+            return result
+
+        def recording_entry(*args, recon, **kwargs):
+            log.append(("entry", recon))
+            return real_entry(*args, recon=recon, **kwargs)
+
+        runner_mod.reconcile = recording_reconcile
+        mgr.execute_entry = recording_entry
+        try:
+            report = self.runner.run((self._two_entry_session(),))
+        finally:
+            runner_mod.reconcile = real_reconcile
+            mgr.execute_entry = real_entry
+        actions = report.days[0].actions
+        self.assertIn("ENTRY:QQQ:ACKED", actions)
+        self.assertIn("ENTRY:SPY:ACKED", actions)
+        entries = [i for i, (kind, _) in enumerate(log) if kind == "entry"]
+        self.assertEqual(len(entries), 2)
+        first, second = entries
+        self.assertIsNot(log[first][1], log[second][1])
+        self.assertTrue(any(kind == "recon" for kind, _ in log[first+1:second]))
+        self.assertIs(log[second][1], log[second-1][1])
+
+    def test_second_entry_fails_closed_on_new_venue_discrepancy(self):
+        from alphora.broker.base import DispatchRequest
+        mgr = self.runner._mgr
+        real_entry, called = mgr.execute_entry, []
+
+        def faulty_entry(*args, **kwargs):
+            view = real_entry(*args, **kwargs)
+            if not called:
+                # Introduce an unknown venue order after the first BUY.
+                self.venue.dispatch(DispatchRequest("QQQ", "BUY", 1, D("10")),
+                                    client_order_id="z" * 64)
+            called.append(view)
+            return view
+
+        mgr.execute_entry = faulty_entry
+        try:
+            report = self.runner.run((self._two_entry_session(),))
+        finally:
+            mgr.execute_entry = real_entry
+        actions = report.days[0].actions
+        self.assertIn("ENTRY:QQQ:ACKED", actions)
+        self.assertTrue(any(a.startswith("ENTRY_VETO:SPY:STALE_OR_UNCLEAN")
+                            for a in actions), actions)
+        self.assertEqual(len(called), 1)
+        self.assertEqual({o.symbol for o in self.ledger.orders()}, {"QQQ"})
+        # The newly observed FATAL must stay latched even if expiration
+        # removes the unknown venue order before terminal reconciliation.
+        self.assertTrue(report.halted)
+        self.assertTrue(self.book.snapshot().halted)
+
+    def test_terminal_reconciliation_detects_new_post_expiration_discrepancy(self):
+        # Post-expiration rogue venue order must be exposed by final
+        # reconciliation rather than reported as a stale CLEAN snapshot.
+        from alphora.broker.base import DispatchRequest
+        mgr = self.runner._mgr
+        original_expire = mgr.expire_session
+
+        def conflicting_expire(*, at):
+            result = original_expire(at=at)
+            self.venue.dispatch(DispatchRequest("QQQ", "BUY", 1, D("10")),
+                                client_order_id="z" * 64)
+            return result
+
+        mgr.expire_session = conflicting_expire
+        report = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        self.assertIn("ENTRY:SPY:ACKED", report.days[0].actions)
+        self.assertEqual(report.days[0].recon_status, "FATAL")
+        self.assertTrue(report.days[0].halted)
+        self.assertTrue(self.book.snapshot().halted)
+
+    def test_clean_terminal_reconciliation_allows_precise_fee_loss_observation(self):
+        # The paper report must value settled positions and the order fee,
+        # then independently attest its terminal portfolio state.
+        self.venue = PaperBrokerAdapter(fee_per_order=D("1"))
+        self.runner = PaperSessionRunner(
+            book=self.book, ledger=self.ledger, adapter=self.venue,
+            take_profit_pct=D("50"), fee_budget=D("1"))
+        report = self.runner.run((day(2, "30", {"SPY": WATCH}),))
+        self.assertEqual(report.days[0].recon_status, "CLEAN")
+        self.assertEqual(report.final_equity, D("99999"))
+        self.assertFalse(report.halted)
 
     def test_missing_held_symbol_mark_is_never_treated_as_break_even(self):
         self.runner.run((day(2, "50", {"SPY": WATCH}),))
