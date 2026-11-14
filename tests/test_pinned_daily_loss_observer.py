@@ -110,6 +110,32 @@ class PinnedDailyLossObservationTests(unittest.TestCase):
             self.path, session_id=SESSION, policy=self.policy)
         self.assertTrue(self.book.snapshot().halted)
 
+    def test_one_cent_fill_fee_tips_exact_halt_boundary(self):
+        # At the approved 10% symbol ceiling, a one-share $9,999.99
+        # synthetic fill plus a one-cent fee spends exactly $10,000.
+        # A caller-asserted $9,000 position mark is a $999.99 loss
+        # without the fee, but an exact $1,000 loss with the booked fee.
+        proposal = BuyProposal(
+            "SPY", D("1"), D("9999.99"), D("9999.98"))
+        opening = PaperAccount(EQUITY, EQUITY, EQUITY, D("0"), SESSION)
+        self.book.reserve_buy(
+            "near-cap", opening, proposal,
+            fee_budget=D("0.01"), reconciled=True)
+        filled = self.book.record_hypothetical_fill(
+            "near-cap", "one-share-fill", 1, D("9999.99"),
+            fee=D("0.01"))
+        self.assertEqual(filled.cash, D("90000"))
+        self.assertEqual(EQUITY - D("9999.99") + D("9000"), D("99000.01"))
+        self.assertEqual(filled.positions, (("SPY", 1, D("9999.99")),))
+        after_fee_mark = self._mark(filled.cash + D("9000"))
+        self.assertEqual(after_fee_mark.equity, D("99000"))
+        self.assertTrue(self.book.observe_daily_loss(
+            after_fee_mark, reconciled=True).halted)
+        self.book.close()
+        self.book = OfflineReservations(
+            self.path, session_id=SESSION, policy=self.policy)
+        self.assertTrue(self.book.snapshot().halted)
+
     def test_unverified_or_wrong_session_marks_do_not_change_book(self):
         self._hold()
         before = self.book.snapshot()
