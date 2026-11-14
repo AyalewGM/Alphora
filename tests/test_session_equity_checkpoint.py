@@ -438,6 +438,18 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         original_json, original_receipt = self.conn.execute(
             "SELECT policy_json,policy_receipt FROM session_equity_checkpoint"
         ).fetchone()
+        # Ordinary writes may not silently relax or tighten a stored session
+        # policy while preserving the same book/session revision.
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "IMMUTABLE_SESSION_POLICY"):
+            self.conn.execute("UPDATE session_equity_checkpoint SET policy_json=?",
+                              (original_json.replace('"daily_loss_fraction":"0.02"',
+                                                     '"daily_loss_fraction":"0.01"'),))
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "IMMUTABLE_SESSION_POLICY"):
+            self.conn.execute("UPDATE session_equity_checkpoint SET policy_receipt=?",
+                              ("f" * 64,))
+        # Simulate a privileged direct-database tamper after dropping the SQL
+        # trigger: the canonical wire and hash still fail closed on read.
+        self.conn.execute("DROP TRIGGER session_equity_policy_no_update")
         self.conn.execute("UPDATE session_equity_checkpoint SET policy_json=?",
                           (original_json.replace('"daily_loss_fraction":"0.02"',
                                                  '"daily_loss_fraction":"0.01"'),))
