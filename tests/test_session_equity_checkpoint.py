@@ -484,6 +484,97 @@ class SessionEquityCheckpointTests(unittest.TestCase):
             "SELECT 1 FROM sqlite_master WHERE name='session_equity_checkpoint'"
         ).fetchone())
 
+    def test_genesis_witness_rejects_session_or_opening_forgery(self):
+        self.initial()
+        first = self.mark("104000")
+        for change in (
+            "session_id='2026-11-03'",
+            "opening_equity='101000.00'",
+            "opening_receipt='" + C + "'",
+        ):
+            with self.subTest(change=change):
+                self.conn.execute("UPDATE session_equity_checkpoint SET " + change)
+                with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+                    self.store.snapshot()
+                self.conn.execute(
+                    "UPDATE session_equity_checkpoint SET "
+                    "session_id=?,opening_equity=?,opening_receipt=?",
+                    (first.session_id, str(first.opening_equity), first.opening_receipt))
+        for statement in (
+            "DELETE FROM session_equity_genesis",
+            "UPDATE session_equity_genesis SET session_id='2026-11-03'",
+        ):
+            with self.subTest(statement=statement):
+                with self.assertRaisesRegex(sqlite3.IntegrityError,
+                                            "IMMUTABLE_SESSION_GENESIS"):
+                    self.conn.execute(statement)
+        self.assertEqual(self.store.snapshot(), first)
+
+    def test_rollover_chain_survives_reopen_and_rejects_forged_opening(self):
+        self.initial()
+        self.mark("105000", B)
+        first = self.rollover("105000", C)
+        self.assertEqual(first.opening_equity, D("105000"))
+        second_mark = self.mark("110000", "d" * 64)
+        second = self.store.rollover(
+            previous_session=second_mark.session_id,
+            next_session="2026-11-04", opening_equity=D("110000"),
+            opening_receipt="e" * 64, expected_revision=second_mark.revision,
+            reconciled=True, zero_pending=True, verified_calendar=True)
+        self.assertEqual(second.opening_equity, D("110000"))
+        self.assertEqual(self.conn.execute(
+            "SELECT previous_session,next_session,opening_equity "
+            "FROM session_equity_rollovers ORDER BY ordinal").fetchall(), [
+            ("2026-11-02", "2026-11-03", "105000"),
+            ("2026-11-03", "2026-11-04", "110000")])
+        self.conn.close()
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.store = SessionEquityCheckpoint(self.conn)
+        self.assertEqual(self.store.snapshot(), second)
+        for change in ("opening_equity='99000'", "session_id='2026-11-05'"):
+            with self.subTest(change=change):
+                self.conn.execute("UPDATE session_equity_checkpoint SET " + change)
+                with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+                    self.store.snapshot()
+                self.conn.execute(
+                    "UPDATE session_equity_checkpoint "
+                    "SET opening_equity='110000',session_id='2026-11-04'")
+        self.assertEqual(self.store.snapshot(), second)
+        for statement in (
+            "DELETE FROM session_equity_rollovers WHERE ordinal=1",
+            "UPDATE session_equity_rollovers SET opening_equity='111000' "
+            "WHERE ordinal=2",
+        ):
+            with self.subTest(statement=statement):
+                with self.assertRaisesRegex(sqlite3.IntegrityError,
+                                            "IMMUTABLE_SESSION_ROLLOVER"):
+                    self.conn.execute(statement)
+
+    def test_removed_or_tampered_prior_session_receipt_vetoes_replay(self):
+        self.initial()
+        self.mark("105000", B)
+        closed = self.rollover("105000", C)
+        self.assertEqual(self.store.snapshot(), closed)
+        self.conn.execute("DROP TRIGGER session_equity_marks_no_delete")
+        self.conn.execute("DELETE FROM session_equity_marks WHERE session_id='2026-11-02'")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        # Do not claim SHA-256 receipts are an authenticated protection
+        # against an arbitrary local SQLite administrator.
+
+    def test_rollover_witness_rolls_back_with_outer_transaction(self):
+        self.initial()
+        marked = self.mark("105000", B)
+        self.conn.execute("BEGIN IMMEDIATE")
+        changed = self.rollover("105000", C)
+        self.assertEqual(changed.opening_equity, D("105000"))
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM session_equity_rollovers").fetchone()[0], 1)
+        self.conn.execute("ROLLBACK")
+        self.assertEqual(self.store.snapshot(), marked)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM session_equity_rollovers").fetchone()[0], 0)
+
     def test_strict_decimal_and_session_id_input(self):
         for value in (D("1.001"), D("NaN"), -D("1"), 100000):
             with self.subTest(value=value):
