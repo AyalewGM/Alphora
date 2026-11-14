@@ -124,7 +124,7 @@ test("a stale async local snapshot cannot reappear after clear, symbol change or
   assert.match(jsx, /const requestId = \+\+importRequestId\.current;/);
   assert.match(jsx, /const snapshot = parseLocalDailySnapshot\(await file\.text\(\)\);\s+if \(requestId !== importRequestId\.current\) return;\s+setImported\(snapshot\)/);
   assert.match(jsx, /catch \(error\) \{\s+if \(requestId !== importRequestId\.current\) return;\s+setImported\(null\)/);
-  assert.match(jsx, /function clearLocalImport\(\) \{\s+importRequestId\.current \+= 1;\s+setImported\(null\);/);
+  assert.match(jsx, /function clearLocalImport\(\) \{\s+importRequestId\.current \+= 1;\s+setImportPending\(false\);\s+setImported\(null\);/);
   assert.match(jsx, /onClick=\{clearLocalImport\}>Clear import/);
   assert.match(jsx, /onClick=\{\(\)=>\{clearLocalImport\(\);setSelected\(x\.symbol\);\}\} aria-pressed/);
 });
@@ -135,7 +135,7 @@ test("a replacement snapshot clears previous bars before the read and permits ca
   const beforeAwait = importHandler.slice(0, importHandler.indexOf("await file.text()"));
   assert.match(beforeAwait, /const file = event\.currentTarget\.files\?\.\[0\];\s+if \(!file\) return;/);
   assert.match(beforeAwait, /event\.currentTarget\.value = "";/);
-  assert.match(beforeAwait, /setImported\(null\);\s+setImportError\(""\);\s+setImportPending\(true\);/);
+  assert.match(beforeAwait, /setImported\(null\);\s+setSelected\(current => WATCHLIST\.some\(row => row\.symbol === current\) \? current : "SPY"\);\s+setImportError\(""\);\s+setImportPending\(true\);/);
   assert.match(importHandler, /finally \{\s+if \(requestId === importRequestId\.current\) setImportPending\(false\);\s+\}/);
   const clearHandler = jsx.slice(jsx.indexOf("function clearLocalImport()"), jsx.indexOf("async function onSnapshotFile"));
   assert.match(clearHandler, /importRequestId\.current \+= 1;\s+setImportPending\(false\);\s+setImported\(null\);/);
