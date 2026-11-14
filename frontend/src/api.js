@@ -72,9 +72,14 @@ export function validateBackendStatus(policy, capabilities) {
 export async function loadLocalReadOnlyStatus(fetcher, signal) {
   // Same-origin, GET-only calls to the local FastAPI shell.
   const paths = ["/v1/risk/policy", "/v1/system/capabilities"];
+  // Reject any 30x rather than following a potentially off-origin redirect.
+  // No-store avoids presenting a cached policy as a fresh local reference check.
   const responses = await Promise.all(paths.map(path =>
-    fetcher(path, { method: "GET", credentials: "omit", signal })));
-  if (responses.some(r => !r.ok)) throw new Error("LOCAL_API_UNAVAILABLE");
+    fetcher(path, { method: "GET", credentials: "omit",
+      redirect: "error", cache: "no-store", signal })));
+  if (responses.some(r => !r || r.ok !== true || r.redirected === true)) {
+    throw new Error("LOCAL_API_UNAVAILABLE");
+  }
   const [policy, capabilities] = await Promise.all(responses.map(r => r.json()));
   return validateBackendStatus(policy, capabilities);
 }
