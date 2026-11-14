@@ -153,6 +153,53 @@ class SessionEquityCheckpointTests(unittest.TestCase):
                                reconciled=True, marks_verified=True)
         self.assertEqual(self.store.snapshot(), after)
 
+    def test_nonadjacent_mark_replay_is_idempotent_after_restart(self):
+        self.initial()
+        initial = self.store.snapshot()
+        first = self.mark("100000", B)
+        second = self.mark("99500", C)
+        self.assertEqual(first.observations, 1)
+        self.assertEqual(second.observations, 2)
+        self.assertEqual(second.revision, initial.revision + 2)
+        # B -> C -> B must not replace C's newer $99,500 observation.
+        self.assertEqual(self.mark("100000", B), second)
+        self.assertEqual(self.store.snapshot(), second)
+        with self.assertRaisesRegex(ValueError, "CONFLICTING_SESSION_MARK_REPLAY"):
+            self.mark("100000.01", B)
+        self.assertEqual(self.store.snapshot(), second)
+        self.conn.close()
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.store = SessionEquityCheckpoint(self.conn)
+        self.assertEqual(self.mark("100000", B), second)
+        with self.assertRaisesRegex(ValueError, "CONFLICTING_SESSION_MARK_REPLAY"):
+            self.mark("100000.01", B)
+        self.assertEqual(self.store.snapshot(), second)
+        # Durable receipts cannot be rewritten or removed via normal SQL.
+        for statement in (
+            "UPDATE session_equity_marks SET equity='100000' WHERE receipt=?",
+            "DELETE FROM session_equity_marks WHERE receipt=?",
+        ):
+            with self.subTest(statement=statement):
+                with self.assertRaisesRegex(sqlite3.IntegrityError,
+                                            "IMMUTABLE_SESSION_MARK"):
+                    self.conn.execute(statement, (C,))
+        third = self.mark("99000", "d" * 64)
+        self.assertEqual(third.observations, 3)
+        self.assertEqual(third.revision, second.revision + 1)
+
+    def test_rejects_missing_or_contradictory_mark_history(self):
+        self.initial()
+        self.mark("99000", B)
+        self.conn.execute("UPDATE session_equity_checkpoint SET last_equity='99000.01'")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute("UPDATE session_equity_checkpoint SET last_equity='99000'")
+        self.conn.execute("DROP TABLE session_equity_marks")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.mark("98000", C)
+
     def test_corruption_and_same_transaction_atomic_rollback(self):
         self.initial()
         before = self.store.snapshot()
@@ -182,26 +229,22 @@ class SessionEquityCheckpointTests(unittest.TestCase):
     def test_rejects_unhalted_observed_loss_at_inclusive_floor(self):
         self.initial()
         valid = self.mark("99000.00")
-        for value, valid_unhalted in (("98000.01", True),
-                                      ("98000.00", False),
-                                      ("97999.99", False),
-                                      ("90000", False)):
+        for value in ("98000.01", "98000.00", "97999.99", "90000"):
             with self.subTest(persisted_last=value):
                 self.conn.execute("UPDATE session_equity_checkpoint "
                                   "SET last_equity=?, halted=0", (value,))
-                if valid_unhalted:
-                    self.assertFalse(self.store.snapshot().halted)
-                else:
-                    with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
-                        self.store.snapshot()
+                with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+                    self.store.snapshot()
                 self.conn.execute("UPDATE session_equity_checkpoint "
                                   "SET last_equity=?, halted=0",
                                   (str(valid.last_equity),))
         self.assertEqual(self.store.snapshot(), valid)
         # Existing one-way halt may remain true after a later rebound.
         self.assertTrue(self.store.halt().halted)
-        self.conn.execute("UPDATE session_equity_checkpoint SET last_equity='90000'")
         self.assertTrue(self.store.snapshot().halted)
+        self.conn.execute("UPDATE session_equity_checkpoint SET last_equity='90000'")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
 
     def test_rejects_unbounded_persisted_numbers_and_impossible_revision(self):
         self.initial()
@@ -246,6 +289,8 @@ class SessionEquityCheckpointTests(unittest.TestCase):
                                    reconciled=True, marks_verified=True)
         self.assertTrue(self.conn.in_transaction)
         self.assertEqual(self.store.snapshot(), before)
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM session_equity_marks").fetchone()[0], 0)
         self.conn.execute("INSERT INTO unrelated VALUES (2)")
         self.conn.execute("COMMIT")
         self.assertEqual(self.store.snapshot(), before)
