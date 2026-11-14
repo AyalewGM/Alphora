@@ -172,6 +172,12 @@ class SessionEquityCheckpoint:
                 observations INTEGER NOT NULL, halted INTEGER NOT NULL,
                 policy_json TEXT NOT NULL, policy_receipt TEXT NOT NULL
             )""")
+            # The new-portfolio policy is immutable. Any later authorized
+            # effective-policy change requires its own audited OMS migration.
+            self._db.execute("""CREATE TRIGGER session_equity_policy_no_update
+                BEFORE UPDATE OF policy_json,policy_receipt
+                ON session_equity_checkpoint
+                BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_POLICY'); END""")
             # Append-only session mark receipts share the book's transaction.
             # A previously used receipt must not overwrite any newer mark.
             self._db.execute("""CREATE TABLE session_equity_marks (
