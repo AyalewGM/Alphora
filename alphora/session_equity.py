@@ -127,6 +127,21 @@ class SessionEquityCheckpoint:
                 last_mark_receipt TEXT, revision INTEGER NOT NULL,
                 observations INTEGER NOT NULL, halted INTEGER NOT NULL
             )""")
+            # Append-only session mark receipts share the book's transaction.
+            # A previously used receipt must not overwrite any newer mark.
+            self._db.execute("""CREATE TABLE session_equity_marks (
+                session_id TEXT NOT NULL, receipt TEXT NOT NULL,
+                equity TEXT NOT NULL, observation_number INTEGER NOT NULL
+                    CHECK(observation_number >= 1),
+                PRIMARY KEY (session_id, receipt),
+                UNIQUE (session_id, observation_number)
+            )""")
+            self._db.execute("""CREATE TRIGGER session_equity_marks_no_update
+                BEFORE UPDATE ON session_equity_marks
+                BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_MARK'); END""")
+            self._db.execute("""CREATE TRIGGER session_equity_marks_no_delete
+                BEFORE DELETE ON session_equity_marks
+                BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_MARK'); END""")
             self._db.execute("INSERT INTO session_equity_checkpoint VALUES"
                              "(1,?,?,?,?,NULL,0,0,0)",
                              (session_id, str(opening_equity), str(opening_equity),
@@ -168,6 +183,22 @@ class SessionEquityCheckpoint:
             if ((observations == 0 and last != opening)
                     or (observations > 0 and last <= floor and halted == 0)):
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            # Recheck the full durable per-session receipt sequence. Missing,
+            # contradictory, out-of-order, or truncated rows fail closed.
+            history = self._db.execute(
+                "SELECT receipt,equity,observation_number FROM session_equity_marks "
+                "WHERE session_id=? ORDER BY observation_number", (sid,)).fetchall()
+            if len(history) != observations:
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            for index, (past_receipt, past_equity, ordinal) in enumerate(history, start=1):
+                _receipt(past_receipt)
+                if (type(ordinal) is not int or ordinal != index
+                        or type(past_equity) is not str or len(past_equity) > 64):
+                    raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+                parsed_equity = _amount(D(past_equity))
+                if index == observations and (past_receipt != mark_hash
+                                              or parsed_equity != last):
+                    raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             return SessionEquityState(sid, opening, last, opening_hash,
                                       mark_hash, revision, observations, bool(halted))
         except (sqlite3.Error, TypeError, ValueError, ArithmeticError) as exc:
@@ -193,8 +224,13 @@ class SessionEquityCheckpoint:
             old = self._read()
             if old.session_id != session_id:
                 raise ValueError("SESSION_MISMATCH")
-            if old.last_mark_receipt == receipt:
-                if old.last_equity != equity:
+            # Non-adjacent replay is idempotent, not a new observation.
+            # Compare every previous receipt in this exchange session.
+            prior = self._db.execute(
+                "SELECT equity FROM session_equity_marks WHERE session_id=? AND receipt=?",
+                (session_id, receipt)).fetchone()
+            if prior is not None:
+                if _amount(D(prior[0])) != equity:
                     raise ValueError("CONFLICTING_SESSION_MARK_REPLAY")
                 return old
             if type(expected_revision) is not int or expected_revision != old.revision:
@@ -204,6 +240,10 @@ class SessionEquityCheckpoint:
                 ctx.traps[Inexact] = True
                 floor = old.opening_equity * (D(1) - DAILY_LOSS_FRACTION)
                 halted = old.halted or equity <= floor
+            self._db.execute(
+                "INSERT INTO session_equity_marks "
+                "(session_id,receipt,equity,observation_number) VALUES (?,?,?,?)",
+                (session_id, receipt, str(equity), old.observations + 1))
             self._db.execute("UPDATE session_equity_checkpoint SET "
                              "last_equity=?,last_mark_receipt=?,revision=?,"
                              "observations=?,halted=? WHERE id=1",
