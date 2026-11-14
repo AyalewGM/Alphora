@@ -473,7 +473,14 @@ class SessionEquityCheckpoint:
         with self._atomic():
             old = self._read()
             if old.session_id == next_session:
-                if (old.opening_equity == opening_equity
+                # A retry is valid only for the exact, previously committed
+                # transition. Matching the active opening alone mistakenly
+                # treats genesis (or a forged predecessor) as a rollover.
+                prior = self._db.execute(
+                    "SELECT previous_session FROM session_equity_rollovers "
+                    "WHERE next_session=?", (next_session,)).fetchone()
+                if (prior is not None and prior[0] == previous_session
+                        and old.opening_equity == opening_equity
                         and old.opening_receipt == opening_receipt):
                     return old
                 raise ValueError("CONFLICTING_SESSION_REPLAY")
