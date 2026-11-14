@@ -290,13 +290,13 @@ class ManagerTests(unittest.TestCase):
                                reconciled=True)
         self.mgr.advance({"SPY": D("49")}, at=at(1))
         exit_plan = ExitPlan("PROPOSE_PAPER_SELL", "TAKE_PROFIT", D("60"),
-                             "b" * 64)
+                             "b" * 64, "SPY")
         view = self.mgr.execute_exit(exit_plan, symbol="SPY",
                                      limit_price=D("50"),
                                      recon=self.recon(at(2)), now=at(2))
         self.assertEqual(view.status, "ACKED")
         # A second exit intent beyond unreserved shares is refused.
-        over = ExitPlan("PROPOSE_PAPER_SELL", "TAKE_PROFIT", D("50"), "c" * 64)
+        over = ExitPlan("PROPOSE_PAPER_SELL", "TAKE_PROFIT", D("50"), "c" * 64, "SPY")
         with self.assertRaisesRegex(ValueError, "INSUFFICIENT_POSITION"):
             self.mgr.execute_exit(over, symbol="SPY", limit_price=D("50"),
                                   recon=self.recon(at(3)), now=at(3))
@@ -318,7 +318,7 @@ class ManagerTests(unittest.TestCase):
         before_ledger = self.ledger.orders()
         before_venue = self.venue.positions()
         plan = ExitPlan("PROPOSE_PAPER_SELL", "PROTECTIVE_EXIT", D("30"),
-                        "b" * 64)
+                        "b" * 64, "SPY")
         with self.assertRaisesRegex(ValueError, "INEXACT_PAPER_PRICE"):
             self.mgr.execute_exit(plan, symbol="SPY", limit_price=D("48.001"),
                                   recon=self.recon(at(2)), now=at(2))
@@ -342,7 +342,7 @@ class ManagerTests(unittest.TestCase):
                                    recon=self.recon(at(2)), now=at(2),
                                    reconciled=True)
         plan = ExitPlan("PROPOSE_PAPER_SELL", "PROTECTIVE_EXIT", D("40"),
-                        "e" * 64)
+                        "e" * 64, "SPY")
         view = self.mgr.execute_exit(plan, symbol="SPY",
                                      limit_price=D("48"),
                                      recon=self.recon(at(2)), now=at(2))
@@ -364,15 +364,27 @@ class ManagerTests(unittest.TestCase):
         mgr = PaperOrderManager(book=self.book, ledger=self.ledger,
                                 adapter=self.venue, killswitch=switch)
         plan = ExitPlan("PROPOSE_PAPER_SELL", "PROTECTIVE_EXIT", D("40"),
-                        "e" * 64)
+                        "e" * 64, "SPY")
         with self.assertRaisesRegex(ValueError, "KILL_SWITCH_ENGAGED"):
             mgr.execute_exit(plan, symbol="SPY", limit_price=D("48"),
                              recon=self.recon(at(3)), now=at(3))
         self.assertIsNone(self.ledger.get("e" * 64))
 
+    def test_exit_plan_symbol_must_match_execution_symbol(self):
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        self.mgr.advance({"SPY": D("49")}, at=at(1))
+        for plan_symbol in ("QQQ", None):
+            plan = ExitPlan("PROPOSE_PAPER_SELL", "TAKE_PROFIT", D("10"),
+                            "b" * 64, plan_symbol)
+            with self.assertRaisesRegex(ValueError, "INVALID_OR_UNACTIONABLE_PLAN"):
+                self.mgr.execute_exit(plan, symbol="SPY", limit_price=D("50"),
+                                      recon=self.recon(at(2)), now=at(2))
+            self.assertIsNone(self.ledger.get("b" * 64))
+
     def test_exit_without_position_fails(self):
         plan = ExitPlan("PROPOSE_PAPER_SELL", "PROTECTIVE_EXIT", D("10"),
-                        "b" * 64)
+                        "b" * 64, "SPY")
         with self.assertRaisesRegex(ValueError, "INSUFFICIENT_POSITION"):
             self.mgr.execute_exit(plan, symbol="SPY", limit_price=D("45"),
                                   recon=self.recon(), now=at())

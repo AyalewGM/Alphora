@@ -124,6 +124,11 @@ class DecisionTests(unittest.TestCase):
         p=replace(self.position, pending_exit_quantity=D(50))
         self.assertEqual(self.exit(position=p).reason,'PENDING_EXIT_RECONCILIATION')
 
+    def test_exit_plan_is_bound_to_evaluated_symbol(self):
+        plan = self.exit(quote=replace(self.quote, bid=self.position.protective_stop_price))
+        self.assertEqual(plan.action, "PROPOSE_PAPER_SELL")
+        self.assertEqual(plan.symbol, self.position.symbol)
+
     def test_exit_intent_key_reproducible(self):
         self.assertEqual(self.exit().intent_key,self.exit().intent_key)
         self.assertNotEqual(self.exit().intent_key,
