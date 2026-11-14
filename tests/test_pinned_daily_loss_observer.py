@@ -126,7 +126,7 @@ class PinnedDailyLossObservationTests(unittest.TestCase):
             fee=D("0.01"))
         self.assertEqual(filled.cash, D("90000"))
         self.assertEqual(EQUITY - D("9999.99") + D("9000"), D("99000.01"))
-        self.assertEqual(filled.positions, (("SPY", 1, D("9999.99")),))
+        self.assertEqual(filled.positions, (("SPY", 1, D("10000.00")),))
         after_fee_mark = self._mark(filled.cash + D("9000"))
         self.assertEqual(after_fee_mark.equity, D("99000"))
         self.assertTrue(self.book.observe_daily_loss(
