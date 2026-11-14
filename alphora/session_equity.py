@@ -531,9 +531,18 @@ class SessionEquityCheckpoint:
                 # transition. Matching the active opening alone mistakenly
                 # treats genesis (or a forged predecessor) as a rollover.
                 prior = self._db.execute(
-                    "SELECT previous_session FROM session_equity_rollovers "
+                    "SELECT previous_session,revision FROM session_equity_rollovers "
                     "WHERE next_session=?", (next_session,)).fetchone()
+                # An exact retry must carry the *original* pre-transition
+                # revision and the same trusted reconciliation/calendar
+                # assertions. The active checkpoint revision may have
+                # advanced after the transition, so do not use it as a replay
+                # token or silently treat missing assertions as verified.
                 if (prior is not None and prior[0] == previous_session
+                        and type(expected_revision) is int
+                        and expected_revision == prior[1] - 1
+                        and reconciled is True and zero_pending is True
+                        and verified_calendar is True
                         and old.opening_equity == opening_equity
                         and old.opening_receipt == opening_receipt):
                     return old
