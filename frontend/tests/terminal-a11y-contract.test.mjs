@@ -105,14 +105,15 @@ test("P0 #42 paper execution gate is visible, persistent, and never mistaken for
 
 test("paper-only and synthetic/user-supplied provenance badges remain visible at narrow widths", () => {
   // The earlier 850px media query hides .top-center. A later override must
-  // explicitly restore the badges on both tablet and 320px mobile layouts.
-  assert.match(jsx, /<span className="chip blue">PAPER ONLY<\\/span>/);
-  assert.match(jsx, /showingLocal \\? "USER-SUPPLIED DATA" : "SYNTHETIC DATA"/);
-  const override = css.slice(css.indexOf("/* Critical research provenance cannot disappear"));
-  assert.ok(override.length > 0);
-  assert.match(override, /@media \\(max-width:850px\\)/);
-  assert.match(override, /\\.top-center \\{ display:flex; flex-wrap:wrap;/);
-  assert.match(override, /@media \\(max-width:560px\\)/);
-  assert.match(override, /\\.top-center \\{ flex:1 1 100% \\}/);
-  assert.match(override, /\\.top-center \\.chip \\{ white-space:normal; overflow-wrap:anywhere \\}/);
+  // explicitly restore the badges on tablet and 320px mobile layouts.
+  assert.ok(jsx.includes('<span className="chip blue">PAPER ONLY</span>'));
+  assert.ok(jsx.includes('showingLocal ? "USER-SUPPLIED DATA" : "SYNTHETIC DATA"'));
+  const overrideStart = css.indexOf("/* Critical research provenance cannot disappear");
+  assert.ok(overrideStart > css.indexOf(".top-center{display:none}"));
+  const override = css.slice(overrideStart);
+  assert.ok(override.includes("@media (max-width:850px)"));
+  assert.ok(override.includes(".top-center { display:flex; flex-wrap:wrap; gap:8px }"));
+  assert.ok(override.includes("@media (max-width:560px)"));
+  assert.ok(override.includes(".top-center { flex:1 1 100% }"));
+  assert.ok(override.includes(".top-center .chip { white-space:normal; overflow-wrap:anywhere }"));
 });
