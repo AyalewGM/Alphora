@@ -296,7 +296,7 @@ class SessionEquityCheckpoint:
             if len(history) != observations:
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             prior_breach = False
-            breached_receipts = set()
+            first_breach = None  # (first offending receipt, mark ordinal)
             for index, (past_receipt, past_equity, ordinal) in enumerate(history, start=1):
                 _receipt(past_receipt)
                 if (type(ordinal) is not int or ordinal != index
@@ -305,7 +305,8 @@ class SessionEquityCheckpoint:
                 parsed_equity = _amount(D(past_equity))
                 if parsed_equity <= floor:
                     prior_breach = True
-                    breached_receipts.add(past_receipt)
+                    if first_breach is None:
+                        first_breach = (past_receipt, index)
                 if index == observations and (past_receipt != mark_hash
                                               or parsed_equity != last):
                     raise ValueError("SESSION_CHECKPOINT_CORRUPT")
@@ -399,12 +400,25 @@ class SessionEquityCheckpoint:
                 raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             if halt_rows:
                 _, reason, event_revision, event_receipt = halt_rows[0]
+                # Receipt and revision together attest the *first* loss mark.
+                # A later below-floor mark cannot retroactively mint the halt;
+                # nor may a prior session's revision impersonate a manual halt.
+                active_base_revision = historical_observations + len(transitions)
                 if (type(event_revision) is not int or event_revision < 1
                         or event_revision > revision
-                        or (reason == "LOSS" and
-                            (event_receipt not in breached_receipts or
-                             type(event_receipt) is not str))
-                        or (reason == "MANUAL" and event_receipt is not None)
+                        or (reason == "LOSS" and (
+                            first_breach is None
+                            or event_receipt != first_breach[0]
+                            or event_revision != active_base_revision + first_breach[1]))
+                        or (reason == "MANUAL" and (
+                            event_receipt is not None
+                            or not (active_base_revision + 1 <= event_revision
+                                    <= active_base_revision + observations + 1)
+                            # Once a loss is observed its LOSS witness already
+                            # exists. A MANUAL witness must predate that mark.
+                            or (first_breach is not None and
+                                event_revision > active_base_revision
+                                + first_breach[1])))
                         or reason not in ("LOSS", "MANUAL")):
                     raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             # A valid revision is exactly the number of immutable mutations:
