@@ -11,7 +11,7 @@ import re
 import sqlite3
 
 from .risk import (BuyProposal, PaperAccount, RiskPolicy, DEFAULT_RISK_POLICY,
-                   INITIAL_EQUITY, DAILY_LOSS_FRACTION, validate_buy)
+                   INITIAL_EQUITY, validate_buy)
 
 _ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z")
@@ -289,11 +289,23 @@ class OfflineReservations:
                     or type(account.day_pnl) is not D or not account.day_pnl.is_finite()
                     or type(account.halted) is not bool):
                 raise ValueError("INVALID_ACCOUNT_STATE")
-            loss_floor = -(INITIAL_EQUITY * DAILY_LOSS_FRACTION)
-            # Compare absolute equity directly with the exact $98k limit
-            # before any subtraction could round a genuine daily loss away.
+            # Use the book's pinned effective daily-loss policy, not the
+            # global 2% default. Observation must durably stop a stricter
+            # session at its own inclusive boundary even with no new BUY.
+            # Full session-opening-equity rollover is still unsupported (#42):
+            # this book deliberately accepts only the original $100k session.
+            try:
+                with localcontext() as context:
+                    context.prec = 80
+                    context.traps[Inexact] = True
+                    loss_floor = -(INITIAL_EQUITY * self._policy.daily_loss_fraction)
+                    equity_floor = INITIAL_EQUITY + loss_floor
+            except DecimalException as exc:
+                raise ValueError("UNREPRESENTABLE_ACCOUNT_MARK") from exc
+            # Compare absolute equity as well as caller-asserted day P&L;
+            # the one-way halt is persisted inside this SQLite transaction.
             if (account.halted or account.day_pnl <= loss_floor
-                    or account.equity <= INITIAL_EQUITY + loss_floor):
+                    or account.equity <= equity_floor):
                 self._db.execute("UPDATE book_meta SET value='1' WHERE key='halted'")
                 return self._snapshot()
             # A finite Decimal can still overflow the active arithmetic
