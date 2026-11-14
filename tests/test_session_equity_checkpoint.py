@@ -668,6 +668,58 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         self.conn.execute("UPDATE session_equity_rollovers SET revision=2")
         self.assertEqual(self.store.snapshot(), stopped)
 
+    def test_loss_halt_event_is_first_breach_at_exact_revision(self):
+        """A delayed/forged loss latch cannot rewrite the immutable audit order."""
+        self.initial()
+        first = self.mark("98000", B)
+        second = self.mark("97000", C)
+        self.assertTrue(first.halted)
+        self.assertTrue(second.halted)
+        self.assertEqual(self.conn.execute(
+            "SELECT reason,revision,mark_receipt FROM session_equity_halt_events"
+        ).fetchone(), ("LOSS", first.revision, B))
+        # The ordinary UPDATE is vetoed. Even if an administrator bypasses
+        # the local trigger, the snapshot must reject a misdated/late witness.
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "IMMUTABLE_SESSION_HALT"):
+            self.conn.execute(
+                "UPDATE session_equity_halt_events SET revision=2")
+        self.conn.execute("DROP TRIGGER session_equity_halts_no_update")
+        for revision, receipt in ((2, B), (2, C), (1, C)):
+            with self.subTest(revision=revision, receipt=receipt):
+                self.conn.execute(
+                    "UPDATE session_equity_halt_events SET revision=?,mark_receipt=?",
+                    (revision, receipt))
+                with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+                    self.store.snapshot()
+        self.conn.execute(
+            "UPDATE session_equity_halt_events SET revision=?,mark_receipt=?",
+            (first.revision, B))
+        self.assertEqual(self.store.snapshot(), second)
+
+    def test_manual_halt_revision_belongs_to_active_session(self):
+        """Historic pre-rollover revisions cannot impersonate a later manual halt."""
+        self.initial()
+        self.mark("105000", B)
+        opened = self.rollover("105000", C)
+        self.assertEqual(opened.revision, 2)
+        marked = self.mark("104000", "d" * 64)
+        halted = self.store.halt()
+        self.assertEqual(halted.revision, marked.revision + 1)
+        self.assertTrue(halted.halted)
+        self.conn.execute("DROP TRIGGER session_equity_halts_no_update")
+        self.conn.execute("UPDATE session_equity_halt_events SET revision=1")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute(
+            "UPDATE session_equity_halt_events SET revision=?", (halted.revision,))
+        # Later marks do not reset the one-way veto or move the halt witness.
+        after = self.mark("103000", "e" * 64)
+        self.assertTrue(after.halted)
+        self.conn.close()
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.store = SessionEquityCheckpoint(self.conn)
+        self.assertEqual(self.store.snapshot(), after)
+
     def test_strict_decimal_and_session_id_input(self):
         for value in (D("1.001"), D("NaN"), -D("1"), 100000):
             with self.subTest(value=value):
