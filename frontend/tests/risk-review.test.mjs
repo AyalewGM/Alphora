@@ -14,6 +14,7 @@ test("approved defaults compare as ceilings without claiming an effective policy
     "0.5%", "10%", "2%"
   ]);
   assert.ok(review.rows.slice(1, 4).every(row => row.meaning === "At approved hard ceiling"));
+  assert.equal(review.rows[0].reference, "USD 100,000.00 (new portfolios)");
   assert.equal(review.rows[0].meaning, "New portfolios only; existing ledger unchanged");
   assert.equal(review.rows[4].meaning, "Schedule proposal only; no active scheduler");
   assert.equal(Object.isFrozen(review), true);
@@ -30,7 +31,7 @@ test("tightened proposals display exact percentages without floating point round
     dailyLossPct: "1.9999",
     rebalanceFrequency: "manual"
   });
-  assert.equal(review.rows[0].proposed, "USD 25000.5");
+  assert.equal(review.rows[0].proposed, "USD 25,000.50");
   assert.deepEqual(review.rows.slice(1, 4).map(row => row.proposed), [
     "0.0001%", "5.0001%", "1.9999%"
   ]);
@@ -57,5 +58,20 @@ test("comparison fails closed on loosened, malformed or incomplete proposals", (
   assert.throws(() => buildRiskReview({}), /INVALID_RISK_DRAFT/);
   for (const name of ["enabled","active","clear_halt","revision","apply","execute","orders"]) {
     assert.equal(Object.hasOwn(buildRiskReview(DEFAULT_RISK_DRAFT), name), false, name);
+  }
+});
+
+
+test("USD proposal comparison preserves cents and huge integers without Number rounding", () => {
+  for (const [startingEquityUsd, label] of [
+    ["0.01", "USD 0.01"],
+    ["1000", "USD 1,000.00"],
+    ["999999999999999999999999999999999999.99",
+     "USD 999,999,999,999,999,999,999,999,999,999,999,999.99"]
+  ]) {
+    const review = buildRiskReview({ ...DEFAULT_RISK_DRAFT, startingEquityUsd });
+    assert.equal(review.rows[0].proposed, label);
+    // Presentation only; retain the canonical exact wire value.
+    assert.equal(review.wire.starting_equity_usd, startingEquityUsd);
   }
 });
