@@ -54,10 +54,23 @@ class TestPaperRiskConfig(unittest.TestCase):
             daily_loss_fraction=D("0.01"),
             rebalance_frequency="weekly",
         )
-        self.assertEqual(alternative.risk_policy().fingerprint(), "0.0025|0.05")
+        self.assertEqual(alternative.risk_policy().fingerprint(),
+                         "0.0025|0.05|0.01")
         self.assertEqual(len(alternative.receipt()), 64)
         self.assertNotEqual(alternative.receipt(), PaperRiskConfig().receipt())
 
+
+    def test_tighter_daily_loss_proposal_projects_to_guard_identity(self):
+        # A proposed 1% daily halt cannot be represented by the old
+        # two-parameter RiskPolicy identity or the direct BUY veto.
+        proposal = PaperRiskConfig(daily_loss_fraction=D("0.01"))
+        projected = proposal.risk_policy()
+        self.assertEqual(projected.daily_loss_fraction, D("0.01"))
+        self.assertEqual(projected.fingerprint(), "0.005|0.1|0.01")
+        self.assertEqual(PaperRiskConfig().risk_policy().fingerprint(),
+                         "0.005|0.1")
+        self.assertEqual(PaperRiskConfig.from_wire(proposal.to_wire())
+                         .risk_policy().fingerprint(), projected.fingerprint())
 
     def test_wire_roundtrip_preserves_exact_policy_and_receipt(self):
         config = PaperRiskConfig(starting_equity_usd=D("25000.00"),

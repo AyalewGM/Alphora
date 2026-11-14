@@ -34,16 +34,20 @@ def _bounded_policy_fraction(value: Decimal, ceiling: Decimal) -> bool:
 
 
 # Operator-configurable PAPER limits may only tighten the owner's hard caps.
-# The separate 2% daily-loss shutdown is not a per-trade risk allowance.
+# Daily-loss fractions are *not* per-trade allowances. A tightened loss
+# fraction must be pinned by the owning durable book/session before dispatch.
 @dataclass(frozen=True)
 class RiskPolicy:
     risk_per_trade_fraction: Decimal = RISK_FRACTION
     max_instrument_fraction: Decimal = MAX_INSTRUMENT_FRACTION
+    daily_loss_fraction: Decimal = DAILY_LOSS_FRACTION
 
     def __post_init__(self):
         if (not _bounded_policy_fraction(self.risk_per_trade_fraction, RISK_FRACTION)
                 or not _bounded_policy_fraction(self.max_instrument_fraction,
-                                                MAX_INSTRUMENT_FRACTION)):
+                                                MAX_INSTRUMENT_FRACTION)
+                or not _bounded_policy_fraction(self.daily_loss_fraction,
+                                                DAILY_LOSS_FRACTION)):
             raise ValueError("INVALID_RISK_POLICY")
 
     def fingerprint(self) -> str:
@@ -57,8 +61,14 @@ class RiskPolicy:
             literal = format(value, "f")
             return literal.rstrip("0").rstrip(".") if "." in literal else literal
 
-        return (canonical(self.risk_per_trade_fraction) + "|"
+        # Old book metadata uses a two-field fingerprint for the approved
+        # default 2% halt. Preserve that exact identity. A tighter limit MUST
+        # produce a different persisted policy ID and fail a stale-book reopen.
+        base = (canonical(self.risk_per_trade_fraction) + "|"
                 + canonical(self.max_instrument_fraction))
+        if self.daily_loss_fraction == DAILY_LOSS_FRACTION:
+            return base
+        return base + "|" + canonical(self.daily_loss_fraction)
 
 
 DEFAULT_RISK_POLICY = RiskPolicy()
@@ -156,7 +166,9 @@ def validate_buy(
             context.traps[Inexact] = True
             # Do not let an inconsistent reported P&L bypass the daily loss halt.
             observed_day_pnl = account.equity - account.session_open_equity
-            loss_limit = -(account.session_open_equity * DAILY_LOSS_FRACTION)
+            # Use the effective, session-pinned limit, never an independent
+            # global 2% threshold when an approved policy is tighter.
+            loss_limit = -(account.session_open_equity * policy.daily_loss_fraction)
             if account.halted or account.day_pnl <= loss_limit or observed_day_pnl <= loss_limit:
                 return Decision(False, "DAILY_LOSS_HALT")
             # Cash-only, no deposits/withdrawals in this paper snapshot.

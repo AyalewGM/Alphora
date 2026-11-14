@@ -89,9 +89,14 @@ class PaperRiskConfig:
             raise ValueError("INVALID_PAPER_RISK_CONFIG")
 
     def risk_policy(self) -> RiskPolicy:
-        """Only the two already supported *tightening* knobs map to the engine."""
+        """Map tightening limits to the pure guard, NOT to an active session.
+
+        This proposal does not persist or authorize the effective book policy.
+        The future session owner must pin and verify the policy receipt first.
+        """
         return RiskPolicy(self.risk_per_trade_fraction,
-                          self.max_instrument_fraction)
+                          self.max_instrument_fraction,
+                          self.daily_loss_fraction)
 
     def to_wire(self) -> dict[str, str]:
         """Strict versioned proposal payload; all amounts are decimal *strings*.
