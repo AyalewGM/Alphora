@@ -111,6 +111,8 @@ function App() {
     importRequestId.current += 1;
     setImportPending(false);
     setImported(null);
+    // Imported-only symbols must not become fake zero-price demo quotes.
+    setSelected(current => WATCHLIST.some(row => row.symbol === current) ? current : "SPY");
     setImportError("");
   }
   async function onSnapshotFile(event) {
@@ -121,7 +123,9 @@ function App() {
     event.currentTarget.value = "";
     const requestId = ++importRequestId.current;
     // Invalidate the previous chart/source immediately while a new file loads.
+    // An imported-only symbol cannot retain a fake zero-price demo chart.
     setImported(null);
+    setSelected(current => WATCHLIST.some(row => row.symbol === current) ? current : "SPY");
     setImportError("");
     setImportPending(true);
     try {
