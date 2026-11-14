@@ -720,6 +720,64 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         self.store = SessionEquityCheckpoint(self.conn)
         self.assertEqual(self.store.snapshot(), after)
 
+    def test_manual_halt_same_session_backdating_fails_after_restart(self):
+        """Every mark retains its revision across a separate manual halt."""
+        self.initial()
+        before = self.mark("101000", B)
+        second = self.mark("101200", C)
+        stopped = self.store.halt()
+        self.assertEqual((before.revision, second.revision, stopped.revision),
+                         (1, 2, 3))
+        self.assertEqual(self.conn.execute(
+            "SELECT observation_number,revision FROM session_equity_marks "
+            "ORDER BY observation_number").fetchall(), [(1, 1), (2, 2)])
+        self.conn.execute("DROP TRIGGER session_equity_halts_no_update")
+        for false_revision in (1, 2):
+            with self.subTest(forged_revision=false_revision):
+                self.conn.execute(
+                    "UPDATE session_equity_halt_events SET revision=?",
+                    (false_revision,))
+                with self.assertRaisesRegex(ValueError,
+                                            "SESSION_CHECKPOINT_CORRUPT"):
+                    self.store.snapshot()
+                self.conn.close()
+                self.conn = sqlite3.connect(self.file, isolation_level=None)
+                self.store = SessionEquityCheckpoint(self.conn)
+                with self.assertRaisesRegex(ValueError,
+                                            "SESSION_CHECKPOINT_CORRUPT"):
+                    self.store.snapshot()
+        self.conn.execute("UPDATE session_equity_halt_events SET revision=3")
+        after = self.mark("100500", "d" * 64)
+        self.assertTrue(after.halted)
+        self.assertEqual(after.revision, 4)
+        self.assertEqual(self.conn.execute(
+            "SELECT observation_number,revision FROM session_equity_marks "
+            "ORDER BY observation_number").fetchall(), [(1, 1), (2, 2), (3, 4)])
+        self.conn.execute("DROP TRIGGER session_equity_marks_no_update")
+        self.conn.execute(
+            "UPDATE session_equity_marks SET revision=3 WHERE receipt=?", (B,))
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute(
+            "UPDATE session_equity_marks SET revision=1 WHERE receipt=?", (B,))
+        self.assertEqual(self.store.snapshot(), after)
+
+    def test_historical_mark_revision_forgery_fails_after_rollover(self):
+        self.initial()
+        self.mark("105000", B)
+        opened = self.rollover("105000", C)
+        self.assertEqual(opened.revision, 2)
+        self.conn.execute("DROP TRIGGER session_equity_marks_no_update")
+        self.conn.execute(
+            "UPDATE session_equity_marks SET revision=2 "
+            "WHERE session_id='2026-11-02'")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute(
+            "UPDATE session_equity_marks SET revision=1 "
+            "WHERE session_id='2026-11-02'")
+        self.assertEqual(self.store.snapshot(), opened)
+
     def test_strict_decimal_and_session_id_input(self):
         for value in (D("1.001"), D("NaN"), -D("1"), 100000):
             with self.subTest(value=value):
