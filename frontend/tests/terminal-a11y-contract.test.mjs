@@ -128,3 +128,18 @@ test("a stale async local snapshot cannot reappear after clear, symbol change or
   assert.match(jsx, /onClick=\{clearLocalImport\}>Clear import/);
   assert.match(jsx, /onClick=\{\(\)=>\{clearLocalImport\(\);setSelected\(x\.symbol\);\}\} aria-pressed/);
 });
+
+test("a replacement snapshot clears previous bars before the read and permits cancellation/retry", () => {
+  // Static contracts only; deferred File.text() races require browser testing.
+  const importHandler = jsx.slice(jsx.indexOf("async function onSnapshotFile"), jsx.indexOf("useEffect(() => {"));
+  const beforeAwait = importHandler.slice(0, importHandler.indexOf("await file.text()"));
+  assert.match(beforeAwait, /const file = event\.currentTarget\.files\?\.\[0\];\s+if \(!file\) return;/);
+  assert.match(beforeAwait, /event\.currentTarget\.value = "";/);
+  assert.match(beforeAwait, /setImported\(null\);\s+setImportError\(""\);\s+setImportPending\(true\);/);
+  assert.match(importHandler, /finally \{\s+if \(requestId === importRequestId\.current\) setImportPending\(false\);\s+\}/);
+  const clearHandler = jsx.slice(jsx.indexOf("function clearLocalImport()"), jsx.indexOf("async function onSnapshotFile"));
+  assert.match(clearHandler, /importRequestId\.current \+= 1;\s+setImportPending\(false\);\s+setImported\(null\);/);
+  assert.ok(jsx.includes('onClick={clearLocalImport}>Cancel pending import</button>'));
+  assert.ok(jsx.includes('className="import-progress" role="status">Reading local snapshot'));
+  assert.match(css, /\.import-panel \.import-progress\{flex-basis:100%;/);
+});
