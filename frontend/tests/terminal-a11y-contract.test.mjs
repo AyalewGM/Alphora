@@ -117,3 +117,14 @@ test("paper-only and synthetic/user-supplied provenance badges remain visible at
   assert.ok(override.includes(".top-center { flex:1 1 100% }"));
   assert.ok(override.includes(".top-center .chip { white-space:normal; overflow-wrap:anywhere }"));
 });
+
+test("a stale async local snapshot cannot reappear after clear, symbol change or a newer read", () => {
+  // Source guardrails: these verify intent, not browser event ordering.
+  assert.match(jsx, /const importRequestId = useRef\(0\)/);
+  assert.match(jsx, /const requestId = \+\+importRequestId\.current;/);
+  assert.match(jsx, /const snapshot = parseLocalDailySnapshot\(await file\.text\(\)\);\s+if \(requestId !== importRequestId\.current\) return;\s+setImported\(snapshot\)/);
+  assert.match(jsx, /catch \(error\) \{\s+if \(requestId !== importRequestId\.current\) return;\s+setImported\(null\)/);
+  assert.match(jsx, /function clearLocalImport\(\) \{\s+importRequestId\.current \+= 1;\s+setImported\(null\);/);
+  assert.match(jsx, /onClick=\{clearLocalImport\}>Clear import/);
+  assert.match(jsx, /onClick=\{\(\)=>\{clearLocalImport\(\);setSelected\(x\.symbol\);\}\} aria-pressed/);
+});
