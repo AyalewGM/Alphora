@@ -21,6 +21,18 @@ function percentLabel(fraction) {
   return `${whole}${decimal ? "." + decimal : ""}%`;
 }
 
+function usdLabel(amount) {
+  // Money presentation must not round through Number or strip significant
+  // cents. The wire is validated before this formatter is called.
+  if (typeof amount !== "string" ||
+      !/^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,2})?$/.test(amount)) {
+    throw new Error("INVALID_REVIEW_USD");
+  }
+  const [dollars, fraction = ""] = amount.split(".");
+  const grouped = dollars.replace(/\B(?=([0-9]{3})+(?![0-9]))/g, ",");
+  return `USD ${grouped}.${fraction.padEnd(2, "0")}`;
+}
+
 function ceilingRow(label, field, ceiling) {
   return Object.freeze({
     label,
@@ -37,8 +49,8 @@ export function buildRiskReview(draft) {
   const rows = Object.freeze([
     Object.freeze({
       label: "Starting virtual equity",
-      reference: "USD 100000 (new portfolios)",
-      proposed: `USD ${wire.starting_equity_usd}`,
+      reference: `${usdLabel(BASELINE.starting_equity_usd)} (new portfolios)`,
+      proposed: usdLabel(wire.starting_equity_usd),
       meaning: "New portfolios only; existing ledger unchanged"
     }),
     ceilingRow("Planned trade risk", "risk_per_trade_fraction", wire.risk_per_trade_fraction),
