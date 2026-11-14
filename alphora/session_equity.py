@@ -331,6 +331,7 @@ class SessionEquityCheckpoint:
                 "SELECT ordinal,previous_session,next_session,"
                 "previous_mark_receipt,opening_receipt,opening_equity,revision "
                 "FROM session_equity_rollovers ORDER BY ordinal").fetchall()
+            historical_observations = 0
             prior_revision = -1
             for index, (ordinal, previous, following, final_receipt,
                         next_receipt, next_equity_text, transition_revision) in enumerate(
@@ -371,6 +372,12 @@ class SessionEquityCheckpoint:
                 if (prior_marks[-1][0] != final_receipt
                         or prior_equity != next_equity):
                     raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+                historical_observations += len(prior_marks)
+                # Every historic mark advances the revision once, and each
+                # rollover advances it once. Reject invented/out-of-order
+                # transition revisions, not just a monotonic-looking chain.
+                if transition_revision != historical_observations + index:
+                    raise ValueError("SESSION_CHECKPOINT_CORRUPT")
                 chain_session, chain_opening, chain_receipt = (
                     following, next_equity, next_receipt)
                 prior_revision = transition_revision
@@ -400,6 +407,15 @@ class SessionEquityCheckpoint:
                         or (reason == "MANUAL" and event_receipt is not None)
                         or reason not in ("LOSS", "MANUAL")):
                     raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            # A valid revision is exactly the number of immutable mutations:
+            # all observed marks, all rollovers, plus one optional manual
+            # halt. A LOSS halt is part of its triggering mark, not an
+            # additional revision. Otherwise corrupt revision bumps can
+            # spoof optimistic concurrency or replay state after restart.
+            manual_halts = int(bool(halt_rows) and halt_rows[0][1] == "MANUAL")
+            if revision != (historical_observations + observations
+                            + len(transitions) + manual_halts):
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             return SessionEquityState(sid, opening, last, opening_hash,
                                       mark_hash, revision, observations, bool(halted),
                                       effective, policy_hash)
