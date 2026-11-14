@@ -193,6 +193,31 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         self.assertEqual(third.observations, 3)
         self.assertEqual(third.revision, second.revision + 1)
 
+    def test_orphan_session_mark_is_corrupt_even_after_restart(self):
+        # Extra append-only marks for an unlinked session cannot be ignored:
+        # they may otherwise pollute a future rollover or mask audit history.
+        self.initial()
+        self.mark("105000", B)
+        self.rollover("105000", C)
+        before = self.store.snapshot()
+        self.conn.execute(
+            "INSERT INTO session_equity_marks "
+            "(session_id,receipt,equity,observation_number,revision) "
+            "VALUES (?,?,?,?,?)",
+            ("2026-11-05", "f" * 64, "105000", 1, before.revision + 1))
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.close()
+        self.conn = sqlite3.connect(self.file, isolation_level=None)
+        self.store = SessionEquityCheckpoint(self.conn)
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.observe(
+                session_id=before.session_id, equity=D("105000"),
+                receipt="e" * 64, expected_revision=before.revision,
+                reconciled=True, marks_verified=True)
+
     def test_rejects_missing_or_contradictory_mark_history(self):
         self.initial()
         self.mark("99000", B)
