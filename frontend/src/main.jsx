@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { APPROVED_POLICY, loadLocalReadOnlyStatus } from "./api.js";
@@ -72,6 +72,8 @@ function App() {
   const [search, setSearch] = useState("");
   const [imported, setImported] = useState(null);
   const [importError, setImportError] = useState("");
+  // A slow file.text() must not restore data after Clear, symbol switch, or a newer import.
+  const importRequestId = useRef(0);
   // Draft-only operator input; deliberately no storage or backend write.
   const [riskDraft, setRiskDraft] = useState({ ...DEFAULT_RISK_DRAFT });
   const [riskPreview, setRiskPreview] = useState(null);
@@ -104,16 +106,24 @@ function App() {
     setRiskDraftError("");
     setRiskDraftInvalidField(null);
   }
+  function clearLocalImport() {
+    importRequestId.current += 1;
+    setImported(null);
+    setImportError("");
+  }
   async function onSnapshotFile(event) {
+    const requestId = ++importRequestId.current;
     setImportError("");
     const file = event.target.files?.[0];
     if (!file) return;
     try {
       if (file.size > 512 * 1024) throw new Error("SNAPSHOT_TOO_LARGE");
       const snapshot = parseLocalDailySnapshot(await file.text());
+      if (requestId !== importRequestId.current) return;
       setImported(snapshot);
       setSelected(snapshot.symbol);
     } catch (error) {
+      if (requestId !== importRequestId.current) return;
       setImported(null);
       setImportError(`Local import rejected: ${error.message}`);
     } finally {
@@ -267,11 +277,11 @@ function App() {
           <Candles symbol={selected} timeframe={timeframe} imported={showingLocal ? imported : null} />
           <div className="chart-footer"><span>{showingLocal ? `USER-SUPPLIED ${imported.source} / ${imported.source_revision} · ${imported.price_basis} · Declared receipt ${imported.declared_sha256.slice(0,12)}… (NOT AUTHENTICATED)` : "SIMULATED VISUALIZATION · No live feed or historical vendor data"}</span><span>Read-only</span></div>
         </section>
-        <section className="panel import-panel"><div><strong>Local historical daily snapshot</strong><p>Choose a JSON snapshot with source, revision, availability timestamps and a declared SHA-256 receipt. The source and receipt are not independently authenticated. No file is uploaded.</p></div><label className="filebutton">Import JSON<input aria-label="Import local historical daily snapshot JSON" type="file" accept=".json,application/json" onChange={onSnapshotFile}/></label>{imported && <button type="button" className="clearbutton" onClick={()=>{setImported(null);setImportError("");}}>Clear import</button>}{importError && <p className="import-error" role="alert">{importError}</p>}</section>
+        <section className="panel import-panel"><div><strong>Local historical daily snapshot</strong><p>Choose a JSON snapshot with source, revision, availability timestamps and a declared SHA-256 receipt. The source and receipt are not independently authenticated. No file is uploaded.</p></div><label className="filebutton">Import JSON<input aria-label="Import local historical daily snapshot JSON" type="file" accept=".json,application/json" onChange={onSnapshotFile}/></label>{imported && <button type="button" className="clearbutton" onClick={clearLocalImport}>Clear import</button>}{importError && <p className="import-error" role="alert">{importError}</p>}</section>
         <section className="panel bottom-panel"><div className="tabbar">{["Overview","Signals","Paper decisions","Research"].map(t=><button key={t} onClick={()=>setTab(t)} className={tab===t?"active":""} aria-pressed={tab===t}>{t}</button>)}</div><div className="empty"><div className="empty-icon">⌁</div><strong>{tab === "Overview" ? "Research workspace ready" : `${tab} integration pending`}</strong><p>{tab === "Overview" ? "Connect validated, point-in-time market datasets to replace all illustrative prices and chart bars." : "No verified dataset or authenticated read-only endpoint is connected. Nothing here represents actual positions, recommendations, or orders."}</p></div></section>
       </main>
       <aside className="sidebar">
-        <section className="panel watchlist"><div className="sidehead"><h3>Watchlist</h3><span>DEMO</span></div><input aria-label="Filter watchlist" placeholder="Search symbols…" value={search} onChange={e=>setSearch(e.target.value)} /><div className="watchheader"><span>Symbol</span><span>Demo price</span></div>{filtered.map(x=><button type="button" className={selected===x.symbol?"watchrow chosen":"watchrow"} key={x.symbol} onClick={()=>{setSelected(x.symbol);setImported(null);}} aria-pressed={selected===x.symbol}><span className="watchname"><strong>{x.symbol}</strong><small>{x.name}</small></span><span><strong>${x.base.toFixed(2)}</strong><small className={x.change>=0?"positive":"negative"}>{x.change>=0?"+":""}{x.change.toFixed(2)}%</small></span></button>)}{filtered.length===0&&<p className="noresults">No demo symbols match</p>}</section>
+        <section className="panel watchlist"><div className="sidehead"><h3>Watchlist</h3><span>DEMO</span></div><input aria-label="Filter watchlist" placeholder="Search symbols…" value={search} onChange={e=>setSearch(e.target.value)} /><div className="watchheader"><span>Symbol</span><span>Demo price</span></div>{filtered.map(x=><button type="button" className={selected===x.symbol?"watchrow chosen":"watchrow"} key={x.symbol} onClick={()=>{clearLocalImport();setSelected(x.symbol);}} aria-pressed={selected===x.symbol}><span className="watchname"><strong>{x.symbol}</strong><small>{x.name}</small></span><span><strong>${x.base.toFixed(2)}</strong><small className={x.change>=0?"positive":"negative"}>{x.change>=0?"+":""}{x.change.toFixed(2)}%</small></span></button>)}{filtered.length===0&&<p className="noresults">No demo symbols match</p>}</section>
         <section className="panel riskpanel"><div className="sidehead"><h3>Execution boundary</h3><span className="safe-tag">LOCKED</span></div><div className="boundary"><span className="lock">◈</span><strong>Broker disconnected</strong><p>No credentials, order routing, execution endpoints or automated trading.</p></div><div className="rule"><span>Execution mode</span><strong>Research only</strong></div><div className="rule"><span>Reference GET endpoints</span><strong>{apiState.startsWith("Reference GET") ? "Checked" : "Unverified"}</strong></div><div className="rule"><span>Rebalancing policy</span><strong>{policy.rebalance_frequency}</strong></div><div className="rule"><span>Live trading</span><strong className="negative">Disabled</strong></div></section>
       </aside>
     </div>
