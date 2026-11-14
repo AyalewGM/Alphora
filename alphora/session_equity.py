@@ -193,6 +193,37 @@ class SessionEquityCheckpoint:
             self._db.execute("""CREATE TRIGGER session_equity_marks_no_delete
                 BEFORE DELETE ON session_equity_marks
                 BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_MARK'); END""")
+
+            # Anchor the original session and every rollover separately from
+            # the mutable active checkpoint. A later revision may NEVER
+            # change the opening equity or session ID without a linked
+            # final-mark transition. These local witnesses do not authenticate
+            # operator authority or external market/calendar provenance.
+            self._db.execute("""CREATE TABLE session_equity_genesis (
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                session_id TEXT NOT NULL, opening_equity TEXT NOT NULL,
+                opening_receipt TEXT NOT NULL
+            )""")
+            self._db.execute("""CREATE TRIGGER session_equity_genesis_no_update
+                BEFORE UPDATE ON session_equity_genesis
+                BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_GENESIS'); END""")
+            self._db.execute("""CREATE TRIGGER session_equity_genesis_no_delete
+                BEFORE DELETE ON session_equity_genesis
+                BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_GENESIS'); END""")
+            self._db.execute("""CREATE TABLE session_equity_rollovers (
+                ordinal INTEGER PRIMARY KEY CHECK(ordinal >= 1),
+                previous_session TEXT NOT NULL, next_session TEXT NOT NULL UNIQUE,
+                previous_mark_receipt TEXT NOT NULL, opening_receipt TEXT NOT NULL,
+                opening_equity TEXT NOT NULL, revision INTEGER NOT NULL
+            )""")
+            self._db.execute("""CREATE TRIGGER session_equity_rollovers_no_update
+                BEFORE UPDATE ON session_equity_rollovers
+                BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_ROLLOVER'); END""")
+            self._db.execute("""CREATE TRIGGER session_equity_rollovers_no_delete
+                BEFORE DELETE ON session_equity_rollovers
+                BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_SESSION_ROLLOVER'); END""")
+            self._db.execute("INSERT INTO session_equity_genesis VALUES(1,?,?,?)",
+                             (session_id, str(opening_equity), opening_receipt))
             # One-time, append-only safety halt evidence. A recovered mark
             # cannot erase an earlier loss breach; non-price/manual halts
             # require their own durable witness.
@@ -278,6 +309,74 @@ class SessionEquityCheckpoint:
                 if index == observations and (past_receipt != mark_hash
                                               or parsed_equity != last):
                     raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+
+            # Validate the whole session-open chain, including previous
+            # sessions' final marks. Checking only the current receipt history
+            # would permit a stale/forged opening baseline after rollover.
+            genesis = self._db.execute(
+                "SELECT id,session_id,opening_equity,opening_receipt "
+                "FROM session_equity_genesis").fetchall()
+            if len(genesis) != 1:
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            g_key, chain_session, chain_opening_text, chain_receipt = genesis[0]
+            if (g_key != 1 or type(chain_opening_text) is not str
+                    or len(chain_opening_text) > 64):
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            _session(chain_session)
+            _receipt(chain_receipt)
+            chain_opening = _amount(D(chain_opening_text), positive=True)
+            if chain_opening != effective.starting_equity_usd:
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+            transitions = self._db.execute(
+                "SELECT ordinal,previous_session,next_session,"
+                "previous_mark_receipt,opening_receipt,opening_equity,revision "
+                "FROM session_equity_rollovers ORDER BY ordinal").fetchall()
+            prior_revision = -1
+            for index, (ordinal, previous, following, final_receipt,
+                        next_receipt, next_equity_text, transition_revision) in enumerate(
+                            transitions, start=1):
+                if (type(ordinal) is not int or ordinal != index
+                        or previous != chain_session
+                        or _session(following) <= _session(previous)
+                        or type(transition_revision) is not int
+                        or not prior_revision < transition_revision <= revision
+                        or type(next_equity_text) is not str
+                        or len(next_equity_text) > 64):
+                    raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+                _receipt(final_receipt)
+                _receipt(next_receipt)
+                next_equity = _amount(D(next_equity_text), positive=True)
+                prior_marks = self._db.execute(
+                    "SELECT receipt,equity,observation_number "
+                    "FROM session_equity_marks WHERE session_id=? "
+                    "ORDER BY observation_number", (previous,)).fetchall()
+                if not prior_marks:
+                    raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+                with localcontext() as ctx:
+                    ctx.prec = 80
+                    ctx.traps[Inexact] = True
+                    previous_floor = chain_opening * (
+                        D(1) - effective.daily_loss_fraction)
+                for mark_index, (prior_receipt, prior_equity_text, number) in enumerate(
+                        prior_marks, start=1):
+                    if (type(number) is not int or number != mark_index
+                            or type(prior_equity_text) is not str
+                            or len(prior_equity_text) > 64):
+                        raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+                    _receipt(prior_receipt)
+                    prior_equity = _amount(D(prior_equity_text))
+                    # No previously breached session may have rolled over.
+                    if prior_equity <= previous_floor:
+                        raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+                if (prior_marks[-1][0] != final_receipt
+                        or prior_equity != next_equity):
+                    raise ValueError("SESSION_CHECKPOINT_CORRUPT")
+                chain_session, chain_opening, chain_receipt = (
+                    following, next_equity, next_receipt)
+                prior_revision = transition_revision
+            if (sid != chain_session or opening != chain_opening
+                    or opening_hash != chain_receipt):
+                raise ValueError("SESSION_CHECKPOINT_CORRUPT")
             # A historic breach stays binding even after a later price
             # recovery. A manual/FATAL halt must have a non-price witness.
             halt_rows = self._db.execute(
@@ -390,6 +489,14 @@ class SessionEquityCheckpoint:
                 raise ValueError("STALE_SESSION_REVISION")
             if opening_equity != old.last_equity:
                 raise ValueError("OPENING_EQUITY_MISMATCH")
+            self._db.execute(
+                "INSERT INTO session_equity_rollovers "
+                "(ordinal,previous_session,next_session,previous_mark_receipt,"
+                "opening_receipt,opening_equity,revision) "
+                "VALUES ((SELECT COALESCE(MAX(ordinal),0)+1 FROM "
+                "session_equity_rollovers),?,?,?,?,?,?)",
+                (previous_session, next_session, old.last_mark_receipt,
+                 opening_receipt, str(opening_equity), old.revision + 1))
             self._db.execute("UPDATE session_equity_checkpoint SET "
                              "session_id=?,opening_equity=?,last_equity=?,"
                              "opening_receipt=?,last_mark_receipt=NULL,"
