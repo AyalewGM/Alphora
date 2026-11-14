@@ -77,7 +77,13 @@ export async function loadLocalReadOnlyStatus(fetcher, signal) {
   const responses = await Promise.all(paths.map(path =>
     fetcher(path, { method: "GET", credentials: "omit",
       redirect: "error", cache: "no-store", signal })));
-  if (responses.some(r => !r || r.ok !== true || r.redirected === true)) {
+  // A successful fetch alone is insufficient: 203 (transformed content)
+  // and 206 (partial content) have ok=true, but cannot attest a complete
+  // authoritative reference response. FastAPI reference GETs return 200 JSON.
+  // Inspect the HTTP media type before parsing, not a server-supplied HTML shell.
+  if (responses.some(r => !r || r.ok !== true || r.status !== 200 ||
+      r.redirected === true ||
+      !/^application\/json(?:\s*;|$)/i.test(r.headers?.get?.("content-type") ?? ""))) {
     throw new Error("LOCAL_API_UNAVAILABLE");
   }
   const [policy, capabilities] = await Promise.all(responses.map(r => r.json()));
