@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal as D, DecimalException, Inexact, localcontext
+from itertools import count
 import re
 import sqlite3
 
@@ -16,6 +17,7 @@ from .risk import DAILY_LOSS_FRACTION, INITIAL_EQUITY
 
 _RECEIPT = re.compile(r"[a-f0-9]{64}\Z")
 _CENT = D("0.01")
+_SAVEPOINT_SEQUENCE = count()
 
 
 def _session(value):
@@ -77,16 +79,28 @@ class SessionEquityCheckpoint:
 
     @contextmanager
     def _atomic(self):
+        # A checkpoint may share the owning book's transaction. Roll back
+        # *this operation's* partial writes even if its caller catches an
+        # exception and later commits unrelated book work.
         own = not self._db.in_transaction
+        savepoint = None if own else f"alphora_session_checkpoint_{next(_SAVEPOINT_SEQUENCE)}"
         if own:
             self._db.execute("BEGIN IMMEDIATE")
+        else:
+            # Generated internally, never user-controlled SQL.
+            self._db.execute(f"SAVEPOINT {savepoint}")
         try:
             yield
             if own:
                 self._db.execute("COMMIT")
+            else:
+                self._db.execute(f"RELEASE SAVEPOINT {savepoint}")
         except BaseException:
             if own:
                 self._db.execute("ROLLBACK")
+            else:
+                self._db.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self._db.execute(f"RELEASE SAVEPOINT {savepoint}")
             raise
 
     def bootstrap(self, session_id, opening_equity, opening_receipt, *, proven_new_book=False):
