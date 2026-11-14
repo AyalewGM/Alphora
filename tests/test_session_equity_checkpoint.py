@@ -5,6 +5,7 @@ import unittest
 from decimal import Decimal as D, localcontext
 from datetime import date, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from alphora.session_equity import SessionEquityCheckpoint
 
@@ -216,6 +217,40 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         self.conn.execute("UPDATE session_equity_checkpoint SET revision=0")
         with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
             self.store.snapshot()
+
+    def test_failed_checkpoint_ops_do_not_leak_into_outer_book_commit(self):
+        # A caller can recover from a checkpoint exception and still commit
+        # unrelated book work. No half-created checkpoint or unsafe halt may
+        # leak from the failed operation into that outer transaction.
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.conn.execute("CREATE TABLE unrelated (value INTEGER)")
+        with patch.object(self.store, "_read", side_effect=RuntimeError("injected read failure")):
+            with self.assertRaisesRegex(RuntimeError, "injected read failure"):
+                self.initial()  # failure after CREATE TABLE and INSERT
+        self.assertTrue(self.conn.in_transaction)
+        self.assertIsNone(self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE name='session_equity_checkpoint'"
+        ).fetchone())
+        self.conn.execute("INSERT INTO unrelated VALUES (1)")
+        self.conn.execute("COMMIT")
+        self.assertEqual(self.conn.execute("SELECT value FROM unrelated").fetchall(), [(1,)])
+
+        self.initial()
+        before = self.store.snapshot()
+        self.conn.execute("BEGIN IMMEDIATE")
+        with patch.object(self.store, "_read",
+                          side_effect=[before, RuntimeError("injected post-update failure")]):
+            with self.assertRaisesRegex(RuntimeError, "injected post-update failure"):
+                self.store.observe(session_id=before.session_id, equity=D("98000"),
+                                   receipt=B, expected_revision=before.revision,
+                                   reconciled=True, marks_verified=True)
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(self.store.snapshot(), before)
+        self.conn.execute("INSERT INTO unrelated VALUES (2)")
+        self.conn.execute("COMMIT")
+        self.assertEqual(self.store.snapshot(), before)
+        self.assertEqual(self.conn.execute("SELECT value FROM unrelated ORDER BY value").fetchall(),
+                         [(1,), (2,)])
 
     def test_strict_decimal_and_session_id_input(self):
         for value in (D("1.001"), D("NaN"), -D("1"), 100000):
