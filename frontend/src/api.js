@@ -11,6 +11,22 @@ export const OFFLINE_CAPABILITIES = Object.freeze({
   live_orders_enabled: false
 });
 
+// The two existing GETs expose only fixed reference data, not a versioned
+// effective account policy. Reject unexpected additions rather than hiding
+// contradictory trading, halt or policy-revision fields behind a green status.
+const REFERENCE_POLICY_KEYS = Object.freeze(["mode", ...Object.keys(APPROVED_POLICY)]);
+const REFERENCE_CAPABILITY_KEYS = Object.freeze([
+  "market", "research_enabled", "paper_orders_enabled",
+  "live_orders_enabled", "rebalance_frequency"
+]);
+
+function hasExactJsonFields(value, fields) {
+  return value !== null && typeof value === "object" &&
+    !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype &&
+    Object.keys(value).length === fields.length &&
+    fields.every(key => Object.hasOwn(value, key));
+}
+
 function canonicalDecimal(value) {
   // Exact comparison with the read-only policy: Number() would round an
   // infinitesimally looser limit to the approved float and wrongly accept it.
@@ -22,7 +38,9 @@ function canonicalDecimal(value) {
 }
 
 export function validateBackendStatus(policy, capabilities) {
-  if (!policy || !capabilities || policy.mode !== "paper" ||
+  if (!hasExactJsonFields(policy, REFERENCE_POLICY_KEYS) ||
+      !hasExactJsonFields(capabilities, REFERENCE_CAPABILITY_KEYS) ||
+      policy.mode !== "paper" ||
       capabilities.research_enabled !== true ||
       capabilities.paper_orders_enabled !== false ||
       capabilities.live_orders_enabled !== false ||
