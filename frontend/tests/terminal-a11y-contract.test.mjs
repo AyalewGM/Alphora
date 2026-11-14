@@ -101,3 +101,18 @@ test("P0 #42 paper execution gate is visible, persistent, and never mistaken for
   assert.ok(css.includes('@media(max-width:560px){.release-gate{'));
   assert.ok(!jsx.includes('Multi-session paper execution READY'));
 });
+
+
+test("paper-only and synthetic/user-supplied provenance badges remain visible at narrow widths", () => {
+  // The earlier 850px media query hides .top-center. A later override must
+  // explicitly restore the badges on both tablet and 320px mobile layouts.
+  assert.match(jsx, /<span className="chip blue">PAPER ONLY<\\/span>/);
+  assert.match(jsx, /showingLocal \\? "USER-SUPPLIED DATA" : "SYNTHETIC DATA"/);
+  const override = css.slice(css.indexOf("/* Critical research provenance cannot disappear"));
+  assert.ok(override.length > 0);
+  assert.match(override, /@media \\(max-width:850px\\)/);
+  assert.match(override, /\\.top-center \\{ display:flex; flex-wrap:wrap;/);
+  assert.match(override, /@media \\(max-width:560px\\)/);
+  assert.match(override, /\\.top-center \\{ flex:1 1 100% \\}/);
+  assert.match(override, /\\.top-center \\.chip \\{ white-space:normal; overflow-wrap:anywhere \\}/);
+});
