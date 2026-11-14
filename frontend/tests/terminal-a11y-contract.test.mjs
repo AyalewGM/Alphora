@@ -88,3 +88,16 @@ test("risk preview announces a short persistent status, not the entire compariso
   assert.ok(!jsx.includes('className="draft-result" role="status"'));
   assert.ok(jsx.includes('role="region" aria-label="Draft risk comparison table, horizontally scrollable"'));
 });
+
+
+test("P0 #42 paper execution gate is visible, persistent, and never mistaken for an attested halt", () => {
+  // This must remain visible independently of the static reference GET result,
+  // selected chart, local risk preview and unknown account snapshot.
+  assert.ok(jsx.includes('<section className="release-gate" aria-labelledby="paper-release-title">'));
+  assert.ok(jsx.includes('<h2 id="paper-release-title">Unattended paper execution BLOCKED — P0 #42</h2>'));
+  assert.ok(jsx.includes('emergency-stop state remains UNKNOWN.'));
+  assert.ok(jsx.includes('Reference GET checks and local risk previews do not authorize orders'));
+  assert.ok(css.includes('.release-gate{display:flex;'));
+  assert.ok(css.includes('@media(max-width:560px){.release-gate{'));
+  assert.ok(!jsx.includes('Multi-session paper execution READY'));
+});
