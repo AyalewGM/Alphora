@@ -620,6 +620,54 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT COUNT(*) FROM session_equity_rollovers").fetchone()[0], 0)
 
+    def test_revision_must_match_durable_marks_rollovers_and_manual_halt(self):
+        """Invented or lost revision increments cannot spoof a recovered state."""
+        initial = self.initial()
+        self.assertEqual(initial.revision, 0)
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=5")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=0")
+
+        first = self.mark("105000", B)
+        self.assertEqual(first.revision, 1)
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=2")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=1")
+
+        second = self.rollover("105000", C)
+        self.assertEqual(second.revision, 2)
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=3")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=2")
+        third = self.mark("104000", "d" * 64)
+        self.assertEqual(third.revision, 3)
+        # A numerically plausible backward revision still exceeds this
+        # session's observation count, but is not the history's true revision.
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=2")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=3")
+
+        stopped = self.store.halt()
+        self.assertEqual(stopped.revision, 4)
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=5")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute("UPDATE session_equity_checkpoint SET revision=4")
+        self.assertEqual(self.store.snapshot(), stopped)
+
+        # Even if a privileged operator drops SQLite's immutability trigger,
+        # the active checkpoint rejects an invented transition revision.
+        self.conn.execute("DROP TRIGGER session_equity_rollovers_no_update")
+        self.conn.execute("UPDATE session_equity_rollovers SET revision=3")
+        with self.assertRaisesRegex(ValueError, "SESSION_CHECKPOINT_CORRUPT"):
+            self.store.snapshot()
+        self.conn.execute("UPDATE session_equity_rollovers SET revision=2")
+        self.assertEqual(self.store.snapshot(), stopped)
+
     def test_strict_decimal_and_session_id_input(self):
         for value in (D("1.001"), D("NaN"), -D("1"), 100000):
             with self.subTest(value=value):
