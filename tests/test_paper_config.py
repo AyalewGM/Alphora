@@ -54,10 +54,23 @@ class TestPaperRiskConfig(unittest.TestCase):
             daily_loss_fraction=D("0.01"),
             rebalance_frequency="weekly",
         )
-        self.assertEqual(alternative.risk_policy().fingerprint(), "0.0025|0.05")
+        self.assertEqual(alternative.risk_policy().fingerprint(),
+                         "0.0025|0.05|0.01")
         self.assertEqual(len(alternative.receipt()), 64)
         self.assertNotEqual(alternative.receipt(), PaperRiskConfig().receipt())
 
+
+    def test_tighter_daily_loss_proposal_projects_to_guard_identity(self):
+        # A proposed 1% daily halt cannot be represented by the old
+        # two-parameter RiskPolicy identity or the direct BUY veto.
+        proposal = PaperRiskConfig(daily_loss_fraction=D("0.01"))
+        projected = proposal.risk_policy()
+        self.assertEqual(projected.daily_loss_fraction, D("0.01"))
+        self.assertEqual(projected.fingerprint(), "0.005|0.1|0.01")
+        self.assertEqual(PaperRiskConfig().risk_policy().fingerprint(),
+                         "0.005|0.1")
+        self.assertEqual(PaperRiskConfig.from_wire(proposal.to_wire())
+                         .risk_policy().fingerprint(), projected.fingerprint())
 
     def test_wire_roundtrip_preserves_exact_policy_and_receipt(self):
         config = PaperRiskConfig(starting_equity_usd=D("25000.00"),
@@ -109,6 +122,39 @@ class TestPaperRiskConfig(unittest.TestCase):
             with self.subTest(payload=payload):
                 with self.assertRaisesRegex(ValueError, "INVALID_PAPER_RISK_CONFIG"):
                     PaperRiskConfig.from_wire(payload)
+
+
+    def test_constructor_rejects_values_outside_versioned_wire_domain(self):
+        # #65 independent QA: construction previously accepted 1e-70,
+        # while to_wire emitted 72 chars and from_wire rejected >64.
+        good = PaperRiskConfig()
+        for field in ("risk_per_trade_fraction",
+                      "max_instrument_fraction", "daily_loss_fraction"):
+            for value in (D("1e-63"), D("1e-70"), D("1e-1000000")):
+                with self.subTest(field=field, value=str(value)):
+                    with self.assertRaisesRegex(ValueError, "INVALID_PAPER_RISK_CONFIG"):
+                        replace(good, **{field: value})
+        for value in (D("1e65"), D("1e1000000")):
+            with self.subTest(starting_equity_usd=str(value)):
+                with self.assertRaisesRegex(ValueError, "INVALID_PAPER_RISK_CONFIG"):
+                    replace(good, starting_equity_usd=value)
+
+    def test_tiny_but_representable_risk_is_exactly_roundtrippable(self):
+        # Longest permitted '0.<zeros>1' wire string (64 characters).
+        tiny = PaperRiskConfig(risk_per_trade_fraction=D("1e-62"))
+        payload = tiny.to_wire()
+        self.assertEqual(len(payload["risk_per_trade_fraction"]), 64)
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                self.assertEqual(PaperRiskConfig.from_wire(payload), tiny)
+                self.assertEqual(PaperRiskConfig.from_wire(payload).receipt(), tiny.receipt())
+                # The direct policy used by the offline book must accept
+                # every proposal-domain fraction that remains representable.
+                self.assertEqual(
+                    PaperRiskConfig.from_wire(payload).risk_policy().fingerprint(),
+                    tiny.risk_policy().fingerprint(),
+                )
 
 if __name__ == "__main__":
     unittest.main()

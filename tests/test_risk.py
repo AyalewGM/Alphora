@@ -33,6 +33,31 @@ class TestRisk(unittest.TestCase):
                     tightened.fingerprint(), "0.00499999999999999999999999|0.1")
                 self.assertNotEqual(tightened.fingerprint(), original.fingerprint())
 
+    def test_direct_policy_bounds_fingerprint_before_formatting(self):
+        # #65: positive finite Decimals can carry enormous exponents; do
+        # not expand them into unbounded persisted policy identities.
+        default = RiskPolicy()
+        for field in ("risk_per_trade_fraction", "max_instrument_fraction"):
+            for value in (D("1e-63"), D("1e-100000"),
+                          D("0.004" + "9" * 65)):
+                with self.subTest(field=field, value=str(value)[:80]):
+                    with self.assertRaisesRegex(ValueError, "INVALID_RISK_POLICY"):
+                        replace(default, **{field: value})
+        # Preserve the same exact 64-character positive wire boundary as
+        # paper-risk-proposal-v1, independent of ambient Decimal precision.
+        expected = "0." + "0" * 61 + "1|0.1"
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as context:
+                context.prec = precision
+                tiny = RiskPolicy(D("1e-62"), D("0.10"))
+                self.assertEqual(tiny.fingerprint(), expected)
+                self.assertEqual(RiskPolicy().fingerprint(), "0.005|0.1")
+                # Trailing zeros may make the raw fixed-point text longer
+                # than 64 chars even while its exact canonical ID is short.
+                padded = RiskPolicy(D("0.005" + "0" * 60),
+                                    D("0.1" + "0" * 62))
+                self.assertEqual(padded.fingerprint(), "0.005|0.1")
+
     def test_paper_policy_never_loosens_approved_hard_limits(self):
         # Caller-provided policies can tighten but never exceed the
         # owner's 0.5% per-trade and 10% single-instrument ceilings.
@@ -50,6 +75,58 @@ class TestRisk(unittest.TestCase):
         self.assertEqual(tightened.risk_per_trade_fraction, D("0.0025"))
         self.assertEqual(tightened.max_instrument_fraction, D("0.05"))
         self.assertTrue(self.decide().permitted)
+
+    def test_tightened_daily_loss_policy_is_bound_to_direct_buy_guard(self):
+        # #42/#65 integration contract only; no book activation or rollover.
+        # For a 1% policy, a $100k open with a $98.5k mark MUST veto a BUY
+        # even though a direct guard using the default 2% would not.
+        one_percent = RiskPolicy(daily_loss_fraction=D("0.01"))
+        default = RiskPolicy()
+        order = BuyProposal("SPY", D("1"), D("100"), D("99"))
+        self.assertEqual(default.fingerprint(), "0.005|0.1")
+        self.assertEqual(one_percent.fingerprint(), "0.005|0.1|0.01")
+        self.assertNotEqual(one_percent.fingerprint(), default.fingerprint())
+        for opening, mark, expected in (
+            ("100000", "99000.01", "PAPER_BUY_ALLOWED"),
+            ("100000", "99000", "DAILY_LOSS_HALT"),
+            ("100000", "98999.99", "DAILY_LOSS_HALT"),
+            ("100000", "98500", "DAILY_LOSS_HALT"),
+            ("105000", "103950.01", "PAPER_BUY_ALLOWED"),
+            ("105000", "103950", "DAILY_LOSS_HALT"),
+        ):
+            with self.subTest(opening=opening, mark=mark):
+                account = replace(self.account, equity=D(mark), cash=D(mark),
+                    session_open_equity=D(opening),
+                    day_pnl=D(mark) - D(opening))
+                self.assertEqual(
+                    self.decide(account=account, proposal=order,
+                                policy=one_percent).reason, expected)
+        not_yet_default_halt = replace(self.account, equity=D("98500"),
+            cash=D("98500"), day_pnl=D("-1500"))
+        self.assertTrue(self.decide(account=not_yet_default_halt,
+                                    proposal=order, policy=default).permitted)
+        self.assertEqual(self.decide(
+            account=replace(not_yet_default_halt, day_pnl=D("0")),
+            proposal=order, policy=one_percent).reason, "DAILY_LOSS_HALT")
+        self.assertEqual(self.decide(
+            account=replace(self.account, halted=True),
+            proposal=order, policy=one_percent).reason, "DAILY_LOSS_HALT")
+
+    def test_tightened_daily_loss_fraction_hard_cap_and_identity(self):
+        for value in (D("0"), D("-0.01"), D("0.020000000000000001"),
+                      D("NaN"), D("Infinity"), D("1e-63"), D("1e-100000")):
+            with self.subTest(value=str(value)[:80]):
+                with self.assertRaisesRegex(ValueError, "INVALID_RISK_POLICY"):
+                    RiskPolicy(daily_loss_fraction=value)
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                self.assertEqual(
+                    RiskPolicy(daily_loss_fraction=D("0.0100")).fingerprint(),
+                    "0.005|0.1|0.01")
+                self.assertEqual(
+                    RiskPolicy(daily_loss_fraction=D("0.02")).fingerprint(),
+                    "0.005|0.1")
 
     def test_boundary_500_risk_and_10000_allocation(self):
         self.assertTrue(self.decide().permitted)
