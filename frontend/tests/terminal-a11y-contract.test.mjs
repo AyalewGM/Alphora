@@ -31,6 +31,34 @@ test("reference API checks must not be represented as verified portfolio state",
   assert.match(jsx, /<dt>Effective policy revision<\/dt><dd>NOT AVAILABLE<\/dd>/);
 });
 
+test("paper monitor explicitly distinguishes all unavailable balances, P&L and provenance from zero or verified state", () => {
+  const monitor = jsx.slice(jsx.indexOf('<section className="panel portfolio-monitor"'), jsx.indexOf('<section className="panel risk-draft-panel"'));
+  assert.ok(monitor.length > 0);
+  for (const label of [
+    "Settled cash", "Reserved cash", "Available cash", "Portfolio equity",
+    "Session profit/loss", "Realized profit/loss", "Unrealized profit/loss",
+    "Open positions"
+  ]) {
+    assert.ok(monitor.includes(`<span>${label}</span><strong>Unavailable</strong>`), label);
+  }
+  for (const field of [
+    ["Emergency halt", "UNKNOWN — not attested"],
+    ["Reconciliation", "NOT VERIFIED"],
+    ["Effective policy revision", "NOT AVAILABLE"],
+    ["Effective policy receipt", "NOT AVAILABLE"],
+    ["Session identity", "NOT VERIFIED"],
+    ["Account snapshot as-of", "NOT AVAILABLE"]
+  ]) {
+    assert.ok(monitor.includes(`<dt>${field[0]}</dt><dd>${field[1]}</dd>`), field[0]);
+  }
+  assert.match(monitor, /NO VERIFIED ACCOUNT SNAPSHOT/);
+  assert.match(monitor, /NOT ZERO POSITIONS/);
+  assert.match(monitor, /NOT AN EMPTY JOURNAL/);
+  assert.doesNotMatch(monitor, /<strong>\$?0(?:\.00)?<\/strong>/);
+  assert.match(css, /\.monitor-grid\{display:grid;grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
+  assert.match(css, /@media\(max-width:370px\)\{\.monitor-grid\{grid-template-columns:1fr\}\}/);
+});
+
 test("narrow viewport preserves status text and keyboard-reachable research tabs", () => {
   // Structural CSS contracts only: physical 320px browser + screen-reader QA is separate.
   const responsive = css.slice(css.indexOf("/* Responsive keyboard access:"));
