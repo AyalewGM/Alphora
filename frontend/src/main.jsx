@@ -192,16 +192,23 @@ function App() {
             <span className="chip amber">NO VERIFIED ACCOUNT SNAPSHOT</span>
           </div>
           <p>Account balance, positions, profit/loss and safety status require a separately reviewed authenticated read-only snapshot. These placeholders are <strong>not account data</strong>; initial virtual equity above is policy reference only.</p>
-          <div className="monitor-grid" aria-label="Portfolio account figures unavailable">
-            <div><span>Available cash</span><strong>Unavailable</strong><small>No verified ledger</small></div>
+          <div className="monitor-grid" aria-label="Paper account figures unavailable — no verified snapshot">
+            <div><span>Settled cash</span><strong>Unavailable</strong><small>No verified ledger</small></div>
+            <div><span>Reserved cash</span><strong>Unavailable</strong><small>Pending-order reservations unverified</small></div>
+            <div><span>Available cash</span><strong>Unavailable</strong><small>No reconciled available balance</small></div>
             <div><span>Portfolio equity</span><strong>Unavailable</strong><small>No verified marks</small></div>
             <div><span>Session profit/loss</span><strong>Unavailable</strong><small>No authoritative session baseline</small></div>
+            <div><span>Realized profit/loss</span><strong>Unavailable</strong><small>No attested fills or basis</small></div>
+            <div><span>Unrealized profit/loss</span><strong>Unavailable</strong><small>No verified marks or cost basis</small></div>
             <div><span>Open positions</span><strong>Unavailable</strong><small>No attested holdings</small></div>
           </div>
           <dl className="monitor-safety" aria-label="Paper execution safety status">
             <div><dt>Emergency halt</dt><dd>UNKNOWN — not attested</dd></div>
             <div><dt>Reconciliation</dt><dd>NOT VERIFIED</dd></div>
             <div><dt>Effective policy revision</dt><dd>NOT AVAILABLE</dd></div>
+            <div><dt>Effective policy receipt</dt><dd>NOT AVAILABLE</dd></div>
+            <div><dt>Session identity</dt><dd>NOT VERIFIED</dd></div>
+            <div><dt>Account snapshot as-of</dt><dd>NOT AVAILABLE</dd></div>
           </dl>
           <section className="monitor-records" aria-labelledby="monitor-positions-title">
             <h3 id="monitor-positions-title">Positions and pending exposure</h3>
