@@ -192,7 +192,7 @@ function App() {
             <span className="chip amber">NO VERIFIED ACCOUNT SNAPSHOT</span>
           </div>
           <p>Account balance, positions, profit/loss and safety status require a separately reviewed authenticated read-only snapshot. These placeholders are <strong>not account data</strong>; initial virtual equity above is policy reference only.</p>
-          <div className="monitor-grid" aria-label="Paper account figures unavailable — no verified snapshot">
+          <div className="monitor-grid" role="group" aria-label="Paper account figures unavailable — no verified snapshot">
             <div><span>Settled cash</span><strong>Unavailable</strong><small>No verified ledger</small></div>
             <div><span>Reserved cash</span><strong>Unavailable</strong><small>Pending-order reservations unverified</small></div>
             <div><span>Available cash</span><strong>Unavailable</strong><small>No reconciled available balance</small></div>
