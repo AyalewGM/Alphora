@@ -9,6 +9,7 @@ from decimal import Decimal as D, DecimalException, Inexact, ROUND_HALF_EVEN, lo
 from pathlib import Path
 import re
 import sqlite3
+from uuid import uuid4
 
 from .risk import (BuyProposal, PaperAccount, RiskPolicy, DEFAULT_RISK_POLICY,
                    INITIAL_EQUITY, DAILY_LOSS_FRACTION, validate_buy)
@@ -66,6 +67,11 @@ class OfflineReservations:
         # a running/reopened book without creating a new reviewed session.
         if not policy.fingerprint():
             raise ValueError("INVALID_PAPER_BOOK")
+        # Only an absent SQLite path can bootstrap a new CLEAR guard. Any
+        # pre-existing unversioned database is ambiguous: even a flat book
+        # may have seen FATAL before this guard schema was introduced.
+        # Never infer a safe prior reconciliation from empty positions.
+        fresh_storage = not Path(path).exists()
         self._db = sqlite3.connect(str(path), timeout=5, isolation_level=None)
         try:
             self._db.execute("PRAGMA busy_timeout=5000")
@@ -91,7 +97,12 @@ class OfflineReservations:
                     basis_retired TEXT NOT NULL
                 )""")
                 meta = dict(self._db.execute("SELECT key,value FROM book_meta"))
+                fresh_bootstrap = False
                 if not meta:
+                    # Missing metadata in a pre-existing file could indicate
+                    # deletion/corruption of the prior book, not a new one.
+                    if not fresh_storage:
+                        raise ValueError("BOOK_STATE_CORRUPT")
                     if (self._db.execute("SELECT 1 FROM buy_intents LIMIT 1").fetchone()
                             or self._db.execute("SELECT 1 FROM hypothetical_fills LIMIT 1").fetchone()
                             or self._db.execute("SELECT 1 FROM hypothetical_sells LIMIT 1").fetchone()):
@@ -101,13 +112,40 @@ class OfflineReservations:
                         ("cash", str(starting_cash)), ("halted", "0"),
                         ("risk_policy", policy.fingerprint()),
                     ])
+                    fresh_bootstrap = True
                 elif (meta.get("session_id") != session_id or
                       _decimal(meta.get("starting_cash", "0")) != starting_cash or
                       (set(meta) != {"session_id", "starting_cash", "cash", "halted", "risk_policy"}
                        or meta.get("risk_policy") != policy.fingerprint())):
                     raise ValueError("BOOK_REOPEN_MISMATCH")
+                # Migration of legacy single-session books. Do not silently
+                # recreate a missing guard on a versioned book: losing that
+                # row could otherwise erase an interrupted/FATAL observation.
+                schema_version = self._db.execute("PRAGMA user_version").fetchone()[0]
+                self._db.execute("""CREATE TABLE IF NOT EXISTS reconciliation_guard (
+                    id INTEGER PRIMARY KEY CHECK(id=1),
+                    state TEXT NOT NULL CHECK(state IN ('CLEAR','CHECKING','FATAL')),
+                    token TEXT
+                )""")
+                if schema_version == 0:
+                    if self._db.execute(
+                            "SELECT COUNT(*) FROM reconciliation_guard"
+                    ).fetchone()[0]:
+                        raise ValueError("BOOK_STATE_CORRUPT")
+                    # Upgrade existing v0 books into durable FATAL quarantine,
+                    # including occupied, fully filled, cancelled, or flat
+                    # portfolios. Prior reconciliation safety is unknowable.
+                    # Accepted synthetic fills can still settle while guarded.
+                    state = "CLEAR" if fresh_bootstrap else "FATAL"
+                    self._db.execute(
+                        "INSERT INTO reconciliation_guard(id,state,token) "
+                        "VALUES(1,?,NULL)", (state,))
+                    self._db.execute("PRAGMA user_version=1")
+                elif schema_version != 1:
+                    raise ValueError("BOOK_STATE_CORRUPT")
                 # Reopening a corrupted persisted book must fail before any
                 # new reservations or hypothetical fills can be recorded.
+                self._guard_state()
                 self._snapshot()
         except BaseException:
             self._db.close()
@@ -131,6 +169,75 @@ class OfflineReservations:
         if item is None:
             raise ValueError("BOOK_STATE_CORRUPT")
         return item[0]
+
+    def _guard_state(self):
+        rows = self._db.execute(
+            "SELECT id,state,token FROM reconciliation_guard").fetchall()
+        if len(rows) != 1 or rows[0][0] != 1:
+            raise ValueError("BOOK_STATE_CORRUPT")
+        _ident, state, token = rows[0]
+        if (state == "CHECKING"
+                and (type(token) is not str
+                     or not re.fullmatch(r"[0-9a-f]{32}", token))):
+            raise ValueError("BOOK_STATE_CORRUPT")
+        if state not in ("CLEAR", "CHECKING", "FATAL") or (
+                state != "CHECKING" and token is not None):
+            raise ValueError("BOOK_STATE_CORRUPT")
+        return state, token
+
+    def reconciliation_guarded(self):
+        """True for an unfinished reconciliation or a durably observed FATAL."""
+        self._db.execute("BEGIN")
+        try:
+            guarded = self._guard_state()[0] != "CLEAR"
+            self._db.execute("COMMIT")
+            return guarded
+        except BaseException:
+            self._db.execute("ROLLBACK")
+            raise
+
+    def begin_reconciliation(self):
+        """Durably guard BUY dispatch BEFORE reading potentially divergent truth.
+
+        A crash after this commit, including after observing FATAL but before
+        recording its verdict, leaves CHECKING and blocks new BUYs on reopen.
+        An overlapping/replayed check cannot silently clear a prior guard.
+        """
+        token = uuid4().hex
+        with self._write():
+            self._snapshot()
+            if self._guard_state()[0] != "CLEAR":
+                return None
+            self._db.execute(
+                "UPDATE reconciliation_guard SET state='CHECKING',token=? "
+                "WHERE id=1", (token,))
+        return token
+
+    def finish_reconciliation(self, token, *, fatal):
+        """Latch FATAL or clear only the matching in-flight CLEAN/WARN check.
+
+        None means this caller did not own the guard; it may never clear it.
+        Keeping a guard is intentionally conservative, not session recovery.
+        """
+        if type(fatal) is not bool or (token is not None
+                and (type(token) is not str
+                     or not re.fullmatch(r"[0-9a-f]{32}", token))):
+            raise ValueError("INVALID_RECONCILIATION_RECEIPT")
+        with self._write():
+            state, existing = self._guard_state()
+            if fatal:
+                self._db.execute(
+                    "UPDATE reconciliation_guard SET state='FATAL',token=NULL "
+                    "WHERE id=1")
+                return True
+            if token is None:
+                return state != "CLEAR"
+            if state != "CHECKING" or existing != token:
+                raise ValueError("RECONCILIATION_GUARD_CONFLICT")
+            self._db.execute(
+                "UPDATE reconciliation_guard SET state='CLEAR',token=NULL "
+                "WHERE id=1")
+            return False
 
     def _snapshot(self):
         cash = _decimal(self._meta("cash"))
@@ -249,7 +356,8 @@ class OfflineReservations:
             raise ValueError("BOOK_STATE_CORRUPT")
         return PaperBookSnapshot(cash, reserved, available_cash,
                                  tuple((sym, *holdings[sym]) for sym in sorted(holdings)),
-                                 tuple(active), halted == "1", self._meta("session_id"),
+                                 tuple(active), (halted == "1" or self._guard_state()[0] != "CLEAR"),
+                                 self._meta("session_id"),
                                  realized)
 
     def snapshot(self):

@@ -107,9 +107,10 @@ class PaperSessionRunner:
         self._mark = mark_price
         self._versions = {}
         self._last_day = None
-        # Conservatively remember any observed FATAL through EOD settlement.
-        # Do not halt the book until already ACKed synthetic fills are settled.
-        self._fatal_recon_seen = False
+        # A prior crash in reconciliation (or durably observed FATAL) must
+        # remain a BUY veto after a cold restart. Already ACKed fills may
+        # still settle while the quarantine is active.
+        self._fatal_recon_seen = book.reconciliation_guarded()
 
     def _marks(self, day: SessionDay):
         return {sym: getattr(bar, self._mark)
@@ -136,14 +137,27 @@ class PaperSessionRunner:
                             day_pnl, snap.session_id)
 
     def _reconcile_observed(self, *, at):
-        """Remember FATAL through terminal settlement, even if drift clears.
+        """Quarantine dispatch before inspection; persist FATAL immediately.
 
-        Prematurely halting the book would reject fills of previously ACKed
-        BUYs; persistence therefore occurs after those fills settle at EOD.
-        A crash before terminal settlement is NOT restart-safe recovery (#42).
+        A CHECKING guard survives interruption at any point before a verdict.
+        A FATAL guard is irreversible by later CLEAN certificates. We do not
+        set book_meta.halted until already-ACKed fills finish settling, but the
+        guard makes snapshot().halted true to veto every new BUY meanwhile.
         """
-        certificate = reconcile(self._book, self._ledger, self._adapter, at=at)
-        if certificate.status == "FATAL":
+        token = self._book.begin_reconciliation()
+        if token is None:
+            # A prior crash or another active runner owns the check: do not
+            # infer that a fresh CLEAN certificate can lift its safety stop.
+            self._fatal_recon_seen = True
+        try:
+            certificate = reconcile(self._book, self._ledger, self._adapter, at=at)
+        except BaseException:
+            # Leave the persisted CHECKING token unresolved on any exception.
+            self._fatal_recon_seen = True
+            raise
+        guarded = self._book.finish_reconciliation(
+            token, fatal=(certificate.status == "FATAL"))
+        if guarded:
             self._fatal_recon_seen = True
         return certificate
 
@@ -260,6 +274,24 @@ class PaperSessionRunner:
                 executable_stops[sym] = stop
             self._last_day = day.day
             now = day.mark_time
+            # An interrupted/restarted session may have book/ledger state
+            # that the simulated venue cannot recover. Inspect that state
+            # BEFORE advancing venue marks or fills, or an unknown venue
+            # order might execute before its FATAL divergence is detected.
+            startup_recon = self._reconcile_observed(at=now)
+            if self._fatal_recon_seen or startup_recon.status == "FATAL":
+                # Quarantine, but do NOT set book_meta.halted here: previously
+                # ACKed fills still require an operator-supervised settlement
+                # path. The durable FATAL/CHECKING guard already blocks BUYs.
+                state = self._book.snapshot()
+                account = self._account(state, marks)
+                reports.append(DayReport(
+                    day.day, account.equity, state.cash, state.positions,
+                    len(self._ledger.open_orders()),
+                    tuple(f"ENTRY_VETO:{sym}:FATAL_RECONCILIATION"
+                          for sym in sorted(day.signals) if sym in marks),
+                    "FATAL", True))
+                continue
             actions = [f"FILL:{e.broker_order_id}"
                        for e in self._mgr.advance(marks, at=now)]
             self._mgr.sync(now=now)
