@@ -157,6 +157,56 @@ class OfflinePortfolioObserverTests(unittest.TestCase):
         finally:
             book.close()
 
+
+    def test_tightened_loss_during_reconciliation_remains_halted_after_clean(self):
+        # Cross-PR regression: #74's temporary guard must not swallow #75's
+        # stricter session-pinned 1% loss threshold.
+        tightened = RiskPolicy(daily_loss_fraction=D("0.01"))
+        path = Path(self.temp.name) / "tightened-check.sqlite"
+        book = OfflineReservations(path, session_id=SESSION, policy=tightened)
+        try:
+            account = PaperAccount(INITIAL_EQUITY, INITIAL_EQUITY,
+                                   INITIAL_EQUITY, D("0"), SESSION)
+            book.reserve_buy(
+                "check-buy", account,
+                BuyProposal("SPY", D("100"), D("100"), D("99")),
+                reconciled=True,
+            )
+            book.record_hypothetical_fill("check-buy", "check-fill", 100, D("100"))
+            token = book.begin_reconciliation()
+            self.assertIsNotNone(token)
+            self.assertTrue(book.snapshot().halted)  # temporary BUY veto
+            self.assertEqual(book._meta("halted"), "0")
+            safe = observe_offline_portfolio_mark(
+                book, (q(bid="90.01", ask="90.10"),),
+                as_of=NOW, reconciled=True, session_verified=True,
+            )
+            self.assertTrue(safe.valid)
+            self.assertEqual(safe.mark.account.equity, D("99001"))
+            self.assertFalse(safe.mark.halt_required)
+            self.assertEqual(book._meta("halted"), "0")
+            breach = observe_offline_portfolio_mark(
+                book, (q(bid="90.00", ask="90.10"),),
+                as_of=NOW, reconciled=True, session_verified=True,
+            )
+            self.assertTrue(breach.valid)
+            self.assertEqual(breach.mark.account.equity, D("99000"))
+            self.assertTrue(breach.mark.halt_required)
+            self.assertEqual(book._meta("halted"), "1")
+            self.assertFalse(book.finish_reconciliation(token, fatal=False))
+            self.assertTrue(book.snapshot().halted)
+            book.close()
+            book = OfflineReservations(path, session_id=SESSION, policy=tightened)
+            self.assertEqual(book._meta("halted"), "1")
+            with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+                book.reserve_buy(
+                    "after-clean-loss", account,
+                    BuyProposal("QQQ", D("1"), D("100"), D("99")),
+                    reconciled=True,
+                )
+        finally:
+            book.close()
+
     def test_pending_orders_block_quote_observation(self):
         before = self.buy(fill=False)
         denied = self.observe((q(),))
