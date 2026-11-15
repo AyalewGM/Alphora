@@ -34,6 +34,8 @@ test("reference API checks must not be represented as verified portfolio state",
 test("paper monitor explicitly distinguishes all unavailable balances, P&L and provenance from zero or verified state", () => {
   const monitor = jsx.slice(jsx.indexOf('<section className="panel portfolio-monitor"'), jsx.indexOf('<section className="panel risk-draft-panel"'));
   assert.ok(monitor.length > 0);
+  // Generic divs do not expose aria-label reliably: supply an explicit named group.
+  assert.match(monitor, /<div className="monitor-grid" role="group" aria-label="Paper account figures unavailable — no verified snapshot">/);
   for (const label of [
     "Settled cash", "Reserved cash", "Available cash", "Portfolio equity",
     "Session profit/loss", "Realized profit/loss", "Unrealized profit/loss",
