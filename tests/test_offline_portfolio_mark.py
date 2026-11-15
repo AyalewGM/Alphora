@@ -9,7 +9,7 @@ from alphora.offline_portfolio_mark import (
     HeldPosition, PortfolioMarkInput, SourceQuote, MarkResult,
     mark_reconciled_paper_portfolio,
 )
-from alphora.risk import DAILY_LOSS_FRACTION, INITIAL_EQUITY, validate_buy, BuyProposal
+from alphora.risk import DAILY_LOSS_FRACTION, INITIAL_EQUITY, validate_buy, BuyProposal, RiskPolicy
 
 ET = ZoneInfo("America/New_York")
 AS_OF = datetime(2026, 11, 9, 10, 0, 0, tzinfo=ET)
@@ -63,6 +63,20 @@ class OfflinePortfolioMarkTests(unittest.TestCase):
         self.assertFalse(above.halt_required)
         below = marked(quotes=(quote(bid=D("97.99"), ask=D("98.10")),))
         self.assertTrue(below.halt_required)
+
+    def test_tightened_daily_loss_limit_controls_mark_not_global_default(self):
+        tightened = RiskPolicy(daily_loss_fraction=D("0.01"))
+        safe = marked(quotes=(quote(bid=D("99.001"), ask=D("99.10")),), policy=tightened)
+        self.assertTrue(safe.valid)
+        self.assertEqual(safe.account.equity, D("99001"))
+        self.assertFalse(safe.halt_required)
+        boundary = marked(quotes=(quote(bid=D("99"), ask=D("99.10")),), policy=tightened)
+        self.assertTrue(boundary.valid)
+        self.assertEqual(boundary.account.equity, D("99000"))
+        self.assertTrue(boundary.halt_required)
+        self.assertTrue(boundary.account.halted)
+        self.assertFalse(marked(quotes=(quote(bid=D("99"), ask=D("99.10")),)).halt_required)
+        self.assertEqual(marked(policy="0.01").reason, "INVALID_RISK_POLICY")
 
     def test_realized_loss_with_no_positions_still_halts(self):
         flat = marked(snapshot=book(cash=D("97000"), positions=()), quotes=())
