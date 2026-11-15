@@ -1,4 +1,4 @@
-"""Atomically persist an offline portfolio mark's 2% loss halt in the paper book.
+"""Atomically persist a session-pinned offline loss halt in the paper book.
 
 This deliberately uses existing OfflineReservations SQLite transaction and
 persisted halt key rather than creating a second, inconsistent risk store.
@@ -74,7 +74,7 @@ def observe_offline_portfolio_mark(
         )
         mark = mark_reconciled_paper_portfolio(
             input_snapshot, quotes, as_of=as_of, mode=mode,
-            session_verified=session_verified,
+            session_verified=session_verified, policy=book._policy,
         )
         if not mark.valid or mark.account is None:
             return ObservedPortfolioMark(False, mark.reason)
