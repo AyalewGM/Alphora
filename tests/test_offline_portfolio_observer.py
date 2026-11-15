@@ -92,6 +92,33 @@ class OfflinePortfolioObserverTests(unittest.TestCase):
         self.assertTrue(self.book.snapshot().halted)
         self.assertTrue(self.observe((q(bid="111", ask="111.1"),)).book.halted)
 
+    def test_clean_guard_does_not_turn_safe_mark_into_terminal_halt(self):
+        self.buy()
+        token = self.book.begin_reconciliation()
+        self.assertTrue(self.book.snapshot().halted)
+        safe = self.observe((q(bid="90", ask="90.1"),))
+        self.assertTrue(safe.valid)
+        self.assertFalse(safe.mark.halt_required)
+        self.assertEqual(safe.mark.account.equity, D("99000"))
+        self.assertEqual(self.book._meta("halted"), "0")
+        self.assertFalse(self.book.finish_reconciliation(token, fatal=False))
+        self.assertFalse(self.book.snapshot().halted)
+
+    def test_breached_mark_during_clean_check_remains_terminally_halted(self):
+        self.buy()
+        token = self.book.begin_reconciliation()
+        breached = self.observe((q(bid="79", ask="79.1"),))
+        self.assertTrue(breached.valid)
+        self.assertTrue(breached.mark.halt_required)
+        self.assertEqual(breached.mark.account.equity, D("97900"))
+        self.assertEqual(self.book._meta("halted"), "1")
+        self.assertFalse(self.book.finish_reconciliation(token, fatal=False))
+        self.assertTrue(self.book.snapshot().halted)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id=SESSION)
+        self.assertTrue(self.book.snapshot().halted)
+        self.assertEqual(self.book._meta("halted"), "1")
+
     def test_pending_orders_block_quote_observation(self):
         before = self.buy(fill=False)
         denied = self.observe((q(),))

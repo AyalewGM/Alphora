@@ -72,6 +72,43 @@ class DurableReconciliationQuarantineTests(unittest.TestCase):
     def _proposal(self):
         return BuyProposal("SPY", D("20"), D("50"), D("48"))
 
+    def test_safe_loss_observation_during_check_does_not_terminally_halt(self):
+        token = self.book.begin_reconciliation()
+        self.assertTrue(self.book.snapshot().halted)  # temporary BUY veto
+        observed = self.book.observe_daily_loss(self._account(), reconciled=True)
+        self.assertTrue(observed.halted)
+        self.assertEqual(self.book._meta("halted"), "0")
+        self.assertFalse(self.book.finish_reconciliation(token, fatal=False))
+        self.assertFalse(self.book.snapshot().halted)
+
+    def test_loss_observed_during_check_survives_clean_and_restart(self):
+        self.book.reserve_buy(
+            "loss-position", self._account(),
+            BuyProposal("SPY", D("100"), D("100"), D("99")),
+            reconciled=True,
+        )
+        self.book.record_hypothetical_fill(
+            "loss-position", "loss-fill", 100, D("100")
+        )
+        self.assertEqual(self.book.snapshot().cash, D("90000"))
+        token = self.book.begin_reconciliation()
+        observed = self.book.observe_daily_loss(
+            PaperAccount(D("97900"), D("100000"), D("90000"),
+                         D("-2100"), SESSION),
+            reconciled=True,
+        )
+        self.assertTrue(observed.halted)
+        self.assertEqual(self.book._meta("halted"), "1")
+        self.assertFalse(self.book.finish_reconciliation(token, fatal=False))
+        self.assertTrue(self.book.snapshot().halted)
+        self._restart()
+        self.assertEqual(self.book._meta("halted"), "1")
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.book.reserve_buy(
+                "after-loss-clean", self._account(),
+                self._proposal(), reconciled=True,
+            )
+
     def test_clean_transaction_stays_dispatchable(self):
         token = self.book.begin_reconciliation()
         self.assertEqual(len(token), 32)
