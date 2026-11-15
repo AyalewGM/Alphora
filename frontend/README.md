@@ -17,7 +17,7 @@ Run `npm test` to execute dependency-free Node contract tests. The terminal mark
 
 ## Data provenance and safety
 
-**All watchlist prices, changes, and candles are deterministic illustrative values generated in the browser, NOT market prices, a backtest result, or simulated account performance.** They must not inform real trading or paper-order eligibility. No market feed or brokerage service is contacted. UI offers no buy/sell controls, credentials, execution paths, portfolio mutations, or order APIs. The only requested API resource is the local read-only risk policy. If unavailable, the screen labels itself offline and displays the approved policy as a local preview.
+**All watchlist prices, changes, and candles are deterministic illustrative values generated in the browser, NOT market prices, a backtest result, or simulated account performance.** They must not inform real trading or paper-order eligibility. No market feed or brokerage service is contacted. UI offers no buy/sell controls, credentials, execution paths, portfolio mutations, or order APIs. The only requested API resources are the two local reference GETs: risk policy and system capabilities. Neither supplies authenticated account state. If unavailable, the screen labels itself offline and displays the approved policy as a local preview.
 
 Before enabling operational portfolio displays: implement separately reviewed, authenticated, timestamp-validated read-only API contracts for point-in-time bars, symbols, signed equity snapshots, watchlists, decisions, and journals. Replace demo bars completely; add source/as-of/warmup/staleness indicators, authorization and accessibility tests. The frontend must never compute or override authoritative risk controls.
 
