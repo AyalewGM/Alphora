@@ -19,7 +19,7 @@ test("risk preview docs match the five default form values and exact inert wire 
   ]);
   for (const entry of [
     "Five editable proposal controls", "$100,000", "0.5%", "10%", "2%",
-    "new portfolios only", "six-key", "paper-risk-proposal-v1",
+    "new portfolios only", "6-key", "paper-risk-proposal-v1",
     "starting_equity_usd", "risk_per_trade_fraction", "max_instrument_fraction",
     "daily_loss_fraction", "rebalance_frequency"
   ]) {
