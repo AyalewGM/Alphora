@@ -11,12 +11,36 @@ export const OFFLINE_CAPABILITIES = Object.freeze({
   live_orders_enabled: false
 });
 
-function exactDecimal(value) {
-  return typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value);
+// The two existing GETs expose only fixed reference data, not a versioned
+// effective account policy. Reject unexpected additions rather than hiding
+// contradictory trading, halt or policy-revision fields behind a green status.
+const REFERENCE_POLICY_KEYS = Object.freeze(["mode", ...Object.keys(APPROVED_POLICY)]);
+const REFERENCE_CAPABILITY_KEYS = Object.freeze([
+  "market", "research_enabled", "paper_orders_enabled",
+  "live_orders_enabled", "rebalance_frequency"
+]);
+
+function hasExactJsonFields(value, fields) {
+  return value !== null && typeof value === "object" &&
+    !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype &&
+    Object.keys(value).length === fields.length &&
+    fields.every(key => Object.hasOwn(value, key));
+}
+
+function canonicalDecimal(value) {
+  // Exact comparison with the read-only policy: Number() would round an
+  // infinitesimally looser limit to the approved float and wrongly accept it.
+  if (typeof value !== "string" || value.length > 64 ||
+      !/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(value)) return null;
+  const [whole, fraction = ""] = value.split(".");
+  const significant = fraction.replace(/0+$/, "");
+  return significant ? whole + "." + significant : whole;
 }
 
 export function validateBackendStatus(policy, capabilities) {
-  if (!policy || !capabilities || policy.mode !== "paper" ||
+  if (!hasExactJsonFields(policy, REFERENCE_POLICY_KEYS) ||
+      !hasExactJsonFields(capabilities, REFERENCE_CAPABILITY_KEYS) ||
+      policy.mode !== "paper" ||
       capabilities.research_enabled !== true ||
       capabilities.paper_orders_enabled !== false ||
       capabilities.live_orders_enabled !== false ||
@@ -28,8 +52,8 @@ export function validateBackendStatus(policy, capabilities) {
   }
   for (const key of ["starting_virtual_equity", "max_planned_trade_risk_fraction",
                      "max_instrument_allocation_fraction", "daily_loss_shutdown_fraction"]) {
-    if (!exactDecimal(policy[key]) ||
-        Number(policy[key]) !== Number(APPROVED_POLICY[key])) {
+    if (canonicalDecimal(policy[key]) === null ||
+        canonicalDecimal(policy[key]) !== canonicalDecimal(APPROVED_POLICY[key])) {
       throw new Error("UNEXPECTED_RISK_POLICY");
     }
   }
@@ -48,9 +72,20 @@ export function validateBackendStatus(policy, capabilities) {
 export async function loadLocalReadOnlyStatus(fetcher, signal) {
   // Same-origin, GET-only calls to the local FastAPI shell.
   const paths = ["/v1/risk/policy", "/v1/system/capabilities"];
+  // Reject any 30x rather than following a potentially off-origin redirect.
+  // No-store avoids presenting a cached policy as a fresh local reference check.
   const responses = await Promise.all(paths.map(path =>
-    fetcher(path, { method: "GET", credentials: "omit", signal })));
-  if (responses.some(r => !r.ok)) throw new Error("LOCAL_API_UNAVAILABLE");
+    fetcher(path, { method: "GET", credentials: "omit",
+      redirect: "error", cache: "no-store", signal })));
+  // A successful fetch alone is insufficient: 203 (transformed content)
+  // and 206 (partial content) have ok=true, but cannot attest a complete
+  // authoritative reference response. FastAPI reference GETs return 200 JSON.
+  // Inspect the HTTP media type before parsing, not a server-supplied HTML shell.
+  if (responses.some(r => !r || r.ok !== true || r.status !== 200 ||
+      r.redirected === true ||
+      !/^application\/json(?:\s*;|$)/i.test(r.headers?.get?.("content-type") ?? ""))) {
+    throw new Error("LOCAL_API_UNAVAILABLE");
+  }
   const [policy, capabilities] = await Promise.all(responses.map(r => r.json()));
   return validateBackendStatus(policy, capabilities);
 }
