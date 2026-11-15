@@ -11,7 +11,7 @@ from decimal import Decimal as D, DecimalException, Inexact, localcontext
 import re
 from zoneinfo import ZoneInfo
 
-from .risk import DAILY_LOSS_FRACTION, PaperAccount
+from .risk import DEFAULT_RISK_POLICY, PaperAccount, RiskPolicy
 
 _ET = ZoneInfo("America/New_York")
 _SYMBOL = re.compile(r"[A-Z][A-Z0-9.-]{0,9}\Z", re.ASCII)
@@ -105,6 +105,7 @@ def _valid_quote(quote, as_of):
 def mark_reconciled_paper_portfolio(
     snapshot: PortfolioMarkInput, quotes: tuple[SourceQuote, ...], *,
     as_of: datetime, mode: str = "paper", session_verified: bool = False,
+    policy: RiskPolicy = DEFAULT_RISK_POLICY,
 ) -> MarkResult:
     """Read-only bid-mark portfolio valuation plus proposed daily halt.
 
@@ -112,11 +113,13 @@ def mark_reconciled_paper_portfolio(
     uncertain buys/sells or deposits/withdrawals, and independently sourced
     quote timestamps. Caller-provided session_verified is NOT authentication.
     Invalid inputs return no account, preventing a permissive entry decision.
-    If a valid 2% loss breach is observed, downstream durable OMS must
+    If a valid session-policy loss breach is observed, downstream durable OMS must
     persist its own irreversible-for-session halt and independently verify.
     """
     if mode != "paper":
         return MarkResult(False, "REAL_TRADING_DISABLED")
+    if type(policy) is not RiskPolicy:
+        return MarkResult(False, "INVALID_RISK_POLICY")
     if not _aware(as_of) or not _session_id_ok(
         getattr(snapshot, "session_id", None), as_of
     ):
@@ -165,7 +168,7 @@ def mark_reconciled_paper_portfolio(
             for position in snapshot.positions:
                 equity += position.shares * by_symbol[position.symbol].bid
             day_pnl = equity - snapshot.session_open_equity
-            loss_limit = snapshot.session_open_equity * DAILY_LOSS_FRACTION
+            loss_limit = snapshot.session_open_equity * policy.daily_loss_fraction
             halt = snapshot.halted or day_pnl <= -loss_limit
             account = PaperAccount(
                 equity=equity, session_open_equity=snapshot.session_open_equity,
