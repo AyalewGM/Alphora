@@ -22,6 +22,8 @@ test("nonfunctional rail glyphs are hidden and keyboard selections are announced
 });
 
 test("reference API checks must not be represented as verified portfolio state", () => {
+  assert.match(jsx, /<div className="rule"><span>Reference cadence<\/span><strong>\{policy\.rebalance_frequency\} · INACTIVE<\/strong><\/div>/);
+  assert.doesNotMatch(jsx, /<span>Rebalancing policy<\/span>/);
   assert.match(jsx, /Reference GET checks passed — portfolio unverified/);
   assert.match(jsx, /NO VERIFIED ACCOUNT SNAPSHOT/);
   assert.match(jsx, /<dt>Emergency halt<\/dt><dd>UNKNOWN — not attested<\/dd>/);
