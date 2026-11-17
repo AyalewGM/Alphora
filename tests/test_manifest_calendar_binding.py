@@ -177,7 +177,11 @@ class ManifestCalendarBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INVALID_MANIFEST_CALENDAR_RECEIPTS"):
             bind(None, c)
         with self.assertRaisesRegex(ValueError, "INVALID_MANIFEST_CALENDAR_RECEIPTS"):
-            bind(m, None)
+            bind_manifest_calendar(
+                m, None,
+                expected_artifact_sha256=ARTIFACT_SHA,
+                expected_calendar_sha256=c.sha256,
+            )
 
 
 if __name__ == "__main__":
