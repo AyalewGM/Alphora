@@ -75,6 +75,11 @@ def bind_manifest_calendar(
     if any(day.information_available_at > m.calendar_available_at for day in c.days):
         raise ValueError("MANIFEST_CALENDAR_LOOKAHEAD")
 
+    # The market manifest cannot encode intraday venue halts. Reject rather
+    # than silently rebinding a halted session as an uninterrupted bar.
+    if any(day.venue_halts for day in c.days):
+        raise ValueError("MANIFEST_CALENDAR_UNSUPPORTED_HALT")
+
     sessions = tuple(day for day in c.days if day.kind != "CLOSED")
     if len(sessions) != len(m.sessions) or any(
         actual.day != declared.day
