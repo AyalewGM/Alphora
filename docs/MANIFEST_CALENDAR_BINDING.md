@@ -17,7 +17,13 @@ representability metadata and rejects a receipt with altered symbol/status
 fields even if its embedded manifest content hash is unchanged. It compares regular/early-close hours
 **as instants**, not as a naive local clock; it rejects information claimed to
 have arrived after the manifest's calendar cutoff and calendar snapshots with
-a later `as_of` than the market snapshot. Because the market manifest
+a later `as_of` than **either** the market snapshot or the claimed
+pre-session calendar cutoff. A calendar schedule can be published before its
+last covered exchange date; the schedule inspector accepts a prospective
+`as_of` only when all day-level information claims are no later than the
+snapshot. Retrospective calendar revisions cannot be reclassified as
+pre-session evidence merely because their day records claim earlier
+availability. Because the market manifest
 cannot represent an intraday venue halt, it rejects any calendar with
 `venue_halts` rather than silently dropping that risk. It returns a
 deterministic binding SHA-256 for a local receipt.
