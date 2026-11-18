@@ -127,8 +127,12 @@ class SessionCalendarTests(unittest.TestCase):
             inspect(good)
         with self.assertRaisesRegex(ValueError, "CALENDAR_HASH_MISMATCH"):
             inspect(expected_sha256="0" * 64)
-        with self.assertRaisesRegex(ValueError, "INVALID_CALENDAR_METADATA"):
-            inspect(as_of=datetime(2026,11,7,tzinfo=UTC))
+        # A prospective schedule may include sessions after its as-of time.
+        prospective = inspect(as_of=datetime(2026,11,7,tzinfo=UTC))
+        self.assertEqual(prospective.session_days, inspect().session_days)
+        self.assertNotEqual(prospective.sha256, inspect().sha256)
+        with self.assertRaisesRegex(ValueError, "INVALID_CALENDAR_DAY"):
+            inspect(as_of=AVAILABLE - timedelta(seconds=1))
         with self.assertRaisesRegex(ValueError, "INVALID_CALENDAR_METADATA"):
             inspect(start=END, end=START)
 
