@@ -115,11 +115,12 @@ class OfflineReservationTests(unittest.TestCase):
         # 10% of $100k. Old book formula double-counted pending to $13k.
         planned = BuyProposal("SPY", D("20"), D("50"), D("49"),
                               D("9000"), D("3000"))
-        after = self.book.reserve_buy("at-cap", self.account(), planned,
-                                      reconciled=True)
-        self.assertEqual(after.reserved_cash, D("4000"))
-        self.assertEqual(after.positions, before.positions)
-        self.assertEqual(after.pending[-1], ("working", "SPY", 60, D("3000")))
+        # Pending is not double-counted, but authentic holdings valuation
+        # is still unavailable. Fail closed instead of admitting a new BUY.
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy("at-cap", self.account(), planned,
+                                  reconciled=True)
+        self.assertEqual(self.book.snapshot(), before)
 
     def test_stale_pending_witness_after_partial_fill_fails_closed_across_restart(self):
         self.reserve("held", self.proposal(qty="120", stop="49"))
@@ -142,9 +143,12 @@ class OfflineReservationTests(unittest.TestCase):
         # exact-boundary purchase without double-counting the partial fill.
         updated = BuyProposal("SPY", D("20"), D("50"), D("49"),
                               D("9000"), D("2500"))
-        added = self.book.reserve_buy("fresh-pending", self.account(), updated,
-                                      reconciled=True)
-        self.assertEqual(added.reserved_cash, D("3500"))
+        # The corrected pending annotation is necessary but insufficient:
+        # an independently verifiable holdings mark is still missing.
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy("fresh-pending", self.account(), updated,
+                                  reconciled=True)
+        self.assertEqual(self.book.snapshot(), old)
 
     def test_stale_direct_caller_cannot_understate_appreciated_holdings(self):
         self.reserve("held", self.proposal(qty="200", stop="49"))
@@ -155,7 +159,7 @@ class OfflineReservationTests(unittest.TestCase):
         # shares at the proposed $80 price before admitting any more risk.
         stale = BuyProposal("SPY", D("1"), D("80"), D("79"), D("0"))
         marked = self.account(equity=D("106000"), day_pnl=D("6000"))
-        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
             self.book.reserve_buy("stale-caller", marked, stale, reconciled=True)
         self.assertEqual(self.book.snapshot(), before)
 
@@ -171,7 +175,7 @@ class OfflineReservationTests(unittest.TestCase):
         # With $106k equity the instrument ceiling is $10,600. The old
         # code incorrectly substituted the new limit: 200*$50 + $50
         # equals $10,050 and therefore admitted this unsafe order.
-        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
             self.book.reserve_buy("below-real-mark", mark, stale, reconciled=True)
         self.assertEqual(self.book.snapshot(), before)
         self.book.close()
@@ -209,6 +213,26 @@ class OfflineReservationTests(unittest.TestCase):
         self.book = OfflineReservations(self.path, session_id="2026-11-02")
         self.assertEqual(self.book.snapshot(), before)
 
+    def test_unverified_holdings_block_even_a_different_symbol_after_restart(self):
+        # A stale portfolio equity can inflate a different symbol's 10%
+        # allocation cap too. Holding SPY must not allow a QQQ reservation
+        # without a fresh, session-bound full-portfolio valuation receipt.
+        self.reserve("held-spy", self.proposal(qty="100", stop="49"))
+        self.book.record_hypothetical_fill("held-spy", "fill-held-spy", 100, D("50"))
+        before = self.book.snapshot()
+        self.assertEqual(before.positions, (("SPY", 100, D("5000")),))
+        stale = self.account(equity=D("100000"), day_pnl=D("0"))
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy(
+                "new-qqq", stale,
+                self.proposal(symbol="QQQ", qty="1", price="50", stop="49"),
+                reconciled=True,
+            )
+        self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
     def test_multiple_held_symbols_require_per_symbol_mark_receipt(self):
         # Aggregate account equity alone cannot assign value between SPY
         # and QQQ. Do not infer either symbol's mark from a proposed limit.
@@ -216,7 +240,7 @@ class OfflineReservationTests(unittest.TestCase):
             self.reserve(sym, self.proposal(symbol=sym, qty="20", stop="49"))
             self.book.record_hypothetical_fill(sym, "fill-" + sym, 20, D("50"))
         before = self.book.snapshot()
-        with self.assertRaisesRegex(ValueError, "MULTI_INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
             self.book.reserve_buy(
                 "ambiguous-mark", self.account(),
                 self.proposal(qty="1", price="50", stop="49"),
@@ -238,7 +262,7 @@ class OfflineReservationTests(unittest.TestCase):
         # and max($20,$50) = $9950, not $9920. A $50 new BUY
         # with $30 fee exceeds the $10k instrument cap by $30.
         proposal = BuyProposal("SPY", D("1"), D("50"), D("49"), D("9800"))
-        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
             self.book.reserve_buy("unsafe", self.account(), proposal,
                                   fee_budget=D("30"), reconciled=True)
         self.assertEqual(self.book.snapshot(), before)
@@ -568,7 +592,7 @@ os._exit(24)  # No close or normal interpreter shutdown.
         self.assertEqual(filled.cash, D("98960"))
         self.assertEqual(filled.reserved_cash, D("0"))
         self.assertEqual(filled.positions, (("SPY", 20, D("1040")),))
-        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
             self.reserve("excess-exposure", self.proposal(qty="180", stop="49"))
         self.book.close()
         self.book = OfflineReservations(self.path, session_id="2026-11-02")
