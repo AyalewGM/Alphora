@@ -105,9 +105,11 @@ class OfflineReservationTests(unittest.TestCase):
         self.assertEqual(self.book.snapshot(), with_pending)
 
     def test_exact_cap_after_fill_requires_authentic_mark_even_with_disjoint_pending(self):
+        # Stage both BUY intents while cash-only; new reservations after any
+        # fill require an authenticated holdings mark and are quarantined.
         self.reserve("held", self.proposal(qty="120", stop="49"))
-        self.book.record_hypothetical_fill("held", "filled-held", 120, D("50"))
         self.reserve("working", self.proposal(qty="60", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 120, D("50"))
         before = self.book.snapshot()
         self.assertEqual(before.positions, (("SPY", 120, D("6000")),))
         self.assertEqual(before.reserved_cash, D("3000"))
@@ -123,9 +125,11 @@ class OfflineReservationTests(unittest.TestCase):
         self.assertEqual(self.book.snapshot(), before)
 
     def test_stale_pending_witness_after_partial_fill_fails_closed_across_restart(self):
+        # Stage both BUY intents while cash-only; new reservations after any
+        # fill require an authenticated holdings mark and are quarantined.
         self.reserve("held", self.proposal(qty="120", stop="49"))
-        self.book.record_hypothetical_fill("held", "filled-held", 120, D("50"))
         self.reserve("working", self.proposal(qty="60", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 120, D("50"))
         self.book.record_hypothetical_fill("working", "partial-working", 10, D("50"))
         old = self.book.snapshot()
         self.assertEqual(old.positions, (("SPY", 130, D("6500")),))
@@ -236,10 +240,14 @@ class OfflineReservationTests(unittest.TestCase):
     def test_multiple_held_symbols_require_per_symbol_mark_receipt(self):
         # Aggregate account equity alone cannot assign value between SPY
         # and QQQ. Do not infer either symbol's mark from a proposed limit.
+        # Reserve both while the book is cash-only, then record the two
+        # synthetic fills. A sequential reserve-after-fill is forbidden.
         for sym in ("SPY", "QQQ"):
             self.reserve(sym, self.proposal(symbol=sym, qty="20", stop="49"))
+        for sym in ("SPY", "QQQ"):
             self.book.record_hypothetical_fill(sym, "fill-" + sym, 20, D("50"))
         before = self.book.snapshot()
+        self.assertEqual({s for s, _, _ in before.positions}, {"SPY", "QQQ"})
         with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
             self.book.reserve_buy(
                 "ambiguous-mark", self.account(),
