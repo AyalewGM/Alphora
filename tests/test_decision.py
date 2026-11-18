@@ -47,6 +47,16 @@ class DecisionTests(unittest.TestCase):
                   pending_instrument_value=D(1000))
         self.assertEqual(self.entry(c).proposal.quantity, D(20))
 
+    def test_entry_plan_retains_disjoint_pending_witness_for_book_recheck(self):
+        candidate = replace(self.candidate,
+                            existing_instrument_value=D("8000"),
+                            pending_instrument_value=D("1000"))
+        plan = self.entry(candidate)
+        self.assertTrue(plan.permitted)
+        self.assertEqual(plan.proposal.existing_instrument_value, D("9000"))
+        self.assertEqual(plan.proposal.pending_included_value, D("1000"))
+        self.assertEqual(plan.proposal.quantity, D("20"))
+
     def test_inexact_cash_reservation_fails_closed(self):
         # Default 28-digit Decimal arithmetic would round a tiny but real
         # reservation away from the $10,000 cash available for a full-cap buy.

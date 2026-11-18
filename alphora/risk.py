@@ -91,6 +91,10 @@ class BuyProposal:
     price: Decimal
     stop_price: Decimal
     existing_instrument_value: Decimal = Decimal("0")
+    # Amount of existing_instrument_value that represents already-counted
+    # pending BUYs; direct holdings-only callers leave this at zero.
+    # The durable book independently reconstructs both components.
+    pending_included_value: Decimal = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -149,6 +153,11 @@ def validate_buy(
             not proposal.existing_instrument_value.is_finite()
             or proposal.existing_instrument_value < 0):
         return Decision(False, "INVALID_EXISTING_POSITION")
+    if (not isinstance(proposal.pending_included_value, Decimal)
+            or not proposal.pending_included_value.is_finite()
+            or proposal.pending_included_value < 0
+            or proposal.pending_included_value > proposal.existing_instrument_value):
+        return Decision(False, "INVALID_PENDING_POSITION")
     if not isinstance(proposal.symbol, str) or not _SYMBOL.fullmatch(proposal.symbol):
         return Decision(False, "INVALID_SYMBOL")
     # Malformed extreme Decimal values can overflow calculations despite

@@ -76,6 +76,52 @@ class OfflineReservationTests(unittest.TestCase):
         self.reserve("b", self.proposal(qty="80"))
         self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
 
+    def test_aggregate_planner_pending_is_not_double_counted_at_exact_cap(self):
+        self.reserve("held", self.proposal(qty="120", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 120, D("50"))
+        self.reserve("working", self.proposal(qty="60", stop="49"))
+        before = self.book.snapshot()
+        self.assertEqual(before.positions, (("SPY", 120, D("6000")),))
+        self.assertEqual(before.reserved_cash, D("3000"))
+        # $6k marked held + $3k working BUY + $1k new BUY is exactly
+        # 10% of $100k. Old book formula double-counted pending to $13k.
+        planned = BuyProposal("SPY", D("20"), D("50"), D("49"),
+                              D("9000"), D("3000"))
+        after = self.book.reserve_buy("at-cap", self.account(), planned,
+                                      reconciled=True)
+        self.assertEqual(after.reserved_cash, D("4000"))
+        self.assertEqual(after.positions, before.positions)
+        self.assertEqual(after.pending[-1], ("working", "SPY", 60, D("3000")))
+
+    def test_stale_direct_caller_cannot_understate_appreciated_holdings(self):
+        self.reserve("held", self.proposal(qty="200", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 200, D("50"))
+        before = self.book.snapshot()
+        # Book's $10k acquisition cost is not the marked $16k holding.
+        # Even when direct caller passes zero holdings, book must mark 200
+        # shares at the proposed $80 price before admitting any more risk.
+        stale = BuyProposal("SPY", D("1"), D("80"), D("79"), D("0"))
+        marked = self.account(equity=D("106000"), day_pnl=D("6000"))
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+            self.book.reserve_buy("stale-caller", marked, stale, reconciled=True)
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_mixed_pending_limit_prices_revalued_before_fee_cap(self):
+        self.reserve("held", self.proposal(qty="196", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 196, D("50"))
+        self.reserve("high-limit", self.proposal(qty="1", price="100", stop="99"))
+        self.reserve("low-limit", self.proposal(qty="1", price="20", stop="19"))
+        before = self.book.snapshot()
+        self.assertEqual(before.reserved_cash, D("120"))
+        # At the new $50 quote: held $9800 + working max($100,$50)
+        # and max($20,$50) = $9950, not $9920. A $50 new BUY
+        # with $30 fee exceeds the $10k instrument cap by $30.
+        proposal = BuyProposal("SPY", D("1"), D("50"), D("49"), D("9800"))
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+            self.book.reserve_buy("unsafe", self.account(), proposal,
+                                  fee_budget=D("30"), reconciled=True)
+        self.assertEqual(self.book.snapshot(), before)
+
     def test_fee_budget_is_included_in_new_instrument_allocation(self):
         # Base $9,990 notional is below the $10,000 per-symbol cap, but
         # the reserved maximum fee is part of conservative exposure.

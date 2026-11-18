@@ -475,19 +475,36 @@ class OfflineReservations:
                 if existing[5] == "CANCELLED":
                     raise ValueError("CANCELLED_INTENT_ID")
                 return self._snapshot()  # stable dedupe, no second reservation
-            if not _money(proposal.existing_instrument_value):
+            if (not _money(proposal.existing_instrument_value)
+                    or not _money(proposal.pending_included_value)
+                    or not _money(proposal.price, positive=True)
+                    or proposal.pending_included_value > proposal.existing_instrument_value):
                 raise ValueError("INVALID_POSITION_VALUE")
-            # Never round away a tiny positive fee when existing pending
-            # exposure is near the 10% instrument cap.
+            # A runner proposal includes its already-counted pending exposure.
+            # Direct callers may instead supply holdings only (pending=0).
+            # Reconstruct the independent, marked book components under the
+            # SQLite transaction. Never subtract pending from an unversioned
+            # caller aggregate without independently accounting for it.
             try:
                 with localcontext() as context:
                     context.traps[Inexact] = True
                     pending_symbol = sum(
-                        (row[3] for row in snapshot.pending if row[1] == proposal.symbol), D(0)
+                        (max(row[3], D(row[2]) * proposal.price)
+                         for row in snapshot.pending if row[1] == proposal.symbol), D(0)
+                    )
+                    marked_held = sum(
+                        (D(qty) * proposal.price for sym, qty, _basis in snapshot.positions
+                         if sym == proposal.symbol), D(0)
                     )
                     filled_cost = next((cost for sym, _, cost in snapshot.positions
                                         if sym == proposal.symbol), D(0))
-                    exposure = max(proposal.existing_instrument_value, filled_cost) + pending_symbol
+                    if proposal.pending_included_value > pending_symbol:
+                        # Book pending orders changed or the caller presented
+                        # a non-reconcilable pending witness. Require replan.
+                        raise ValueError("RISK_VETO:PENDING_RECEIPT_MISMATCH")
+                    caller_held = (proposal.existing_instrument_value -
+                                   proposal.pending_included_value)
+                    exposure = max(caller_held, marked_held, filled_cost) + pending_symbol
                     exposure_with_fees = exposure + fee_budget
             except DecimalException as exc:
                 raise ValueError("RISK_VETO:UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc

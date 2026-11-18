@@ -128,8 +128,12 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
                                    candidate.pending_instrument_value)
             available_cash = account.cash - reserved_cash
         account_available = replace(account, cash=available_cash)
+        # Preserve the disjoint held/pending witness for the transactional
+        # book; existing_instrument_value remains the conservative aggregate
+        # for every stateless validate_buy guard.
         minimum = BuyProposal(candidate.symbol, D(1), candidate.ask,
-                              candidate.stop_price, reserved_instrument)
+                              candidate.stop_price, reserved_instrument,
+                              candidate.pending_instrument_value)
         precheck = validate_buy(account_available, minimum,
                                 expected_session_id=expected_session_id, policy=policy)
         if not precheck.permitted:
