@@ -226,7 +226,12 @@ class ManifestCalendarBindingTests(unittest.TestCase):
         c = calendar()
         m = manifest(c)
         with self.assertRaisesRegex(ValueError, "INVALID_MANIFEST_CALENDAR_RECEIPTS"):
-            bind(None, c)
+            bind_manifest_calendar(
+                None, c,
+                expected_artifact_sha256=ARTIFACT_SHA,
+                expected_calendar_sha256=c.sha256,
+                expected_manifest_sha256=m.sha256,
+            )
         with self.assertRaisesRegex(ValueError, "INVALID_MANIFEST_CALENDAR_RECEIPTS"):
             bind_manifest_calendar(
                 m, None,
