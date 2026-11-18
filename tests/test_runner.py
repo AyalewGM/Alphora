@@ -134,6 +134,35 @@ class RunnerTests(unittest.TestCase):
             _marked_instrument_exposure(snap, "SPY",
                                         D("0.123456789012345678901234567890123456789012345678901234567890"))
 
+    def test_pending_buy_shares_use_higher_of_mark_and_reserved_limit(self):
+        # Existing holdings alone mark to $8k. A still-working BUY for 25
+        # more shares reserved at $50 has only $1,250 of cash reserved,
+        # but would make $2,000 of marked shares at the new $80 quote.
+        # Counting only reserved cash falsely reports $9,250 total
+        # instrument exposure instead of a conservative $10,000.
+        from alphora.runner import _marked_instrument_exposure
+        snap = PaperBookSnapshot(
+            cash=D("95000"), reserved_cash=D("1250"),
+            available_cash=D("93750"),
+            positions=(("SPY", 100, D("5000")),),
+            pending=(("pending-buy", "SPY", 25, D("1250")),),
+            halted=False, session_id="2026-11-02",
+        )
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                held, pending = _marked_instrument_exposure(
+                    snap, "SPY", D("80.00"))
+                self.assertEqual(held, D("8000.00"))
+                self.assertEqual(pending, D("2000.00"))
+                self.assertEqual(held + pending, D("10000.00"))
+                # When a mark falls below the working limit, its greater
+                # cash reservation remains counted for risk containment.
+                low_held, low_pending = _marked_instrument_exposure(
+                    snap, "SPY", D("40.00"))
+                self.assertEqual(low_held, D("4000.00"))
+                self.assertEqual(low_pending, D("1250.00"))
+
     def test_ineligible_signal_is_skipped_not_dispatched(self):
         report = self.runner.run((day(2, "50", {"SPY": SKIP}),))
         self.assertIn("ENTRY_SKIP:SPY:SCANNER_NOT_ELIGIBLE",
