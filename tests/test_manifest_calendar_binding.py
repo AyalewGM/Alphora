@@ -92,6 +92,9 @@ def bind(m, c, **kwargs):
     params = {
         "expected_artifact_sha256": ARTIFACT_SHA,
         "expected_calendar_sha256": c.sha256,
+        # Self-pinned synthetic fixture; production pins must be supplied
+        # independently of the receipt being checked.
+        "expected_manifest_sha256": m.sha256,
     }
     params.update(kwargs)
     return bind_manifest_calendar(m, c, **params)
@@ -188,6 +191,37 @@ class ManifestCalendarBindingTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "INVALID_MANIFEST_CALENDAR_RECEIPTS"):
                     bind(bad, c)
 
+    def test_valid_recomputed_manifest_cannot_replace_external_pin(self):
+        c = calendar()
+        original = manifest(c)
+        replaced_manifest = replace(original.manifest, source_id="different_source")
+        substituted = inspect_market_manifest(
+            replaced_manifest,
+            expected_artifact_sha256=ARTIFACT_SHA,
+            expected_calendar_sha256=c.sha256,
+        )
+        self.assertNotEqual(original.sha256, substituted.sha256)
+        with self.assertRaisesRegex(
+            ValueError, "MANIFEST_CALENDAR_EXTERNAL_PIN_MISMATCH"
+        ):
+            bind(substituted, c, expected_manifest_sha256=original.sha256)
+
+    def test_external_manifest_pin_is_required_even_for_synthetic_receipts(self):
+        c = calendar()
+        m = manifest(c)
+        # Previously an omitted external pin let a valid self-computed
+        # manifest receipt pass without independently pinned identity.
+        with self.assertRaises(TypeError):
+            bind_manifest_calendar(
+                m, c,
+                expected_artifact_sha256=ARTIFACT_SHA,
+                expected_calendar_sha256=c.sha256,
+            )
+        with self.assertRaisesRegex(
+            ValueError, "MANIFEST_CALENDAR_EXTERNAL_PIN_MISMATCH"
+        ):
+            bind(m, c, expected_manifest_sha256=None)
+
     def test_wrong_objects_are_rejected(self):
         c = calendar()
         m = manifest(c)
@@ -198,6 +232,7 @@ class ManifestCalendarBindingTests(unittest.TestCase):
                 m, None,
                 expected_artifact_sha256=ARTIFACT_SHA,
                 expected_calendar_sha256=c.sha256,
+                expected_manifest_sha256=m.sha256,
             )
 
 
