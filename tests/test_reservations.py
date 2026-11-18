@@ -107,10 +107,13 @@ class OfflineReservationTests(unittest.TestCase):
         self.assertEqual(self.book.snapshot(), before)
 
     def test_mixed_pending_limit_prices_revalued_before_fee_cap(self):
-        self.reserve("held", self.proposal(qty="196", stop="49"))
-        self.book.record_hypothetical_fill("held", "filled-held", 196, D("50"))
+        # Stage high/low limit orders first: a $100 quote with 196 already
+        # held would correctly veto the high-limit order on its own. The
+        # $50 seed fill may then coexist with both outstanding limits.
         self.reserve("high-limit", self.proposal(qty="1", price="100", stop="99"))
         self.reserve("low-limit", self.proposal(qty="1", price="20", stop="19"))
+        self.reserve("held", self.proposal(qty="196", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 196, D("50"))
         before = self.book.snapshot()
         self.assertEqual(before.reserved_cash, D("120"))
         # At the new $50 quote: held $9800 + working max($100,$50)
