@@ -77,12 +77,15 @@ def inspect_session_calendar(days, *, venue_mic, start, end, source, revision,
     The caller must independently verify source/version and decision-time
     availability before using this calendar for a historical strategy claim.
     """
+    # Exchange schedules can be published before their last covered session.
+    # Require each day-level fact to have been available by this snapshot
+    # timestamp; retrospective revisions do not prove early availability.
     if (type(start) is not date or type(end) is not date or start > end
             or (end - start).days >= 366
             or not isinstance(venue_mic, str) or not _MIC.fullmatch(venue_mic)
             or not all(isinstance(x, str) and _ID.fullmatch(x)
                        for x in (source, revision, license_claim))
-            or not _aware(as_of) or as_of.astimezone(_ET).date() < end
+            or not _aware(as_of)
             or type(days) not in (list, tuple)
             or len(days) != (end - start).days + 1
             or (expected_sha256 is not None and
