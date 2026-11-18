@@ -76,6 +76,34 @@ class OfflineReservationTests(unittest.TestCase):
         self.reserve("b", self.proposal(qty="80"))
         self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
 
+    def test_cash_only_book_rejects_forged_equity_with_and_without_pending(self):
+        # With no fills or SELLs, cash is the entire marked portfolio.
+        # An algebraically consistent $120k caller mark cannot turn $100k
+        # durable paper cash into a $12k instrument allocation allowance.
+        # A working BUY reserves cash but does not create P&L.
+        forged = self.account(equity=D("120000"), day_pnl=D("20000"))
+        over_true_cap = self.proposal(qty="240", price="50", stop="49")
+        before = self.book.snapshot()
+        self.assertEqual(before.positions, ())
+        self.assertEqual(before.cash, D("100000"))
+        for intent in ("invented-equity",):
+            with self.assertRaisesRegex(ValueError, "UNBACKED_ACCOUNT_EQUITY"):
+                self.book.reserve_buy(intent, forged, over_true_cap,
+                                      reconciled=True)
+            self.assertEqual(self.book.snapshot(), before)
+
+        self.reserve("existing-pending", self.proposal(qty="20", stop="49"))
+        with_pending = self.book.snapshot()
+        self.assertEqual(with_pending.cash, D("100000"))
+        self.assertEqual(with_pending.positions, ())
+        with self.assertRaisesRegex(ValueError, "UNBACKED_ACCOUNT_EQUITY"):
+            self.book.reserve_buy("pending-forged-equity", forged,
+                                  over_true_cap, reconciled=True)
+        self.assertEqual(self.book.snapshot(), with_pending)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), with_pending)
+
     def test_aggregate_planner_pending_is_not_double_counted_at_exact_cap(self):
         self.reserve("held", self.proposal(qty="120", stop="49"))
         self.book.record_hypothetical_fill("held", "filled-held", 120, D("50"))
