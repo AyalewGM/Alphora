@@ -131,6 +131,40 @@ class OfflineReservationTests(unittest.TestCase):
             self.book.reserve_buy("stale-caller", marked, stale, reconciled=True)
         self.assertEqual(self.book.snapshot(), before)
 
+    def test_lower_buy_limit_cannot_undervalue_appreciated_holding(self):
+        # Single-symbol portfolio: mark is $80/share (200 * $80 = $16k),
+        # but the new candidate's $50 BUY limit must not revalue holdings.
+        self.reserve("held", self.proposal(qty="200", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 200, D("50"))
+        before = self.book.snapshot()
+        self.assertEqual(before.cash, D("90000"))
+        mark = self.account(equity=D("106000"), day_pnl=D("6000"))
+        stale = self.proposal(qty="1", price="50", stop="49", existing="0")
+        # With $106k equity the instrument ceiling is $10,600. The old
+        # code incorrectly substituted the new limit: 200*$50 + $50
+        # equals $10,050 and therefore admitted this unsafe order.
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+            self.book.reserve_buy("below-real-mark", mark, stale, reconciled=True)
+        self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_multiple_held_symbols_require_per_symbol_mark_receipt(self):
+        # Aggregate account equity alone cannot assign value between SPY
+        # and QQQ. Do not infer either symbol's mark from a proposed limit.
+        for sym in ("SPY", "QQQ"):
+            self.reserve(sym, self.proposal(symbol=sym, qty="20", stop="49"))
+            self.book.record_hypothetical_fill(sym, "fill-" + sym, 20, D("50"))
+        before = self.book.snapshot()
+        with self.assertRaisesRegex(ValueError, "MULTI_INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy(
+                "ambiguous-mark", self.account(),
+                self.proposal(qty="1", price="50", stop="49"),
+                reconciled=True,
+            )
+        self.assertEqual(self.book.snapshot(), before)
+
     def test_mixed_pending_limit_prices_revalued_before_fee_cap(self):
         # Stage high/low limit orders first: a $100 quote with 196 already
         # held would correctly veto the high-limit order on its own. The
