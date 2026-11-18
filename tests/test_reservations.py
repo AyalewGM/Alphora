@@ -93,6 +93,31 @@ class OfflineReservationTests(unittest.TestCase):
         self.assertEqual(after.positions, before.positions)
         self.assertEqual(after.pending[-1], ("working", "SPY", 60, D("3000")))
 
+    def test_stale_pending_witness_after_partial_fill_fails_closed_across_restart(self):
+        self.reserve("held", self.proposal(qty="120", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 120, D("50"))
+        self.reserve("working", self.proposal(qty="60", stop="49"))
+        self.book.record_hypothetical_fill("working", "partial-working", 10, D("50"))
+        old = self.book.snapshot()
+        self.assertEqual(old.positions, (("SPY", 130, D("6500")),))
+        self.assertEqual(old.pending, (("working", "SPY", 50, D("2500")),))
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), old)
+        stale = BuyProposal("SPY", D("20"), D("50"), D("49"),
+                            D("9000"), D("3000"))
+        with self.assertRaisesRegex(ValueError, "PENDING_RECEIPT_MISMATCH"):
+            self.book.reserve_buy("stale-pending", self.account(), stale,
+                                  reconciled=True)
+        self.assertEqual(self.book.snapshot(), old)
+        # Replanned held=6,500 and outstanding=2,500 restores a valid
+        # exact-boundary purchase without double-counting the partial fill.
+        updated = BuyProposal("SPY", D("20"), D("50"), D("49"),
+                              D("9000"), D("2500"))
+        added = self.book.reserve_buy("fresh-pending", self.account(), updated,
+                                      reconciled=True)
+        self.assertEqual(added.reserved_cash, D("3500"))
+
     def test_stale_direct_caller_cannot_understate_appreciated_holdings(self):
         self.reserve("held", self.proposal(qty="200", stop="49"))
         self.book.record_hypothetical_fill("held", "filled-held", 200, D("50"))
