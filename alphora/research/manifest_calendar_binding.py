@@ -77,7 +77,10 @@ def bind_manifest_calendar(
         raise ValueError("MANIFEST_CALENDAR_IDENTITY_MISMATCH")
     if c.start != m.bar_days[0] or c.end != m.bar_days[-1]:
         raise ValueError("MANIFEST_CALENDAR_RANGE_MISMATCH")
-    if c.as_of > m.as_of:
+    if c.as_of > m.as_of or c.as_of > m.calendar_available_at:
+        # A later snapshot may contain hindsight calendar corrections, even
+        # if its individual days claim earlier information availability.
+        # Require the snapshot itself at or before the pre-session cutoff.
         raise ValueError("MANIFEST_CALENDAR_LOOKAHEAD")
     # The manifest claims the calendar was available strictly before its
     # first bar's session. Do not silently accept calendar records that were
