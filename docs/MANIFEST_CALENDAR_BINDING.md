@@ -9,7 +9,8 @@ exchange dates, venue, revision and session hours**. The new function
 research treats the paired receipts as internally consistent.
 
 The binding revalidates both receipts, checks separately supplied expected
-artifact/calendar hashes and optional manifest hash, compares source/version,
+artifact/calendar/manifest hashes supplied as three required separate pins,
+compares source/version,
 venue and exact first/last date, and rejects missing, extra, reordered or
 inconsistent exchange sessions. It also recomputes derived paper-symbol
 representability metadata and rejects a receipt with altered symbol/status
@@ -43,6 +44,12 @@ performance. Real provider data must stay off GitHub; source authority
 requires a separate independent review. No files are opened and no market,
 broker or trading network is connected. The result is **never** paper-order
 eligibility or risk-policy authority.
+
+`expected_manifest_sha256` is **mandatory**: a recomputed manifest digest
+embedded in the supplied receipt is not an independent acceptance pin. An
+omitted, malformed or different expected manifest hash is rejected before
+returning a binding. The test fixture self-pins its synthetic input for
+convenience; this is explicitly **not** authentic external provenance.
 
 All fixtures in `tests/test_manifest_calendar_binding.py` are synthetic.
 Required executable checks (currently unverified because GitHub Actions
