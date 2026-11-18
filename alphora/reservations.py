@@ -480,6 +480,16 @@ class OfflineReservations:
                     or not _money(proposal.price, positive=True)
                     or proposal.pending_included_value > proposal.existing_instrument_value):
                 raise ValueError("INVALID_POSITION_VALUE")
+            # Without filled positions, the offline book is entirely cash.
+            # Outstanding BUYs reserve (but do not spend) that cash; they
+            # cannot create investment gains. Refuse a caller-attested
+            # equity increase/decrease that would invent a higher 10% cap
+            # or alter the planned-loss budget. Settled SELL history cannot
+            # bypass this check because new BUYs after SELLs are forbidden.
+            # This is a narrow cash-only integrity invariant, NOT a trusted
+            # mark receipt for a book that already holds any instruments.
+            if not snapshot.positions and account.equity != snapshot.cash:
+                raise ValueError("RISK_VETO:UNBACKED_ACCOUNT_EQUITY")
             # A runner proposal includes its already-counted pending exposure.
             # Direct callers may instead supply holdings only (pending=0).
             # Reconstruct the independent, marked book components under the
