@@ -504,7 +504,29 @@ class OfflineReservations:
                         raise ValueError("RISK_VETO:PENDING_RECEIPT_MISMATCH")
                     caller_held = (proposal.existing_instrument_value -
                                    proposal.pending_included_value)
-                    exposure = max(caller_held, marked_held, filled_cost) + pending_symbol
+                    # The new BUY's limit is not a market valuation of old
+                    # holdings. For a single held symbol, independently
+                    # reconstruct its total mark from reconciled account
+                    # equity minus durable book cash. This also catches a
+                    # stale/zero caller holding value when the proposed
+                    # limit is below the latest portfolio mark.
+                    held_symbols = [sym for sym, qty, _basis in snapshot.positions
+                                    if qty]
+                    if proposal.symbol in held_symbols:
+                        if len(held_symbols) != 1:
+                            # Aggregate account equity cannot safely be
+                            # allocated to individual symbols. Until a
+                            # transactionally checked per-symbol receipt is
+                            # implemented, reject new BUYs of held symbols.
+                            raise ValueError(
+                                "RISK_VETO:MULTI_INSTRUMENT_MARK_RECEIPT_REQUIRED")
+                        observed_held = account.equity - snapshot.cash
+                        if observed_held < 0:
+                            raise ValueError("RISK_VETO:INCONSISTENT_INSTRUMENT_MARK")
+                    else:
+                        observed_held = D(0)
+                    exposure = (max(caller_held, marked_held, filled_cost,
+                                    observed_held) + pending_symbol)
                     exposure_with_fees = exposure + fee_budget
             except DecimalException as exc:
                 raise ValueError("RISK_VETO:UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc
