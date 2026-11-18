@@ -153,6 +153,23 @@ class ManifestCalendarBindingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INVALID_MANIFEST_CALENDAR_RECEIPTS"):
             bind(m, c, expected_artifact_sha256="f" * 64)
 
+    def test_forged_paper_symbol_fields_rejected(self):
+        # A receipt's derived fields must agree with freshly recomputed
+        # manifest interpretation; matching content hashes are insufficient.
+        c = calendar()
+        original = manifest(c)
+        self.assertEqual(original.paper_symbol, "SYNTH")
+        for forged in (
+            replace(original, paper_symbol="OTHER"),
+            replace(original, paper_symbol=None),
+            replace(original, paper_symbol_reason="FORGED_PAPER_PERMISSION"),
+        ):
+            with self.subTest(forged=forged):
+                with self.assertRaisesRegex(
+                    ValueError, "INVALID_MANIFEST_CALENDAR_RECEIPTS"
+                ):
+                    bind(forged, c)
+
     def test_unrepresentable_intraday_halt_is_not_silently_ignored(self):
         c = calendar(first_halt=True)
         m = manifest(c)
