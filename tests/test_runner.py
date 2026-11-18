@@ -163,6 +163,30 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(low_held, D("4000.00"))
                 self.assertEqual(low_pending, D("1250.00"))
 
+    def test_mixed_pending_reservations_must_not_net_against_mark(self):
+        # At a $50 mark, one working order reserves $100 for one share,
+        # another reserves $20 for one share. max(sum(reserves), sum(marks))
+        # incorrectly nets these opposing deviations to $120 instead of
+        # max($100, $50) + max($20, $50) = $150.
+        from alphora.runner import _marked_instrument_exposure
+        snap = PaperBookSnapshot(
+            cash=D("100000"), reserved_cash=D("180"),
+            available_cash=D("99820"),
+            positions=(("SPY", 197, D("9850")),),
+            pending=(("higher-limit", "SPY", 1, D("100.00")),
+                     ("lower-limit", "SPY", 1, D("20.00")),
+                     ("different-symbol", "QQQ", 3, D("60.00"))),
+            halted=False, session_id="2026-11-02",
+        )
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                held, pending = _marked_instrument_exposure(
+                    snap, "SPY", D("50.00"))
+                self.assertEqual(held, D("9850.00"))
+                self.assertEqual(pending, D("150.00"))
+                self.assertEqual(held + pending, D("10000.00"))
+
     def test_ineligible_signal_is_skipped_not_dispatched(self):
         report = self.runner.run((day(2, "50", {"SPY": SKIP}),))
         self.assertIn("ENTRY_SKIP:SPY:SCANNER_NOT_ELIGIBLE",
