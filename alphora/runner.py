@@ -44,11 +44,13 @@ def _aware(value):
 
 
 def _marked_instrument_exposure(snapshot, symbol, mark):
-    """Return current marked shares and pending symbol reservations.
+    """Return marked holdings and conservative outstanding BUY exposure.
 
-    Acquisition cost is never a valid substitute for present exposure.
-    Pin arithmetic precision and trap rounding so reserved cents cannot
-    disappear under a caller's ambient Decimal context.
+    A pending BUY is valued at the higher of its reserved cash (including
+    fee budget) and the current mark of its unfilled shares. Otherwise a
+    rising mark could understate the eventual instrument allocation while
+    the original limit-price reservation stays unchanged. Acquisition cost
+    is never a substitute for present exposure. Trap inexact arithmetic.
     """
     try:
         with localcontext() as ctx:
@@ -57,8 +59,16 @@ def _marked_instrument_exposure(snapshot, symbol, mark):
             held = sum((D(qty) * mark
                         for s, qty, _basis in snapshot.positions if s == symbol),
                        D(0))
-            pending = sum((value for _ident, s, _qty, value in snapshot.pending
-                           if s == symbol), D(0))
+            pending_reserved = sum(
+                (value for _ident, s, _qty, value in snapshot.pending
+                 if s == symbol), D(0))
+            pending_marked = sum(
+                (D(qty) * mark for _ident, s, qty, _value in snapshot.pending
+                 if s == symbol), D(0))
+            # The pending order may still fill below its current mark;
+            # count its potential marked shares, but never erase fees or
+            # existing cash reservations when the mark falls.
+            pending = max(pending_reserved, pending_marked)
     except (DecimalException, TypeError, OverflowError) as exc:
         raise ValueError("INEXACT_PAPER_EXPOSURE") from exc
     return held, pending
