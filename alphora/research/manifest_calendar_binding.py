@@ -58,6 +58,12 @@ def bind_manifest_calendar(
     except (ValueError, TypeError, AttributeError, OverflowError) as exc:
         raise ValueError("INVALID_MANIFEST_CALENDAR_RECEIPTS") from exc
 
+    # A receipt also carries derived paper-symbol metadata. Do not allow
+    # a caller to substitute a forged symbol or status while retaining
+    # a valid hash for the underlying MarketManifest.
+    if verified != manifest_receipt:
+        raise ValueError("INVALID_MANIFEST_CALENDAR_RECEIPTS")
+
     if expected_manifest_sha256 is not None and verified.sha256 != expected_manifest_sha256:
         raise ValueError("MANIFEST_CALENDAR_EXTERNAL_PIN_MISMATCH")
     if c.sha256 != m.calendar_sha256 or c.sha256 != expected_calendar_sha256:
