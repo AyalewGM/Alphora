@@ -29,7 +29,7 @@ def at(day, hour, minute=0):
 
 
 def calendar(*, venue="XNYS", source="synthetic_calendar", revision="cal-v1",
-             as_of=datetime(2025, 11, 29, tzinfo=UTC),
+             as_of=CALENDAR_CUTOFF,
              day_available=AVAILABLE, first_halt=False):
     first = VenueDay(
         FIRST, "REGULAR", at(FIRST, 9, 30), at(FIRST, 16),
@@ -133,10 +133,27 @@ class ManifestCalendarBindingTests(unittest.TestCase):
                     bind(m, changed)
 
     def test_later_declared_calendar_information_is_lookahead(self):
-        changed = calendar(day_available=CALENDAR_CUTOFF + timedelta(hours=1))
+        changed = calendar(
+            day_available=CALENDAR_CUTOFF + timedelta(hours=1),
+            as_of=CALENDAR_CUTOFF + timedelta(hours=2),
+        )
         m = manifest(changed)
         with self.assertRaisesRegex(ValueError, "MANIFEST_CALENDAR_LOOKAHEAD"):
             bind(m, changed)
+
+    def test_retrospective_calendar_snapshot_cannot_borrow_early_day_timestamps(self):
+        # Day records claim November 24 availability, but the snapshot itself
+        # is dated after the November 26 first trading session.
+        late = calendar(as_of=datetime(2025, 11, 29, tzinfo=UTC))
+        m = manifest(late)
+        self.assertGreater(late.as_of, m.manifest.calendar_available_at)
+        with self.assertRaisesRegex(ValueError, "MANIFEST_CALENDAR_LOOKAHEAD"):
+            bind(m, late)
+
+    def test_advance_published_schedule_can_cover_later_sessions(self):
+        early = calendar(as_of=CALENDAR_CUTOFF)
+        self.assertLess(early.as_of.date(), LAST)
+        self.assertEqual(bind(manifest(early), early).session_days, (FIRST, LAST))
 
     def test_post_manifest_calendar_snapshot_is_not_historical_evidence(self):
         changed = calendar(as_of=AS_OF + timedelta(hours=1))
