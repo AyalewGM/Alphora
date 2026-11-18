@@ -104,7 +104,7 @@ class OfflineReservationTests(unittest.TestCase):
         self.book = OfflineReservations(self.path, session_id="2026-11-02")
         self.assertEqual(self.book.snapshot(), with_pending)
 
-    def test_aggregate_planner_pending_is_not_double_counted_at_exact_cap(self):
+    def test_exact_cap_after_fill_requires_authentic_mark_even_with_disjoint_pending(self):
         self.reserve("held", self.proposal(qty="120", stop="49"))
         self.book.record_hypothetical_fill("held", "filled-held", 120, D("50"))
         self.reserve("working", self.proposal(qty="60", stop="49"))
@@ -139,8 +139,8 @@ class OfflineReservationTests(unittest.TestCase):
             self.book.reserve_buy("stale-pending", self.account(), stale,
                                   reconciled=True)
         self.assertEqual(self.book.snapshot(), old)
-        # Replanned held=6,500 and outstanding=2,500 restores a valid
-        # exact-boundary purchase without double-counting the partial fill.
+        # Replanned held=6,500 and outstanding=2,500 fixes the pending
+        # accounting witness, but cannot authenticate the current holding mark.
         updated = BuyProposal("SPY", D("20"), D("50"), D("49"),
                               D("9000"), D("2500"))
         # The corrected pending annotation is necessary but insufficient:
@@ -583,8 +583,8 @@ os._exit(24)  # No close or normal interpreter shutdown.
 
     def test_fill_fees_enter_acquisition_cost_and_instrument_cap(self):
         # Actual synthetic buy fees reduce cash AND increase acquisition
-        # cost basis; omitting them lets future same-symbol purchases breach
-        # the conservative 10% cost-based exposure floor.
+        # cost basis; pending a trusted holdings mark, additional BUYs after
+        # any fill must be vetoed rather than rely on historical cost.
         self.reserve("fees", self.proposal(qty="20", stop="48"),
                      fee_budget=D("100"))
         filled = self.book.record_hypothetical_fill(
