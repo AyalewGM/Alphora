@@ -11,7 +11,9 @@ research treats the paired receipts as internally consistent.
 The binding revalidates both receipts, checks separately supplied expected
 artifact/calendar hashes and optional manifest hash, compares source/version,
 venue and exact first/last date, and rejects missing, extra, reordered or
-inconsistent exchange sessions. It compares regular/early-close hours
+inconsistent exchange sessions. It also recomputes derived paper-symbol
+representability metadata and rejects a receipt with altered symbol/status
+fields even if its embedded manifest content hash is unchanged. It compares regular/early-close hours
 **as instants**, not as a naive local clock; it rejects information claimed to
 have arrived after the manifest's calendar cutoff and calendar snapshots with
 a later `as_of` than the market snapshot. Because the market manifest
