@@ -43,6 +43,27 @@ def _aware(value):
             and value.utcoffset() is not None)
 
 
+def _marked_instrument_exposure(snapshot, symbol, mark):
+    """Return current marked shares and pending symbol reservations.
+
+    Acquisition cost is never a valid substitute for present exposure.
+    Pin arithmetic precision and trap rounding so reserved cents cannot
+    disappear under a caller's ambient Decimal context.
+    """
+    try:
+        with localcontext() as ctx:
+            ctx.prec = 50
+            ctx.traps[Inexact] = True
+            held = sum((D(qty) * mark
+                        for s, qty, _basis in snapshot.positions if s == symbol),
+                       D(0))
+            pending = sum((value for _ident, s, _qty, value in snapshot.pending
+                           if s == symbol), D(0))
+    except (DecimalException, TypeError, OverflowError) as exc:
+        raise ValueError("INEXACT_PAPER_EXPOSURE") from exc
+    return held, pending
+
+
 @dataclass(frozen=True)
 class SessionSignal:
     scanner_classification: str           # must be "WATCHLIST" to be eligible
@@ -351,9 +372,14 @@ class PaperSessionRunner:
                 if snap.halted:
                     actions.append(f"ENTRY_VETO:{sym}:PAPER_BOOK_HALTED")
                     break
-                held = next((c for s, _q, c in snap.positions if s == sym), D(0))
-                pending = sum((v for i, s, _q, v in snap.pending if s == sym),
-                              D(0))
+                try:
+                    held, pending = _marked_instrument_exposure(
+                        snap, sym, marks[sym])
+                except ValueError as exc:
+                    # A rounded or unrepresentable marked/pending exposure
+                    # cannot authorize this or any later same-session BUY.
+                    actions.append(f"ENTRY_VETO:{sym}:{exc}")
+                    break
                 stop = executable_stops.get(sym, D(0))
                 plan = propose_entry(
                     account,
