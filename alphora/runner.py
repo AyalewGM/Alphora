@@ -59,16 +59,15 @@ def _marked_instrument_exposure(snapshot, symbol, mark):
             held = sum((D(qty) * mark
                         for s, qty, _basis in snapshot.positions if s == symbol),
                        D(0))
-            pending_reserved = sum(
-                (value for _ident, s, _qty, value in snapshot.pending
+            # Preserve the greater reserved/marked exposure for EACH
+            # working order. max(sum(reserves), sum(marked)) is insufficient
+            # when some limits are above the mark and others below it: that
+            # calculation can net opposite deviations and understate risk.
+            # Reserved amounts may include fee budgets and remain a floor.
+            pending = sum(
+                (max(value, D(qty) * mark)
+                 for _ident, s, qty, value in snapshot.pending
                  if s == symbol), D(0))
-            pending_marked = sum(
-                (D(qty) * mark for _ident, s, qty, _value in snapshot.pending
-                 if s == symbol), D(0))
-            # The pending order may still fill below its current mark;
-            # count its potential marked shares, but never erase fees or
-            # existing cash reservations when the mark falls.
-            pending = max(pending_reserved, pending_marked)
     except (DecimalException, TypeError, OverflowError) as exc:
         raise ValueError("INEXACT_PAPER_EXPOSURE") from exc
     return held, pending
