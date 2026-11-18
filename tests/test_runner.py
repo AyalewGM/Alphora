@@ -131,7 +131,8 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(held, D("16000.00"))
                 self.assertEqual(pending, D("10000.00"))
         with self.assertRaisesRegex(ValueError, "INEXACT_PAPER_EXPOSURE"):
-            _marked_instrument_exposure(snap, "SPY", D("1e60"))
+            _marked_instrument_exposure(snap, "SPY",
+                                        D("0.123456789012345678901234567890123456789012345678901234567890"))
 
     def test_ineligible_signal_is_skipped_not_dispatched(self):
         report = self.runner.run((day(2, "50", {"SPY": SKIP}),))
