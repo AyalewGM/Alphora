@@ -86,6 +86,53 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("ENTRY:SPY:ACKED",
                       self.runner.run((day(2, "50", {"SPY": WATCH}),)).days[0].actions)
 
+    def test_appreciated_holdings_count_at_current_mark_not_purchase_cost(self):
+        # A $10k cost basis appreciates to a $16k marked exposure.
+        # With $106k equity, the 10% instrument limit is $10,600:
+        # another SPY BUY must not be authorized from the old cost basis.
+        first = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        self.assertEqual(first.days[0].positions, (("SPY", 200, D("10000")),))
+        original_orders = self.ledger.orders()
+        # Fresh same-session runner may re-evaluate marks, but must not
+        # accidentally trigger a take-profit SELL at 60% appreciation.
+        runner = PaperSessionRunner(
+            book=self.book, ledger=self.ledger, adapter=self.venue,
+            take_profit_pct=D("100"),
+        )
+        later = runner.run((day(2, "80", {"SPY": WATCH}),))
+        self.assertEqual(later.final_equity, D("106000"))
+        self.assertIn("ENTRY_SKIP:SPY:INSTRUMENT_ALLOCATION_EXCEEDED",
+                      later.days[0].actions)
+        self.assertFalse(any(a.startswith("ENTRY:SPY:")
+                             for a in later.days[0].actions))
+        self.assertEqual(self.book.snapshot().positions,
+                         (("SPY", 200, D("10000")),))
+        self.assertEqual(self.ledger.orders(), original_orders)
+        self.assertEqual(self.venue.open_orders(), ())
+
+    def test_instrument_exposure_preserves_pending_reservation_cents(self):
+        # Pure snapshot negative control: a small reserved-cent remainder
+        # must survive even under a caller's low Decimal precision.
+        from alphora.runner import _marked_instrument_exposure
+        snap = PaperBookSnapshot(
+            cash=D("90000"), reserved_cash=D("10000"),
+            available_cash=D("80000"),
+            positions=(("SPY", 200, D("10000")),),
+            pending=(("a", "SPY", 1, D("9999.99")),
+                     ("b", "SPY", 1, D("0.01")),
+                     ("c", "QQQ", 1, D("7.00"))),
+            halted=False, session_id="2026-11-02",
+        )
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                held, pending = _marked_instrument_exposure(
+                    snap, "SPY", D("80.00"))
+                self.assertEqual(held, D("16000.00"))
+                self.assertEqual(pending, D("10000.00"))
+        with self.assertRaisesRegex(ValueError, "INEXACT_PAPER_EXPOSURE"):
+            _marked_instrument_exposure(snap, "SPY", D("1e60"))
+
     def test_ineligible_signal_is_skipped_not_dispatched(self):
         report = self.runner.run((day(2, "50", {"SPY": SKIP}),))
         self.assertIn("ENTRY_SKIP:SPY:SCANNER_NOT_ELIGIBLE",
