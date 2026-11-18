@@ -150,6 +150,37 @@ class OfflineReservationTests(unittest.TestCase):
         self.book = OfflineReservations(self.path, session_id="2026-11-02")
         self.assertEqual(self.book.snapshot(), before)
 
+    def test_stale_self_consistent_account_cannot_authorize_unmarked_existing_holding(self):
+        # RED acceptance regression for #8/#80: the same-session caller can
+        # provide equity/day P&L that agree algebraically with book cash while
+        # being stale relative to the held security's current market mark.
+        # The final SQLite reservation must demand a trusted, fresh,
+        # session-bound per-symbol mark receipt or fail closed. A mere
+        # reconciled=True caller assertion is not such evidence.
+        self.reserve("held", self.proposal(qty="200", price="40", stop="39"))
+        self.book.record_hypothetical_fill("held", "filled-held", 200, D("40"))
+        before = self.book.snapshot()
+        self.assertEqual(before.cash, D("92000"))
+        self.assertEqual(before.positions, (("SPY", 200, D("8000")),))
+        # Independent current mark is $80, so true SPY exposure is $16,000,
+        # exceeding 10% of true $108,000 equity. The stale, internally
+        # consistent $100,000 account instead makes the book see only $8,040
+        # against a $10,000 cap when the new BUY limit is $40.
+        stale_account = self.account(equity=D("100000"), day_pnl=D("0"))
+        self.assertEqual(stale_account.cash, D("92000"))
+        with self.assertRaisesRegex(
+            ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"
+        ):
+            self.book.reserve_buy(
+                "stale-consistent-mark", stale_account,
+                self.proposal(qty="1", price="40", stop="39", existing="0"),
+                reconciled=True,
+            )
+        self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
     def test_multiple_held_symbols_require_per_symbol_mark_receipt(self):
         # Aggregate account equity alone cannot assign value between SPY
         # and QQQ. Do not infer either symbol's mark from a proposed limit.
