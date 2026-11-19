@@ -27,6 +27,7 @@ def _utc(value: datetime) -> str:
 @dataclass(frozen=True)
 class FeatureEvidence:
     input_id: str  # Unique within one decision; NOT an authenticated provider ID.
+    asset_id: str  # Claimed target asset for this derived feature; NOT authenticated.
     kind: str  # PRICE or NEWS; not an automatic eligibility classification.
     measured_through_at: datetime  # End of the information collection window.
     first_seen_at: datetime  # Claimed first receipt, not merely publication time.
@@ -54,7 +55,7 @@ def audit_feature_availability(
     expected_artifact_sha256: dict[str, str],
     expected_receipt_sha256: str | None = None,
 ) -> FeatureAvailabilityReceipt:
-    """Reject lookahead in declared input versions for ONE offline decision.
+    """Reject lookahead and cross-asset evidence substitution in declared inputs.
 
     The caller supplies an independently recorded hash for every exact feature
     artifact. A matching pin detects inconsistent claims, not falsified data.
@@ -82,6 +83,8 @@ def audit_feature_availability(
         if (type(item) is not FeatureEvidence
                 or type(item.input_id) is not str
                 or _ID.fullmatch(item.input_id) is None
+                or type(item.asset_id) is not str
+                or _ID.fullmatch(item.asset_id) is None
                 or item.input_id in ids
                 or type(item.kind) is not str or item.kind not in _KINDS
                 or not all(_aware(t) for t in (
@@ -90,6 +93,8 @@ def audit_feature_availability(
                 or type(item.artifact_sha256) is not str
                 or _SHA.fullmatch(item.artifact_sha256) is None):
             raise ValueError("INVALID_FEATURE_EVIDENCE")
+        if item.asset_id != decision.asset_id:
+            raise ValueError("FEATURE_ASSET_MISMATCH")
         ids.add(item.input_id)
         pinned = expected_artifact_sha256.get(item.input_id)
         if (type(pinned) is not str or _SHA.fullmatch(pinned) is None
@@ -101,6 +106,7 @@ def audit_feature_availability(
         news += item.kind == "NEWS"
         rows.append({
             "id": item.input_id,
+            "asset_id": item.asset_id,
             "kind": item.kind,
             "measured_through_at": _utc(item.measured_through_at),
             "first_seen_at": _utc(item.first_seen_at),
@@ -110,7 +116,7 @@ def audit_feature_availability(
     if set(expected_artifact_sha256) != ids:
         raise ValueError("INVALID_FEATURE_PINS")
     canonical = json.dumps({
-        "schema": 1,
+        "schema": 2,
         "asset_id": decision.asset_id,
         "decision_at": _utc(decision.decision_at),
         "inputs": sorted(rows, key=lambda row: row["id"]),
