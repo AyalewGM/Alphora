@@ -180,5 +180,21 @@ class SessionCalendarTests(unittest.TestCase):
             inspect(good)
 
 
+    def test_fallback_fold_availability_is_ordered_by_utc_instant(self):
+        # Both values use the SAME ZoneInfo, but the later absolute time
+        # has an earlier repeated-hour wall clock.
+        early = datetime(2026, 11, 1, 1, 50, tzinfo=ET, fold=0)
+        late = datetime(2026, 11, 1, 1, 20, tzinfo=ET, fold=1)
+        self.assertLess(early.astimezone(UTC), late.astimezone(UTC))
+        records = list(sample())
+        records[0] = replace(records[0], information_available_at=late)
+        with self.assertRaisesRegex(ValueError, "INVALID_CALENDAR_DAY"):
+            inspect(records, as_of=early)
+        # Valid absolute order should not be rejected because wall clock
+        # appears to move backward during the same repeated hour.
+        records[0] = replace(records[0], information_available_at=early)
+        self.assertEqual(inspect(records, as_of=late).as_of, late)
+
+
 if __name__ == "__main__":
     unittest.main()
