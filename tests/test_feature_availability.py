@@ -118,7 +118,6 @@ class FeatureAvailabilityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INVALID_FEATURE_PINS"):
             audit_feature_availability(d, expected_artifact_sha256=[H1, H2])
 
-
     def test_rejects_unmodified_cross_asset_price_or_news_evidence(self):
         d = fixture()
         pins = {"price.1": H1, "news.1": H2}
