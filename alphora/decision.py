@@ -4,7 +4,7 @@ Never submits broker orders. Inputs are externally reconciled paper snapshots;
 returned plans are neither approvals nor executable instructions.
 """
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal as D, ROUND_FLOOR, DecimalException, Inexact, localcontext
 from hashlib import sha256
 import re
@@ -33,9 +33,17 @@ def _aware(value):
 
 
 def _fresh(observed_at, as_of, max_age_seconds):
-    return (_aware(observed_at) and _aware(as_of) and
-            observed_at <= as_of and
-            (as_of - observed_at).total_seconds() <= max_age_seconds)
+    # Compare absolute instants: ZoneInfo compares wall clock across the
+    # repeated fall-back hour when both operands share its tzinfo object.
+    if not (_aware(observed_at) and _aware(as_of)):
+        return False
+    try:
+        observed_utc = observed_at.astimezone(timezone.utc)
+        decision_utc = as_of.astimezone(timezone.utc)
+        return (observed_utc <= decision_utc
+                and (decision_utc - observed_utc).total_seconds() <= max_age_seconds)
+    except (OverflowError, ValueError):
+        return False
 
 
 @dataclass(frozen=True)
