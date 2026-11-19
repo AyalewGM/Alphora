@@ -14,9 +14,9 @@ H1, H2 = "1" * 64, "2" * 64
 
 
 def fixture():
-    price = FeatureEvidence("price.1", "PRICE", T, T + timedelta(seconds=1),
+    price = FeatureEvidence("price.1", "asset.SPY", "PRICE", T, T + timedelta(seconds=1),
                             T + timedelta(seconds=2), H1)
-    news = FeatureEvidence("news.1", "NEWS", T, T + timedelta(seconds=2),
+    news = FeatureEvidence("news.1", "asset.SPY", "NEWS", T, T + timedelta(seconds=2),
                            T + timedelta(seconds=3), H2)
     return ResearchFeatureDecision("asset.SPY", T + timedelta(seconds=10),
                                    (price, news))
@@ -104,7 +104,8 @@ class FeatureAvailabilityTests(unittest.TestCase):
         d = fixture()
         for changed in (replace(d.inputs[0], first_seen_at=T.replace(tzinfo=None)),
                         replace(d.inputs[0], artifact_sha256="not-a-hash"),
-                        replace(d.inputs[0], input_id="unsafe id")):
+                        replace(d.inputs[0], input_id="unsafe id"),
+                        replace(d.inputs[0], asset_id="unsafe asset")):
             with self.assertRaisesRegex(ValueError, "INVALID_FEATURE_EVIDENCE"):
                 audit_feature_availability(replace(d, inputs=(changed, d.inputs[1])),
                                            expected_artifact_sha256={"price.1": H1, "news.1": H2})
@@ -116,6 +117,33 @@ class FeatureAvailabilityTests(unittest.TestCase):
                                        expected_receipt_sha256="invalid")
         with self.assertRaisesRegex(ValueError, "INVALID_FEATURE_PINS"):
             audit_feature_availability(d, expected_artifact_sha256=[H1, H2])
+
+
+    def test_rejects_unmodified_cross_asset_price_or_news_evidence(self):
+        d = fixture()
+        pins = {"price.1": H1, "news.1": H2}
+        other = replace(d, asset_id="asset.QQQ")
+        with self.assertRaisesRegex(ValueError, "FEATURE_ASSET_MISMATCH"):
+            audit_feature_availability(other, expected_artifact_sha256=pins)
+        for i in (0, 1):
+            items = list(d.inputs)
+            items[i] = replace(items[i], asset_id="asset.QQQ")
+            with self.subTest(input_index=i):
+                with self.assertRaisesRegex(ValueError, "FEATURE_ASSET_MISMATCH"):
+                    audit_feature_availability(replace(d, inputs=tuple(items)), expected_artifact_sha256=pins)
+
+    def test_relabelled_asset_claim_is_not_authenticated(self):
+        d = fixture()
+        pins = {"price.1": H1, "news.1": H2}
+        r1 = audit_feature_availability(d, expected_artifact_sha256=pins)
+        moved = replace(d, asset_id="asset.QQQ", inputs=tuple(
+            replace(i, asset_id="asset.QQQ") for i in d.inputs))
+        r2 = audit_feature_availability(moved, expected_artifact_sha256=pins)
+        self.assertNotEqual(r1.sha256, r2.sha256)
+        with self.assertRaisesRegex(ValueError, "FEATURE_RECEIPT_MISMATCH"):
+            audit_feature_availability(moved, expected_artifact_sha256=pins,
+                                       expected_receipt_sha256=r1.sha256)
+        self.assertEqual(r2.provenance, "CALLER_ATTESTED_ONLY")
 
 
 if __name__ == "__main__":
