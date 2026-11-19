@@ -5,12 +5,17 @@ nor verifies actual exchange hours, licensing, historical revisions or bar bytes
 It performs no IO, broker actions, orders, or network access.
 """
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timezone
 from hashlib import sha256
 import json
 
 from .market_manifest import ManifestReceipt, inspect_market_manifest
 from .session_calendar import CalendarReceipt, require_exact_session_coverage
+
+
+def _instant(value):
+    """Normalize aware calendar cutoffs before comparing absolute time."""
+    return value.astimezone(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -77,7 +82,8 @@ def bind_manifest_calendar(
         raise ValueError("MANIFEST_CALENDAR_IDENTITY_MISMATCH")
     if c.start != m.bar_days[0] or c.end != m.bar_days[-1]:
         raise ValueError("MANIFEST_CALENDAR_RANGE_MISMATCH")
-    if c.as_of > m.as_of or c.as_of > m.calendar_available_at:
+    if (_instant(c.as_of) > _instant(m.as_of)
+            or _instant(c.as_of) > _instant(m.calendar_available_at)):
         # A later snapshot may contain hindsight calendar corrections, even
         # if its individual days claim earlier information availability.
         # Require the snapshot itself at or before the pre-session cutoff.
@@ -85,7 +91,7 @@ def bind_manifest_calendar(
     # The manifest claims the calendar was available strictly before its
     # first bar's session. Do not silently accept calendar records that were
     # *claimed* to have arrived only after that cutoff.
-    if any(day.information_available_at > m.calendar_available_at for day in c.days):
+    if any(_instant(day.information_available_at) > _instant(m.calendar_available_at) for day in c.days):
         raise ValueError("MANIFEST_CALENDAR_LOOKAHEAD")
 
     # The market manifest cannot encode intraday venue halts. Reject rather
@@ -97,8 +103,8 @@ def bind_manifest_calendar(
     if len(sessions) != len(m.sessions) or any(
         actual.day != declared.day
         or actual.kind != declared.kind
-        or actual.opens_at != declared.opens_at
-        or actual.closes_at != declared.closes_at
+        or _instant(actual.opens_at) != _instant(declared.opens_at)
+        or _instant(actual.closes_at) != _instant(declared.closes_at)
         for actual, declared in zip(sessions, m.sessions)
     ):
         raise ValueError("MANIFEST_CALENDAR_SESSION_MISMATCH")
