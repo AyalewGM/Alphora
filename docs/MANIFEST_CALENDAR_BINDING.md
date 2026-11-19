@@ -57,6 +57,17 @@ omitted, malformed or different expected manifest hash is rejected before
 returning a binding. The test fixture self-pins its synthetic input for
 convenience; this is explicitly **not** authentic external provenance.
 
+**DST chronology hardening (2026-11-19):** Research calendar, cross-receipt
+binding and market-manifest ordering now normalize aware timestamps to UTC
+instants before comparing them. Python compares repeated-hour wall times when
+two datetimes share the same `ZoneInfo("America/New_York")` instance; that
+can admit a revision arriving later in absolute time during fall-back.
+Three synthetic regression methods cover rejected post-decision arrival,
+accepted valid ordering and market-manifest revision/delivery ordering.
+Canonical UTC receipt serialization and all externally pinned hash requirements
+remain unchanged. This corrects local *claimed* chronology only; it does
+not authenticate actual source publication or delivery history.
+
 All fixtures in `tests/test_manifest_calendar_binding.py` are synthetic.
 Required executable checks (currently unverified because GitHub Actions
 cannot start under #71):
