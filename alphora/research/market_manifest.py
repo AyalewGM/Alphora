@@ -45,6 +45,11 @@ def _utc(value):
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _instant(value):
+    """Compare aware timestamps by UTC instant, not shared-ZoneInfo wall time."""
+    return value.astimezone(timezone.utc)
+
+
 @dataclass(frozen=True)
 class SymbolPeriod:
     symbol: str
@@ -134,8 +139,9 @@ def inspect_market_manifest(manifest: MarketManifest, *,
         raise ValueError("EXTERNAL_PIN_MISMATCH")
     if (not all(_aware(t) for t in (m.delivered_at, m.version_available_at,
                                     m.calendar_available_at, m.as_of))
-            or not m.version_available_at <= m.delivered_at <= m.as_of
-            or m.calendar_available_at > m.as_of):
+            or not (_instant(m.version_available_at) <= _instant(m.delivered_at)
+                    <= _instant(m.as_of))
+            or _instant(m.calendar_available_at) > _instant(m.as_of)):
         raise ValueError("UNAVAILABLE_REVISION")
 
     a = m.instrument
@@ -176,7 +182,7 @@ def inspect_market_manifest(manifest: MarketManifest, *,
         raise ValueError("INVALID_SYMBOL_HISTORY")
     if (not isinstance(u, UniverseMembership) or not _date(u.day)
             or type(u.included) is not bool
-            or not _aware(u.available_at) or u.available_at > m.as_of
+            or not _aware(u.available_at) or _instant(u.available_at) > _instant(m.as_of)
             or (u.included and u.exclusion_reason is not None)
             or (not u.included and not _valid_id(u.exclusion_reason))
             or u.day < a.listed_on or
@@ -198,7 +204,7 @@ def inspect_market_manifest(manifest: MarketManifest, *,
                 or session.day != bar_day):
             raise ValueError("INCOMPLETE_SESSION_COVERAGE")
         if (not _aware(session.opens_at) or not _aware(session.closes_at)
-                or session.opens_at >= session.closes_at or
+                or _instant(session.opens_at) >= _instant(session.closes_at) or
                 session.opens_at.astimezone(_ET).date() != session.day or
                 session.closes_at.astimezone(_ET).date() != session.day or
                 # No Saturday/Sunday regular US equity/ETF sessions.
@@ -221,16 +227,16 @@ def inspect_market_manifest(manifest: MarketManifest, *,
     # have been delivered before its final session closed. A purported early
     # delivery would falsely make future closing prices available at that time.
     # This chronological invariant is NOT vendor authentication.
-    if m.delivered_at < m.sessions[-1].closes_at:
+    if _instant(m.delivered_at) < _instant(m.sessions[-1].closes_at):
         raise ValueError("PREMATURE_ARTIFACT_DELIVERY")
     # A completed daily artifact version cannot itself have become
     # available before its final included session closed, even when the
     # later delivery timestamp looks valid. Both claims are unauthenticated.
-    if m.version_available_at < m.sessions[-1].closes_at:
+    if _instant(m.version_available_at) < _instant(m.sessions[-1].closes_at):
         raise ValueError("PREMATURE_ARTIFACT_VERSION")
-    if (u.day > m.bar_days[0] or u.available_at >= m.sessions[0].opens_at
-            or m.calendar_available_at >= m.sessions[0].opens_at
-            or m.as_of < m.sessions[-1].closes_at):
+    if (u.day > m.bar_days[0] or _instant(u.available_at) >= _instant(m.sessions[0].opens_at)
+            or _instant(m.calendar_available_at) >= _instant(m.sessions[0].opens_at)
+            or _instant(m.as_of) < _instant(m.sessions[-1].closes_at)):
         raise ValueError("POINT_IN_TIME_BOUNDARY")
 
     document = {
