@@ -100,8 +100,13 @@ def audit_feature_availability(
         if (type(pinned) is not str or _SHA.fullmatch(pinned) is None
                 or pinned != item.artifact_sha256):
             raise ValueError("FEATURE_PIN_MISMATCH")
-        if not (item.measured_through_at <= item.first_seen_at
-                <= item.version_available_at < decision.decision_at):
+        # Normalize BEFORE ordering. Datetimes sharing one ZoneInfo instance
+        # compare by wall time across fall-back DST folds in Python, which can
+        # otherwise accept future revisions or reject valid chronology.
+        if not (item.measured_through_at.astimezone(timezone.utc)
+                <= item.first_seen_at.astimezone(timezone.utc)
+                <= item.version_available_at.astimezone(timezone.utc)
+                < decision.decision_at.astimezone(timezone.utc)):
             raise ValueError("FEATURE_NOT_AVAILABLE_AT_DECISION")
         news += item.kind == "NEWS"
         rows.append({
