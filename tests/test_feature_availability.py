@@ -145,5 +145,64 @@ class FeatureAvailabilityTests(unittest.TestCase):
         self.assertEqual(r2.provenance, "CALLER_ATTESTED_ONLY")
 
 
+    def test_dst_fold_future_revision_cannot_precede_decision(self):
+        # 2026-11-01 New York fall-back: the repeated 01:00 hour has
+        # different UTC instants even though all four values use one tzinfo.
+        from zoneinfo import ZoneInfo
+        eastern = ZoneInfo("America/New_York")
+
+        def at(hour, minute, fold):
+            return datetime(2026, 11, 1, hour, minute,
+                            tzinfo=eastern, fold=fold)
+
+        d = fixture()
+        # Feature collected at 06:05--06:20Z, but decision was at 05:50Z.
+        # Comparing Python wall time with identical tzinfo erroneously
+        # accepted 01:05 <= 01:10 <= 01:20 < 01:50.
+        changed = replace(d.inputs[0],
+                          measured_through_at=at(1, 5, 1),
+                          first_seen_at=at(1, 10, 1),
+                          version_available_at=at(1, 20, 1))
+        candidate = replace(d, decision_at=at(1, 50, 0),
+                            inputs=(changed, d.inputs[1]))
+        with self.assertRaisesRegex(ValueError,
+                                    "FEATURE_NOT_AVAILABLE_AT_DECISION"):
+            audit_feature_availability(candidate,
+                                       expected_artifact_sha256={
+                                           "price.1": H1, "news.1": H2})
+
+    def test_dst_fold_valid_absolute_order_is_allowed(self):
+        from zoneinfo import ZoneInfo
+        eastern = ZoneInfo("America/New_York")
+
+        def at(hour, minute, fold):
+            return datetime(2026, 11, 1, hour, minute,
+                            tzinfo=eastern, fold=fold)
+
+        d = fixture()
+        # 05:45Z <= 06:15Z <= 06:20Z < 06:30Z is valid, though
+        # same-tzinfo wall clock comparisons would reject 01:45 <= 01:15.
+        changed = replace(d.inputs[0],
+                          measured_through_at=at(1, 45, 0),
+                          first_seen_at=at(1, 15, 1),
+                          version_available_at=at(1, 20, 1))
+        candidate = replace(d, decision_at=at(1, 30, 1),
+                            inputs=(changed, d.inputs[1]))
+        receipt = audit_feature_availability(
+            candidate, expected_artifact_sha256={
+                "price.1": H1, "news.1": H2})
+        utc_candidate = replace(
+            candidate, decision_at=candidate.decision_at.astimezone(UTC),
+            inputs=tuple(replace(
+                item,
+                measured_through_at=item.measured_through_at.astimezone(UTC),
+                first_seen_at=item.first_seen_at.astimezone(UTC),
+                version_available_at=item.version_available_at.astimezone(UTC))
+                for item in candidate.inputs))
+        self.assertEqual(receipt, audit_feature_availability(
+            utc_candidate, expected_artifact_sha256={
+                "price.1": H1, "news.1": H2}))
+
+
 if __name__ == "__main__":
     unittest.main()
