@@ -258,5 +258,65 @@ class ManifestCalendarBindingTests(unittest.TestCase):
             )
 
 
+    def test_dst_fold_snapshot_cannot_evade_pre_session_cutoff(self):
+        early = datetime(2025, 11, 2, 1, 50, tzinfo=ET, fold=0)
+        late = datetime(2025, 11, 2, 1, 20, tzinfo=ET, fold=1)
+        self.assertLess(early.astimezone(UTC), late.astimezone(UTC))
+        # Day facts are genuinely earlier, but the calendar snapshot
+        # itself was only first seen after the pinned manifest cutoff.
+        c = calendar(as_of=late, day_available=early)
+        base = manifest(c)
+        altered = replace(base.manifest, calendar_available_at=early)
+        m = inspect_market_manifest(
+            altered, expected_artifact_sha256=ARTIFACT_SHA,
+            expected_calendar_sha256=c.sha256)
+        with self.assertRaisesRegex(ValueError, "MANIFEST_CALENDAR_LOOKAHEAD"):
+            bind(m, c)
+
+        # Positive control: a snapshot published earlier in absolute time
+        # than the declared calendar cutoff is structurally acceptable.
+        c2 = calendar(as_of=early, day_available=early)
+        base2 = manifest(c2)
+        altered2 = replace(base2.manifest, calendar_available_at=late)
+        m2 = inspect_market_manifest(
+            altered2, expected_artifact_sha256=ARTIFACT_SHA,
+            expected_calendar_sha256=c2.sha256)
+        self.assertEqual(bind(m2, c2).session_days, (FIRST, LAST))
+
+    def test_dst_fold_market_version_delivery_order_is_absolute(self):
+        early = datetime(2025, 11, 2, 1, 50, tzinfo=ET, fold=0)
+        late = datetime(2025, 11, 2, 1, 20, tzinfo=ET, fold=1)
+        first, last = date(2025, 10, 30), date(2025, 10, 31)
+        c = calendar()
+        base = manifest(c).manifest
+        data = replace(
+            base,
+            membership=UniverseMembership(
+                date(2025, 10, 29), True, None,
+                datetime(2025, 10, 29, tzinfo=UTC)),
+            sessions=(
+                ExchangeSession(first, at(first, 9, 30), at(first, 16), "REGULAR"),
+                ExchangeSession(last, at(last, 9, 30), at(last, 16), "REGULAR"),
+            ),
+            bar_days=(first, last),
+            calendar_available_at=datetime(2025, 10, 29, tzinfo=UTC),
+            as_of=datetime(2025, 11, 3, tzinfo=UTC),
+            delivered_at=early,
+            version_available_at=late,
+        )
+        # A revision first available at 06:20 UTC cannot have been
+        # delivered at 05:50 UTC, even if 01:20 < 01:50 on the wall.
+        with self.assertRaisesRegex(ValueError, "UNAVAILABLE_REVISION"):
+            inspect_market_manifest(
+                data, expected_artifact_sha256=ARTIFACT_SHA,
+                expected_calendar_sha256=c.sha256)
+        # Reverse order is valid in UTC despite reversed local wall clocks.
+        valid = replace(data, version_available_at=early, delivered_at=late)
+        receipt = inspect_market_manifest(
+            valid, expected_artifact_sha256=ARTIFACT_SHA,
+            expected_calendar_sha256=c.sha256)
+        self.assertEqual(receipt.manifest.delivered_at, late)
+
+
 if __name__ == "__main__":
     unittest.main()
