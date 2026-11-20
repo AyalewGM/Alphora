@@ -260,7 +260,7 @@ class PaperAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
             venue.require_fresh_mark("SPY", at=earlier)
         venue = PaperBrokerAdapter()
-        observed = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=0)
+        observed = datetime(2026, 11, 1, 1, 59, 59, tzinfo=eastern, fold=0)
         one_minute_later = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
         venue.advance({"SPY": D("50")}, at=observed)
         self.assertEqual(venue.require_fresh_mark("SPY", at=one_minute_later),
