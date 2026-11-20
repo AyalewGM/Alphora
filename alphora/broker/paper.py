@@ -126,8 +126,21 @@ class PaperBrokerAdapter:
 
     def _mark_value(self):
         for symbol, (qty, _cost) in self._positions.items():
-            if qty and (symbol not in self._marks or
-                        self._mark_times.get(symbol) != self._latest_advance_at):
+            if not qty:
+                continue
+            marked_at = self._mark_times.get(symbol)
+            if (symbol not in self._marks or marked_at is None
+                    or self._latest_advance_at is None):
+                raise ValueError("UNVERIFIED_OR_STALE_MARK")
+            # Snapshot equity and daily P&L are risk-facing. Reuse the
+            # absolute-time batch identity rule from require_fresh_mark:
+            # same-ZoneInfo datetimes compare wall time across DST folds.
+            try:
+                same_batch = (marked_at.astimezone(timezone.utc) ==
+                              self._latest_advance_at.astimezone(timezone.utc))
+            except (OverflowError, ValueError) as exc:
+                raise ValueError("UNVERIFIED_OR_STALE_MARK") from exc
+            if not same_batch:
                 raise ValueError("UNVERIFIED_OR_STALE_MARK")
         return sum(qty * self._marks[sym]
                    for sym, (qty, _cost) in self._positions.items() if qty)
