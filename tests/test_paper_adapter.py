@@ -266,6 +266,37 @@ class PaperAdapterTests(unittest.TestCase):
         self.assertEqual(venue.require_fresh_mark("SPY", at=one_second_later),
                          D("50"))
 
+    def test_fall_back_snapshot_rejects_old_fold_held_mark(self):
+        # Synthetic chronology only; November 1 is not a stock session.
+        eastern = ZoneInfo("America/New_York")
+        first = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=0)
+        second = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        self.dispatch_buy(qty=100, limit="50")
+        self.venue.advance({"SPY": D("50")}, at=first)
+        self.assertEqual(self.venue.account_snapshot().equity, D("100000"))
+        self.venue.advance({"QQQ": D("100")}, at=second)
+        # The previous SPY mark is an hour old despite equal local clocks.
+        # Reject risk-facing equity and P&L rather than assume held cost.
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            self.venue.account_snapshot()
+        # An explicit SPY mark from the current absolute-time batch recovers.
+        self.venue.advance({"SPY": D("30"), "QQQ": D("100")}, at=second)
+        snap = self.venue.account_snapshot()
+        self.assertEqual((snap.cash, snap.equity, snap.day_pnl),
+                         (D("95000"), D("98000"), D("-2000")))
+
+    def test_snapshot_accepts_same_instant_with_different_utc_offset(self):
+        eastern = ZoneInfo("America/New_York")
+        first = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=0)
+        self.dispatch_buy(qty=100, limit="50")
+        self.venue.advance({"SPY": D("50")}, at=first)
+        # A differently encoded timestamp for the SAME instant must not
+        # produce a false stale risk snapshot.
+        self.venue.advance({"QQQ": D("100")}, at=first.astimezone(timezone.utc))
+        snap = self.venue.account_snapshot()
+        self.assertEqual((snap.equity, snap.day_pnl),
+                         (D("100000"), D("0")))
+
     def test_fall_back_same_wall_time_is_not_same_mark_batch(self):
         # SPY was last marked in the first 1:00 hour; a QQQ-only batch in
         # the second 1:00 hour must invalidate SPY for latest-batch exits.
