@@ -261,9 +261,9 @@ class PaperAdapterTests(unittest.TestCase):
             venue.require_fresh_mark("SPY", at=earlier)
         venue = PaperBrokerAdapter()
         observed = datetime(2026, 11, 1, 1, 59, 59, tzinfo=eastern, fold=0)
-        one_minute_later = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        one_second_later = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
         venue.advance({"SPY": D("50")}, at=observed)
-        self.assertEqual(venue.require_fresh_mark("SPY", at=one_minute_later),
+        self.assertEqual(venue.require_fresh_mark("SPY", at=one_second_later),
                          D("50"))
 
     def test_fall_back_mark_batches_must_be_monotonic_in_utc(self):
