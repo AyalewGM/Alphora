@@ -12,7 +12,7 @@ broker order ids. Time is caller-supplied (`at`); nothing reads a wall clock.
 """
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal as D, ROUND_HALF_EVEN, Inexact, localcontext, DecimalException
 import re
 
@@ -163,9 +163,16 @@ class PaperBrokerAdapter:
                 or not 0 <= max_age_seconds <= 5):
             raise ValueError("INVALID_MARK_QUERY")
         marked_at = self._mark_times.get(symbol)
-        if (marked_at is None or marked_at != self._latest_advance_at
-                or marked_at > at
-                or (at - marked_at).total_seconds() > max_age_seconds):
+        if marked_at is None or marked_at != self._latest_advance_at:
+            raise ValueError("UNVERIFIED_OR_STALE_MARK")
+        # Compare UTC instants, not same-ZoneInfo fall-back wall time.
+        try:
+            marked_utc = marked_at.astimezone(timezone.utc)
+            decision_utc = at.astimezone(timezone.utc)
+        except (OverflowError, ValueError) as exc:
+            raise ValueError("UNVERIFIED_OR_STALE_MARK") from exc
+        if (marked_utc > decision_utc
+                or (decision_utc - marked_utc).total_seconds() > max_age_seconds):
             raise ValueError("UNVERIFIED_OR_STALE_MARK")
         return self._marks[symbol]
 
@@ -317,8 +324,14 @@ class PaperBrokerAdapter:
             if (not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
                     or not _money(price)):
                 raise ValueError("INVALID_MARKS")
-        if self._latest_advance_at is not None and at < self._latest_advance_at:
-            raise ValueError("NON_MONOTONIC_MARK_TIME")
+        if self._latest_advance_at is not None:
+            try:
+                older = (at.astimezone(timezone.utc) <
+                         self._latest_advance_at.astimezone(timezone.utc))
+            except (OverflowError, ValueError) as exc:
+                raise ValueError("INVALID_TIMESTAMP") from exc
+            if older:
+                raise ValueError("NON_MONOTONIC_MARK_TIME")
         clean_marks = {symbol: _cents(price) for symbol, price in marks.items()}
         if any(price <= 0 for price in clean_marks.values()):
             raise ValueError("INVALID_MARKS")

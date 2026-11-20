@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from alphora.broker.base import DispatchAck, DispatchRequest
 from alphora.broker.manager import PaperOrderManager
@@ -236,6 +237,30 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "STALE_OR_UNCLEAN_RECONCILIATION"):
             self.mgr.execute_entry(self.entry("d" * 64), self.account(),
                                    recon=fatal, now=at(1), reconciled=True)
+
+    def test_fall_back_reconciliation_requires_true_utc_freshness(self):
+        # Sunday DST folds are synthetic timestamp controls, not sessions.
+        eastern = ZoneInfo("America/New_York")
+        stale = datetime(2026, 11, 1, 1, 58, tzinfo=eastern, fold=0)
+        later = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=1)
+        future = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        earlier = datetime(2026, 11, 1, 1, 1, tzinfo=eastern, fold=0)
+        for observed, decision in ((stale, later), (future, earlier)):
+            with self.subTest(observed=observed, decision=decision):
+                certificate = replace(self.recon(), checked_at=observed)
+                with self.assertRaisesRegex(
+                        ValueError, "STALE_OR_UNCLEAN_RECONCILIATION"):
+                    self.mgr.execute_entry(self.entry(), self.account(),
+                                           recon=certificate, now=decision,
+                                           reconciled=True)
+        self.assertEqual(self.ledger.orders(), ())
+        self.assertEqual(self.book.snapshot().pending, ())
+        # Actual one-minute age across the fold is acceptable to this
+        # chronology guard (separate session/business rules still apply).
+        valid_mark = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=0)
+        valid_now = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        self.mgr._require_clean_recon(
+            replace(self.recon(), checked_at=valid_mark), valid_now, 120)
 
     def test_entry_blocked_when_book_halted(self):
         self.book.halt()

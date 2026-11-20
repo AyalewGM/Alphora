@@ -2,6 +2,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D, localcontext
+from zoneinfo import ZoneInfo
 
 from alphora.broker.base import BrokerPosition, DispatchRequest
 from alphora.broker.paper import PaperBrokerAdapter
@@ -243,6 +244,37 @@ class PaperAdapterTests(unittest.TestCase):
                          "FILLED")
         self.assertEqual(self.venue.account_snapshot().reserved_cash, D(0))
         self.assertEqual(self.venue.expire_session(at=at(11)), ())
+
+    def test_fall_back_mark_freshness_uses_absolute_instants(self):
+        # Pure synthetic DST chronology, not an exchange-open claim.
+        eastern = ZoneInfo("America/New_York")
+        stale = datetime(2026, 11, 1, 1, 58, tzinfo=eastern, fold=0)
+        late = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=1)
+        self.venue.advance({"SPY": D("50")}, at=stale)
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            self.venue.require_fresh_mark("SPY", at=late)
+        future = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        earlier = datetime(2026, 11, 1, 1, 1, tzinfo=eastern, fold=0)
+        venue = PaperBrokerAdapter()
+        venue.advance({"SPY": D("50")}, at=future)
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            venue.require_fresh_mark("SPY", at=earlier)
+        venue = PaperBrokerAdapter()
+        observed = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=0)
+        one_minute_later = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        venue.advance({"SPY": D("50")}, at=observed)
+        self.assertEqual(venue.require_fresh_mark("SPY", at=one_minute_later),
+                         D("50"))
+
+    def test_fall_back_mark_batches_must_be_monotonic_in_utc(self):
+        eastern = ZoneInfo("America/New_York")
+        later = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        earlier = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=0)
+        self.venue.advance({"SPY": D("50")}, at=later)
+        with self.assertRaisesRegex(ValueError, "NON_MONOTONIC_MARK_TIME"):
+            self.venue.advance({"SPY": D("30")}, at=earlier)
+        self.assertEqual(self.venue.require_fresh_mark("SPY", at=later),
+                         D("50"))
 
     def test_advance_validation_and_unmarked_symbols(self):
         self.dispatch_buy("a")
