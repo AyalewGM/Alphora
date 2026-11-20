@@ -163,15 +163,17 @@ class PaperBrokerAdapter:
                 or not 0 <= max_age_seconds <= 5):
             raise ValueError("INVALID_MARK_QUERY")
         marked_at = self._mark_times.get(symbol)
-        if marked_at is None or marked_at != self._latest_advance_at:
+        if marked_at is None or self._latest_advance_at is None:
             raise ValueError("UNVERIFIED_OR_STALE_MARK")
-        # Compare UTC instants, not same-ZoneInfo fall-back wall time.
+        # The same ZoneInfo wall-clock time in separate DST folds compares
+        # equal in Python. Batch identity and freshness both use UTC.
         try:
             marked_utc = marked_at.astimezone(timezone.utc)
+            latest_utc = self._latest_advance_at.astimezone(timezone.utc)
             decision_utc = at.astimezone(timezone.utc)
         except (OverflowError, ValueError) as exc:
             raise ValueError("UNVERIFIED_OR_STALE_MARK") from exc
-        if (marked_utc > decision_utc
+        if (marked_utc != latest_utc or marked_utc > decision_utc
                 or (decision_utc - marked_utc).total_seconds() > max_age_seconds):
             raise ValueError("UNVERIFIED_OR_STALE_MARK")
         return self._marks[symbol]

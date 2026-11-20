@@ -266,6 +266,19 @@ class PaperAdapterTests(unittest.TestCase):
         self.assertEqual(venue.require_fresh_mark("SPY", at=one_second_later),
                          D("50"))
 
+    def test_fall_back_same_wall_time_is_not_same_mark_batch(self):
+        # SPY was last marked in the first 1:00 hour; a QQQ-only batch in
+        # the second 1:00 hour must invalidate SPY for latest-batch exits.
+        eastern = ZoneInfo("America/New_York")
+        first = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=0)
+        second = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        self.venue.advance({"SPY": D("50")}, at=first)
+        self.venue.advance({"QQQ": D("100")}, at=second)
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            self.venue.require_fresh_mark("SPY", at=first)
+        self.assertEqual(self.venue.require_fresh_mark("QQQ", at=second),
+                         D("100"))
+
     def test_fall_back_mark_batches_must_be_monotonic_in_utc(self):
         eastern = ZoneInfo("America/New_York")
         later = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
