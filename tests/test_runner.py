@@ -132,7 +132,8 @@ class RunnerTests(unittest.TestCase):
                     snap, "SPY", D("80.00"))
                 self.assertEqual(held, D("16000.00"))
                 self.assertEqual(pending, D("10079.99"))
-                self.assertEqual(held + pending, D("26079.99"))
+                # Adding held and pending under precision=3 would itself
+                # round the result: assert the exact components separately.
         with self.assertRaisesRegex(ValueError, "INEXACT_PAPER_EXPOSURE"):
             _marked_instrument_exposure(snap, "SPY",
                                         D("0.123456789012345678901234567890123456789012345678901234567890"))
