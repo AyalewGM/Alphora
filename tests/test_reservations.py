@@ -100,6 +100,33 @@ class OfflineReservationTests(unittest.TestCase):
         distinct = self.reserve("new-size", self.proposal(qty="15", stop="49"))
         self.assertEqual(distinct.reserved_cash, D("1750"))
 
+    def test_concurrent_legacy_aliases_hold_cash_once_below_instrument_cap(self):
+        # Both alias orders fit independently under the 10% cap. Without
+        # the transactional semantic collision veto, both would reserve.
+        attempts = []
+        def attempt(ident, spelling):
+            connection = OfflineReservations(self.path, session_id="2026-11-02")
+            try:
+                proposal = BuyProposal("SPY", D("20"), D(spelling), D("49"))
+                connection.reserve_buy(ident, PaperAccount(
+                    D("100000"), D("100000"), D("100000"), D("0"),
+                    "2026-11-02"), proposal, reconciled=True)
+                attempts.append("reserved")
+            except ValueError as exc:
+                attempts.append(str(exc))
+            finally:
+                connection.close()
+        jobs = [threading.Thread(target=attempt, args=("old", "50")),
+                threading.Thread(target=attempt, args=("new", "50.00"))]
+        for job in jobs:
+            job.start()
+        for job in jobs:
+            job.join()
+        self.assertEqual(attempts.count("reserved"), 1)
+        self.assertEqual(sum("AMBIGUOUS_LEGACY_ENTRY_INTENT" in a
+                             for a in attempts), 1)
+        self.assertEqual(self.book.snapshot().reserved_cash, D("1000"))
+
     def test_cash_only_book_rejects_forged_equity_with_and_without_pending(self):
         # With no fills or SELLs, cash is the entire marked portfolio.
         # An algebraically consistent $120k caller mark cannot turn $100k
