@@ -111,8 +111,10 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.venue.open_orders(), ())
 
     def test_instrument_exposure_preserves_pending_reservation_cents(self):
-        # Pure snapshot negative control: a small reserved-cent remainder
-        # must survive even under a caller's low Decimal precision.
+        # Each working share contributes max(reserved value, marked shares).
+        # At an $80 mark: max(9999.99, 80) + max(0.01, 80)
+        # = $10,079.99. The tiny cent reservation must not hide the
+        # second share's marked exposure, even at low Decimal precision.
         from alphora.runner import _marked_instrument_exposure
         snap = PaperBookSnapshot(
             cash=D("90000"), reserved_cash=D("10000"),
@@ -129,7 +131,8 @@ class RunnerTests(unittest.TestCase):
                 held, pending = _marked_instrument_exposure(
                     snap, "SPY", D("80.00"))
                 self.assertEqual(held, D("16000.00"))
-                self.assertEqual(pending, D("10000.00"))
+                self.assertEqual(pending, D("10079.99"))
+                self.assertEqual(held + pending, D("26079.99"))
         with self.assertRaisesRegex(ValueError, "INEXACT_PAPER_EXPOSURE"):
             _marked_instrument_exposure(snap, "SPY",
                                         D("0.123456789012345678901234567890123456789012345678901234567890"))
