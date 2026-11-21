@@ -100,6 +100,30 @@ class OfflineReservationTests(unittest.TestCase):
         distinct = self.reserve("new-size", self.proposal(qty="15", stop="49"))
         self.assertEqual(distinct.reserved_cash, D("1750"))
 
+    def test_legacy_alias_after_partial_fill_does_not_reopen_reservation(self):
+        # An OPEN legacy reservation can be partially filled. The remaining
+        # cash hold and persisted fills must survive an alias replay whose
+        # timestamp/Decimal spelling produced a different historical key.
+        original = self.proposal(qty="20", price="50", stop="49")
+        self.reserve("legacy-partial", original)
+        self.book.record_hypothetical_fill(
+            "legacy-partial", "legacy-fill-one", 5, D("50"))
+        before = self.book.snapshot()
+        self.assertEqual(before.positions, (("SPY", 5, D("250")),))
+        self.assertEqual(before.reserved_cash, D("750"))
+        alias = self.proposal(qty="20", price="50.00", stop="49.00")
+        for restart in (False, True):
+            if restart:
+                self.book.close()
+                self.book = OfflineReservations(self.path, session_id="2026-11-02")
+            with self.subTest(restart=restart), self.assertRaisesRegex(
+                    ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+                self.reserve("legacy-partial-alias", alias)
+            self.assertEqual(self.book.snapshot(), before)
+        # An exact-key retry may observe the original partially filled intent
+        # without producing a new cash hold.
+        self.assertEqual(self.reserve("legacy-partial", original), before)
+
     def test_concurrent_legacy_aliases_hold_cash_once_below_instrument_cap(self):
         # Both alias orders fit independently under the 10% cap. Without
         # the transactional semantic collision veto, both would reserve.
