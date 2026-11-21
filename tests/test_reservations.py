@@ -76,6 +76,30 @@ class OfflineReservationTests(unittest.TestCase):
         self.reserve("b", self.proposal(qty="80"))
         self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
 
+    def test_legacy_open_entry_spelling_collision_is_quarantined_across_restart(self):
+        # The original ENTRY hash includes raw Decimal/timestamp spelling.
+        # Re-evaluating the same economic decision under another encoding
+        # must not reserve the same virtual cash a second time.
+        original = self.proposal(qty="20", price="50", stop="49")
+        before = self.reserve("legacy-open", original)
+        alternate = self.proposal(qty="20", price="50.00", stop="49.00")
+        for ident in ("replayed-utc", "replayed-decimal"):
+            with self.subTest(ident=ident), self.assertRaisesRegex(
+                    ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+                self.reserve(ident, alternate)
+            self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        with self.assertRaisesRegex(ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+            self.reserve("after-restart", alternate)
+        self.assertEqual(self.book.snapshot(), before)
+        # The exact original legacy identity remains idempotent.
+        self.assertEqual(self.reserve("legacy-open", original), before)
+        # Different intended position sizes may still be considered subject
+        # to the independent instrument, cash and risk ceilings.
+        distinct = self.reserve("new-size", self.proposal(qty="15", stop="49"))
+        self.assertEqual(distinct.reserved_cash, D("1750"))
+
     def test_cash_only_book_rejects_forged_equity_with_and_without_pending(self):
         # With no fills or SELLs, cash is the entire marked portfolio.
         # An algebraically consistent $120k caller mark cannot turn $100k
