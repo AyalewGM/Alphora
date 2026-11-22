@@ -139,6 +139,20 @@ class TestRisk(unittest.TestCase):
         self.assertEqual(self.decide(proposal=replace(self.buy, existing_instrument_value=D("1"))).reason,
                          "INSTRUMENT_ALLOCATION_EXCEEDED")
 
+    def test_pending_annotation_must_be_nonnegative_finite_and_within_aggregate(self):
+        for bad in (D("-1"), D("NaN"), D("2")):
+            proposal = replace(self.buy, existing_instrument_value=D("1"),
+                               pending_included_value=bad)
+            with self.subTest(bad=bad):
+                self.assertEqual(self.decide(proposal=proposal).reason,
+                                 "INVALID_PENDING_POSITION")
+        proposal = replace(self.buy, existing_instrument_value=D("1"),
+                           pending_included_value=D("1"))
+        # The annotation does not add or subtract any exposure in the
+        # stateless guard; the full aggregate remains authoritative here.
+        self.assertEqual(self.decide(proposal=proposal).reason,
+                         "INSTRUMENT_ALLOCATION_EXCEEDED")
+
     def test_daily_loss_boundary_2000(self):
         self.assertEqual(self.decide(account=replace(self.account, day_pnl=D("-2000"))).reason,
                          "DAILY_LOSS_HALT")

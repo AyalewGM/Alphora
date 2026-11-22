@@ -43,6 +43,36 @@ def _aware(value):
             and value.utcoffset() is not None)
 
 
+def _marked_instrument_exposure(snapshot, symbol, mark):
+    """Return marked holdings and conservative outstanding BUY exposure.
+
+    A pending BUY is valued at the higher of its reserved cash (including
+    fee budget) and the current mark of its unfilled shares. Otherwise a
+    rising mark could understate the eventual instrument allocation while
+    the original limit-price reservation stays unchanged. Acquisition cost
+    is never a substitute for present exposure. Trap inexact arithmetic.
+    """
+    try:
+        with localcontext() as ctx:
+            ctx.prec = 50
+            ctx.traps[Inexact] = True
+            held = sum((D(qty) * mark
+                        for s, qty, _basis in snapshot.positions if s == symbol),
+                       D(0))
+            # Preserve the greater reserved/marked exposure for EACH
+            # working order. max(sum(reserves), sum(marked)) is insufficient
+            # when some limits are above the mark and others below it: that
+            # calculation can net opposite deviations and understate risk.
+            # Reserved amounts may include fee budgets and remain a floor.
+            pending = sum(
+                (max(value, D(qty) * mark)
+                 for _ident, s, qty, value in snapshot.pending
+                 if s == symbol), D(0))
+    except (DecimalException, TypeError, OverflowError) as exc:
+        raise ValueError("INEXACT_PAPER_EXPOSURE") from exc
+    return held, pending
+
+
 @dataclass(frozen=True)
 class SessionSignal:
     scanner_classification: str           # must be "WATCHLIST" to be eligible
@@ -351,9 +381,14 @@ class PaperSessionRunner:
                 if snap.halted:
                     actions.append(f"ENTRY_VETO:{sym}:PAPER_BOOK_HALTED")
                     break
-                held = next((c for s, _q, c in snap.positions if s == sym), D(0))
-                pending = sum((v for i, s, _q, v in snap.pending if s == sym),
-                              D(0))
+                try:
+                    held, pending = _marked_instrument_exposure(
+                        snap, sym, marks[sym])
+                except ValueError as exc:
+                    # A rounded or unrepresentable marked/pending exposure
+                    # cannot authorize this or any later same-session BUY.
+                    actions.append(f"ENTRY_VETO:{sym}:{exc}")
+                    break
                 stop = executable_stops.get(sym, D(0))
                 plan = propose_entry(
                     account,

@@ -15,7 +15,7 @@ separate databases; a crash between them leaves the ledger ahead, which the
 next idempotent sync heals — divergence beyond that is reconciliation's job.
 """
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal as D, DecimalException, localcontext
 
 from ..decision import EntryPlan, ExitPlan
@@ -81,8 +81,17 @@ class PaperOrderManager:
             raise ValueError("INVALID_FRESHNESS_POLICY")
         if (not isinstance(recon, Reconciliation)
                 or recon.session_id != self._ledger.session_id
-                or not _aware(recon.checked_at) or recon.checked_at > now
-                or (now - recon.checked_at).total_seconds() > max_age_seconds):
+                or not _aware(now) or not _aware(recon.checked_at)):
+            raise ValueError("STALE_OR_UNCLEAN_RECONCILIATION")
+        # Same-ZoneInfo comparisons ignore fold and use wall time. Reject
+        # stale or future certificates using absolute instants instead.
+        try:
+            now_utc = now.astimezone(timezone.utc)
+            checked_utc = recon.checked_at.astimezone(timezone.utc)
+        except (OverflowError, ValueError) as exc:
+            raise ValueError("STALE_OR_UNCLEAN_RECONCILIATION") from exc
+        if (checked_utc > now_utc
+                or (now_utc - checked_utc).total_seconds() > max_age_seconds):
             raise ValueError("STALE_OR_UNCLEAN_RECONCILIATION")
         if (recon.status == "FATAL" or
                 any(d.kind == "LOST_ACK" for d in recon.diffs)):
