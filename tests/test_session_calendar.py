@@ -127,8 +127,12 @@ class SessionCalendarTests(unittest.TestCase):
             inspect(good)
         with self.assertRaisesRegex(ValueError, "CALENDAR_HASH_MISMATCH"):
             inspect(expected_sha256="0" * 64)
-        with self.assertRaisesRegex(ValueError, "INVALID_CALENDAR_METADATA"):
-            inspect(as_of=datetime(2026,11,7,tzinfo=UTC))
+        # A prospective schedule may include sessions after its as-of time.
+        prospective = inspect(as_of=datetime(2026,11,7,tzinfo=UTC))
+        self.assertEqual(prospective.session_days, inspect().session_days)
+        self.assertNotEqual(prospective.sha256, inspect().sha256)
+        with self.assertRaisesRegex(ValueError, "INVALID_CALENDAR_DAY"):
+            inspect(as_of=AVAILABLE - timedelta(seconds=1))
         with self.assertRaisesRegex(ValueError, "INVALID_CALENDAR_METADATA"):
             inspect(start=END, end=START)
 
@@ -174,6 +178,22 @@ class SessionCalendarTests(unittest.TestCase):
         good[0] = replace(good[0], venue_halts=(halt,) * 33)
         with self.assertRaisesRegex(ValueError, "INVALID_CALENDAR_DAY"):
             inspect(good)
+
+
+    def test_fallback_fold_availability_is_ordered_by_utc_instant(self):
+        # Both values use the SAME ZoneInfo, but the later absolute time
+        # has an earlier repeated-hour wall clock.
+        early = datetime(2026, 11, 1, 1, 50, tzinfo=ET, fold=0)
+        late = datetime(2026, 11, 1, 1, 20, tzinfo=ET, fold=1)
+        self.assertLess(early.astimezone(UTC), late.astimezone(UTC))
+        records = list(sample())
+        records[0] = replace(records[0], information_available_at=late)
+        with self.assertRaisesRegex(ValueError, "INVALID_CALENDAR_DAY"):
+            inspect(records, as_of=early)
+        # Valid absolute order should not be rejected because wall clock
+        # appears to move backward during the same repeated hour.
+        records[0] = replace(records[0], information_available_at=early)
+        self.assertEqual(inspect(records, as_of=late).as_of, late)
 
 
 if __name__ == "__main__":

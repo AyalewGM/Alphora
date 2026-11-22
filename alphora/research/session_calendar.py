@@ -28,6 +28,11 @@ def _utc(value):
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _instant(value):
+    """Compare aware timestamps as UTC instants, including DST fold hours."""
+    return value.astimezone(timezone.utc)
+
+
 def _local_at(value, day, clock):
     return (_aware(value) and value.astimezone(_ET).date() == day
             and value.astimezone(_ET).time().replace(tzinfo=None) == clock)
@@ -77,12 +82,15 @@ def inspect_session_calendar(days, *, venue_mic, start, end, source, revision,
     The caller must independently verify source/version and decision-time
     availability before using this calendar for a historical strategy claim.
     """
+    # Exchange schedules can be published before their last covered session.
+    # Require each day-level fact to have been available by this snapshot
+    # timestamp; retrospective revisions do not prove early availability.
     if (type(start) is not date or type(end) is not date or start > end
             or (end - start).days >= 366
             or not isinstance(venue_mic, str) or not _MIC.fullmatch(venue_mic)
             or not all(isinstance(x, str) and _ID.fullmatch(x)
                        for x in (source, revision, license_claim))
-            or not _aware(as_of) or as_of.astimezone(_ET).date() < end
+            or not _aware(as_of)
             or type(days) not in (list, tuple)
             or len(days) != (end - start).days + 1
             or (expected_sha256 is not None and
@@ -97,7 +105,7 @@ def inspect_session_calendar(days, *, venue_mic, start, end, source, revision,
                 or item.day != day or type(item.kind) is not str
                 or item.kind not in _KINDS
                 or not _aware(item.information_available_at)
-                or item.information_available_at > as_of
+                or _instant(item.information_available_at) > _instant(as_of)
                 or type(item.venue_halts) is not tuple
                 or len(item.venue_halts) > 32):
             raise ValueError("INVALID_CALENDAR_DAY")
@@ -115,15 +123,16 @@ def inspect_session_calendar(days, *, venue_mic, start, end, source, revision,
                     or not _local_at(item.opens_at, day, time(9, 30))
                     or not _local_at(item.closes_at, day,
                                      time(13) if item.kind == "EARLY_CLOSE" else time(16))
-                    or item.opens_at >= item.closes_at):
+                    or _instant(item.opens_at) >= _instant(item.closes_at)):
                 raise ValueError("INVALID_TRADING_SESSION")
         halts = []
         previous_end = None
         for halt in item.venue_halts:
             if (not isinstance(halt, VenueHalt)
                     or not _aware(halt.begins_at) or not _aware(halt.ends_at)
-                    or not item.opens_at <= halt.begins_at < halt.ends_at <= item.closes_at
-                    or (previous_end is not None and halt.begins_at < previous_end)):
+                    or not (_instant(item.opens_at) <= _instant(halt.begins_at)
+                            < _instant(halt.ends_at) <= _instant(item.closes_at))
+                    or (previous_end is not None and _instant(halt.begins_at) < _instant(previous_end))):
                 raise ValueError("INVALID_VENUE_HALT")
             previous_end = halt.ends_at
             halts.append({"begins_utc": _utc(halt.begins_at),
