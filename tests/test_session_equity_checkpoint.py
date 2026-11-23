@@ -502,12 +502,14 @@ class SessionEquityCheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INVALID_SESSION_STARTING_EQUITY"):
             self.store.bootstrap("2026-11-02", D("100000"), A,
                                  proven_new_book=True, policy=policy)
-        # Older inert-config constructors can accept tiny fractions whose
-        # expanded canonical text exceeds the bounded proposal wire domain.
-        tiny = PaperRiskConfig(risk_per_trade_fraction=D("1e-63"))
-        with self.assertRaisesRegex(ValueError, "INVALID_SESSION_POLICY"):
-            self.store.bootstrap("2026-11-02", D("100000"), A,
-                                 proven_new_book=True, policy=tiny)
+        # An unbounded fractional policy fails at proposal construction,
+        # before it can enter the session checkpoint or its audit receipt.
+        # 1e-62 remains the 64-character canonical wire boundary.
+        boundary = PaperRiskConfig(risk_per_trade_fraction=D("1e-62"))
+        self.assertEqual(len(boundary.to_wire()["risk_per_trade_fraction"]), 64)
+        self.assertEqual(PaperRiskConfig.from_wire(boundary.to_wire()), boundary)
+        with self.assertRaisesRegex(ValueError, "INVALID_PAPER_RISK_CONFIG"):
+            PaperRiskConfig(risk_per_trade_fraction=D("1e-63"))
         with self.assertRaisesRegex(ValueError, "INVALID_SESSION_POLICY"):
             self.store.bootstrap("2026-11-02", D("100000"), A,
                                  proven_new_book=True, policy=object())
