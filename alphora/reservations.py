@@ -475,6 +475,22 @@ class OfflineReservations:
                 if existing[5] == "CANCELLED":
                     raise ValueError("CANCELLED_INTENT_ID")
                 return self._snapshot()  # stable dedupe, no second reservation
+            # Pre-canonical ENTRY keys hashed raw timezone and Decimal
+            # spellings. A semantically identical OPEN reservation might
+            # therefore have a different legacy ID after a restart/replay.
+            # Quarantine the ambiguity INSIDE the SQLite write transaction,
+            # before another cash hold can be created by concurrent callers.
+            # Preserve old IDs and their ledger/venue links unchanged.
+            # Cancelled/settled intents remain subject to their existing
+            # lifecycle rules; this is containment, not canonical migration.
+            for prior_id, prior_qty, prior_limit, prior_stop in self._db.execute(
+                    "SELECT id,qty,limit_price,stop_price FROM buy_intents "
+                    "WHERE symbol=? AND status='OPEN'", (proposal.symbol,)):
+                if (prior_id != intent_id
+                        and D(prior_qty) == proposal.quantity
+                        and D(prior_limit) == proposal.price
+                        and D(prior_stop) == proposal.stop_price):
+                    raise ValueError("RISK_VETO:AMBIGUOUS_LEGACY_ENTRY_INTENT")
             if (not _money(proposal.existing_instrument_value)
                     or not _money(proposal.pending_included_value)
                     or not _money(proposal.price, positive=True)

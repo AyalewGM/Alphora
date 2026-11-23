@@ -76,6 +76,81 @@ class OfflineReservationTests(unittest.TestCase):
         self.reserve("b", self.proposal(qty="80"))
         self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
 
+    def test_legacy_open_entry_spelling_collision_is_quarantined_across_restart(self):
+        # The original ENTRY hash includes raw Decimal/timestamp spelling.
+        # Re-evaluating the same economic decision under another encoding
+        # must not reserve the same virtual cash a second time.
+        original = self.proposal(qty="20", price="50", stop="49")
+        before = self.reserve("legacy-open", original)
+        alternate = self.proposal(qty="20", price="50.00", stop="49.00")
+        for ident in ("replayed-utc", "replayed-decimal"):
+            with self.subTest(ident=ident), self.assertRaisesRegex(
+                    ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+                self.reserve(ident, alternate)
+            self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        with self.assertRaisesRegex(ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+            self.reserve("after-restart", alternate)
+        self.assertEqual(self.book.snapshot(), before)
+        # The exact original legacy identity remains idempotent.
+        self.assertEqual(self.reserve("legacy-open", original), before)
+        # Different intended position sizes may still be considered subject
+        # to the independent instrument, cash and risk ceilings.
+        distinct = self.reserve("new-size", self.proposal(qty="15", stop="49"))
+        self.assertEqual(distinct.reserved_cash, D("1750"))
+
+    def test_legacy_alias_after_partial_fill_does_not_reopen_reservation(self):
+        # An OPEN legacy reservation can be partially filled. The remaining
+        # cash hold and persisted fills must survive an alias replay whose
+        # timestamp/Decimal spelling produced a different historical key.
+        original = self.proposal(qty="20", price="50", stop="49")
+        self.reserve("legacy-partial", original)
+        self.book.record_hypothetical_fill(
+            "legacy-partial", "legacy-fill-one", 5, D("50"))
+        before = self.book.snapshot()
+        self.assertEqual(before.positions, (("SPY", 5, D("250")),))
+        self.assertEqual(before.reserved_cash, D("750"))
+        alias = self.proposal(qty="20", price="50.00", stop="49.00")
+        for restart in (False, True):
+            if restart:
+                self.book.close()
+                self.book = OfflineReservations(self.path, session_id="2026-11-02")
+            with self.subTest(restart=restart), self.assertRaisesRegex(
+                    ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+                self.reserve("legacy-partial-alias", alias)
+            self.assertEqual(self.book.snapshot(), before)
+        # An exact-key retry may observe the original partially filled intent
+        # without producing a new cash hold.
+        self.assertEqual(self.reserve("legacy-partial", original), before)
+
+    def test_concurrent_legacy_aliases_hold_cash_once_below_instrument_cap(self):
+        # Both alias orders fit independently under the 10% cap. Without
+        # the transactional semantic collision veto, both would reserve.
+        attempts = []
+        def attempt(ident, spelling):
+            connection = OfflineReservations(self.path, session_id="2026-11-02")
+            try:
+                proposal = BuyProposal("SPY", D("20"), D(spelling), D("49"))
+                connection.reserve_buy(ident, PaperAccount(
+                    D("100000"), D("100000"), D("100000"), D("0"),
+                    "2026-11-02"), proposal, reconciled=True)
+                attempts.append("reserved")
+            except ValueError as exc:
+                attempts.append(str(exc))
+            finally:
+                connection.close()
+        jobs = [threading.Thread(target=attempt, args=("old", "50")),
+                threading.Thread(target=attempt, args=("new", "50.00"))]
+        for job in jobs:
+            job.start()
+        for job in jobs:
+            job.join()
+        self.assertEqual(attempts.count("reserved"), 1)
+        self.assertEqual(sum("AMBIGUOUS_LEGACY_ENTRY_INTENT" in a
+                             for a in attempts), 1)
+        self.assertEqual(self.book.snapshot().reserved_cash, D("1000"))
+
     def test_cash_only_book_rejects_forged_equity_with_and_without_pending(self):
         # With no fills or SELLs, cash is the entire marked portfolio.
         # An algebraically consistent $120k caller mark cannot turn $100k

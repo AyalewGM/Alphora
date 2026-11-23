@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from alphora.broker.base import DispatchAck, DispatchRequest
 from alphora.broker.manager import PaperOrderManager
 from alphora.broker.paper import PaperBrokerAdapter
-from alphora.decision import EntryPlan, ExitPlan
+from alphora.decision import EntryCandidate, EntryPlan, ExitPlan, propose_entry
 from alphora.orders import OrderLedger
 from alphora.reconcile import reconcile
 from alphora.reservations import OfflineReservations
@@ -113,6 +113,90 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(len(self.venue.open_orders()), 1)
         self.assertEqual(len(self.ledger.orders()), 1)
         self.assertEqual(self.book.snapshot().reserved_cash, D("5000"))
+
+    def test_legacy_semantic_entry_collision_never_reaches_paper_venue(self):
+        original = self.entry(qty="20", price="50", stop="49")
+        first = self.mgr.execute_entry(original, self.account(),
+                                       recon=self.recon(), now=at(),
+                                       reconciled=True)
+        self.assertEqual(first.status, "ACKED")
+        before_book = self.book.snapshot()
+        before_ledger = self.ledger.orders()
+        before_venue = self.venue.open_orders()
+        # Same order terms, a different ID (as generated from alternate
+        # timestamp/Decimal spellings by the historical decision hash).
+        alias = self.entry("b" * 64, qty="20", price="50.00", stop="49.00")
+        with self.assertRaisesRegex(ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+            self.mgr.execute_entry(alias, self.account(),
+                                   recon=self.recon(at(1)), now=at(1),
+                                   reconciled=True)
+        self.assertEqual(self.book.snapshot(), before_book)
+        self.assertEqual(self.ledger.orders(), before_ledger)
+        self.assertEqual(self.venue.open_orders(), before_venue)
+        self.reopen()
+        with self.assertRaisesRegex(ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+            self.mgr.execute_entry(alias, self.account(),
+                                   recon=self.recon(at(2)), now=at(2),
+                                   reconciled=True)
+        self.assertEqual(self.book.snapshot(), before_book)
+        self.assertEqual(self.ledger.orders(), before_ledger)
+        self.assertEqual(self.venue.open_orders(), before_venue)
+
+    def test_generated_quote_aliases_do_not_duplicate_paper_dispatch(self):
+        # The historical entry hash uses raw timestamp/Decimal spellings.
+        # Plan all three encodings against the SAME pre-reservation snapshot:
+        # both independently fit the 10% cap, so an allocation veto alone
+        # cannot demonstrate cross-encoding replay safety.
+        source = EntryCandidate(
+            "SPY", D("50"), D("40"), at(), "WATCHLIST", "VERIFIED",
+            D("50"), "SPY", True)
+        variants = (
+            source,
+            replace(source, observed_at=at().astimezone(
+                ZoneInfo("America/New_York"))),
+            replace(source, price=D("50.00"), ask=D("50.00"),
+                    stop_price=D("40.00")),
+        )
+        def make_plan(candidate):
+            plan = propose_entry(
+                self.account(), candidate, as_of=at(),
+                expected_session_id="2026-11-02", reserved_cash=D(0),
+                reconciled=True)
+            self.assertTrue(plan.permitted)
+            self.assertEqual(plan.proposal.quantity, D("50"))
+            return plan
+        original, *aliases = (make_plan(candidate) for candidate in variants)
+        self.assertTrue(all(p.proposal == original.proposal for p in aliases))
+        first = self.mgr.execute_entry(
+            original, self.account(), recon=self.recon(), now=at(),
+            reconciled=True)
+        self.assertEqual(first.status, "ACKED")
+        before_book = self.book.snapshot()
+        before_ledger = self.ledger.orders()
+        before_venue = self.venue.open_orders()
+        self.assertEqual(before_book.reserved_cash, D("2500"))
+        # A future canonical key may match the original, in which case
+        # normal exact-ID replay is appropriate. With legacy distinct IDs,
+        # the book must quarantine the ambiguity before venue dispatch.
+        for restart in (False, True):
+            if restart:
+                self.reopen()
+            for alias in aliases:
+                if alias.intent_key == original.intent_key:
+                    self.assertEqual(
+                        self.mgr.execute_entry(
+                            alias, self.account(), recon=self.recon(at(2)),
+                            now=at(2), reconciled=True),
+                        first)
+                else:
+                    with self.assertRaisesRegex(
+                            ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+                        self.mgr.execute_entry(
+                            alias, self.account(), recon=self.recon(at(2)),
+                            now=at(2), reconciled=True)
+                self.assertEqual(self.book.snapshot(), before_book)
+                self.assertEqual(self.ledger.orders(), before_ledger)
+                self.assertEqual(self.venue.open_orders(), before_venue)
 
     def test_entry_venue_reject_releases_reservation(self):
         class RejectingVenue(PaperBrokerAdapter):
