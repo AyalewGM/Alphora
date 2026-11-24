@@ -1,4 +1,4 @@
-"""Atomically persist an offline portfolio mark's 2% loss halt in the paper book.
+"""Atomically persist a session-pinned offline loss halt in the paper book.
 
 This deliberately uses existing OfflineReservations SQLite transaction and
 persisted halt key rather than creating a second, inconsistent risk store.
@@ -57,6 +57,11 @@ def observe_offline_portfolio_mark(
         snapshot = book._snapshot()
         if snapshot.pending:
             return ObservedPortfolioMark(False, "PENDING_ORDER_RECONCILIATION")
+        # snapshot.halted includes the temporary CHECKING/FATAL guard.
+        # Value using the durable halt flag instead: a safe quote during
+        # CHECKING must not become a terminal loss halt, while a true breach
+        # must still persist even if the public snapshot is already halted.
+        persistent_halt = book._meta("halted") == "1"
         input_snapshot = PortfolioMarkInput(
             session_id=snapshot.session_id,
             session_open_equity=INITIAL_EQUITY,
@@ -65,11 +70,11 @@ def observe_offline_portfolio_mark(
                             for sym, qty, _basis in snapshot.positions),
             reconciled=True,
             pending_state_clear=True,
-            halted=snapshot.halted,
+            halted=persistent_halt,
         )
         mark = mark_reconciled_paper_portfolio(
             input_snapshot, quotes, as_of=as_of, mode=mode,
-            session_verified=session_verified,
+            session_verified=session_verified, policy=book._policy,
         )
         if not mark.valid or mark.account is None:
             return ObservedPortfolioMark(False, mark.reason)
@@ -77,13 +82,15 @@ def observe_offline_portfolio_mark(
                 or mark.account.session_id != snapshot.session_id):
             # Defense in depth against mismatched local accounting inputs.
             return ObservedPortfolioMark(False, "ACCOUNT_RECONCILIATION_FAILED")
-        if mark.halt_required and not snapshot.halted:
+        if mark.halt_required and not persistent_halt:
             cursor = book._db.execute(
                 "UPDATE book_meta SET value='1' WHERE key='halted' AND value='0'"
             )
             if cursor.rowcount != 1:
                 raise ValueError("PERSISTENT_HALT_UPDATE_FAILED")
         confirmed = book._snapshot()
-        if mark.halt_required and not confirmed.halted:
+        if mark.halt_required and book._meta("halted") != "1":
+            # A CHECKING/FATAL guard cannot prove the terminal loss halt
+            # survived; require the durable storage bit inside this txn.
             raise ValueError("PERSISTENT_HALT_VERIFICATION_FAILED")
         return ObservedPortfolioMark(True, mark.reason, mark, confirmed)

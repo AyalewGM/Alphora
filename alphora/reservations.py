@@ -387,7 +387,11 @@ class OfflineReservations:
             raise ValueError("INVALID_OR_UNRECONCILED_ACCOUNT")
         with self._write():
             snapshot = self._snapshot()
-            if snapshot.halted:
+            # The public snapshot is also halted while reconciliation is
+            # CHECKING/FATAL. Only an already-persisted terminal halt may
+            # skip the loss observer: the guard must not swallow a real
+            # breached mark that needs a permanent book_meta write.
+            if self._meta("halted") == "1":
                 return snapshot
             if (account.session_id != snapshot.session_id
                     or account.session_open_equity != INITIAL_EQUITY
@@ -443,6 +447,11 @@ class OfflineReservations:
         # Preserve the established already-halted rejection contract while
         # recording new loss observations even on idempotent retries.
         if self.snapshot().halted:
+            # A temporary reconciliation quarantine must still reject BUYs,
+            # but must not swallow a reconciled breach on this entry path.
+            # The observer skips an already-persisted terminal halt and
+            # commits any new one before we raise outside its transaction.
+            self.observe_daily_loss(account, reconciled=reconciled)
             raise ValueError("PAPER_BOOK_HALTED")
         observed = self.observe_daily_loss(account, reconciled=reconciled)
         if observed.halted:

@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from alphora.offline_portfolio_mark import SourceQuote
 from alphora.offline_portfolio_observer import observe_offline_portfolio_mark
 from alphora.reservations import OfflineReservations
-from alphora.risk import BuyProposal, PaperAccount, INITIAL_EQUITY
+from alphora.risk import BuyProposal, PaperAccount, INITIAL_EQUITY, RiskPolicy
 
 ET = ZoneInfo("America/New_York")
 NOW = datetime(2026, 11, 9, 10, 0, tzinfo=ET)
@@ -91,6 +91,121 @@ class OfflinePortfolioObserverTests(unittest.TestCase):
         self.book = OfflineReservations(self.path, session_id=SESSION)
         self.assertTrue(self.book.snapshot().halted)
         self.assertTrue(self.observe((q(bid="111", ask="111.1"),)).book.halted)
+
+    def test_clean_guard_does_not_turn_safe_mark_into_terminal_halt(self):
+        self.buy()
+        token = self.book.begin_reconciliation()
+        self.assertTrue(self.book.snapshot().halted)
+        safe = self.observe((q(bid="90", ask="90.1"),))
+        self.assertTrue(safe.valid)
+        self.assertFalse(safe.mark.halt_required)
+        self.assertEqual(safe.mark.account.equity, D("99000"))
+        self.assertEqual(self.book._meta("halted"), "0")
+        self.assertFalse(self.book.finish_reconciliation(token, fatal=False))
+        self.assertFalse(self.book.snapshot().halted)
+
+    def test_breached_mark_during_clean_check_remains_terminally_halted(self):
+        self.buy()
+        token = self.book.begin_reconciliation()
+        breached = self.observe((q(bid="79", ask="79.1"),))
+        self.assertTrue(breached.valid)
+        self.assertTrue(breached.mark.halt_required)
+        self.assertEqual(breached.mark.account.equity, D("97900"))
+        self.assertEqual(self.book._meta("halted"), "1")
+        self.assertFalse(self.book.finish_reconciliation(token, fatal=False))
+        self.assertTrue(self.book.snapshot().halted)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id=SESSION)
+        self.assertTrue(self.book.snapshot().halted)
+        self.assertEqual(self.book._meta("halted"), "1")
+
+    def test_tightened_book_policy_latches_quote_loss_and_survives_restart(self):
+        tightened = RiskPolicy(daily_loss_fraction=D("0.01"))
+        path = Path(self.temp.name) / "tightened.sqlite"
+        book = OfflineReservations(path, session_id=SESSION, policy=tightened)
+        try:
+            acct = PaperAccount(INITIAL_EQUITY, INITIAL_EQUITY,
+                                INITIAL_EQUITY, D("0"), SESSION)
+            book.reserve_buy(
+                "tightened-buy", acct,
+                BuyProposal("SPY", D("100"), D("100"), D("99")),
+                reconciled=True,
+            )
+            book.record_hypothetical_fill(
+                "tightened-buy", "tightened-fill", 100, D("100")
+            )
+            def observe(bid):
+                return observe_offline_portfolio_mark(
+                    book, (q(bid=bid, ask="90.10"),),
+                    as_of=NOW, reconciled=True, session_verified=True,
+                )
+            safe = observe("90.01")
+            self.assertTrue(safe.valid)
+            self.assertEqual(safe.mark.account.equity, D("99001"))
+            self.assertFalse(safe.mark.halt_required)
+            self.assertEqual(book._meta("halted"), "0")
+            boundary = observe("90.00")
+            self.assertTrue(boundary.valid)
+            self.assertEqual(boundary.mark.account.equity, D("99000"))
+            self.assertTrue(boundary.mark.halt_required)
+            self.assertEqual(book._meta("halted"), "1")
+            book.close()
+            book = OfflineReservations(path, session_id=SESSION, policy=tightened)
+            self.assertTrue(book.snapshot().halted)
+            with self.assertRaisesRegex(ValueError, "BOOK_REOPEN_MISMATCH"):
+                OfflineReservations(path, session_id=SESSION)
+        finally:
+            book.close()
+
+
+    def test_tightened_loss_during_reconciliation_remains_halted_after_clean(self):
+        # Cross-PR regression: #74's temporary guard must not swallow #75's
+        # stricter session-pinned 1% loss threshold.
+        tightened = RiskPolicy(daily_loss_fraction=D("0.01"))
+        path = Path(self.temp.name) / "tightened-check.sqlite"
+        book = OfflineReservations(path, session_id=SESSION, policy=tightened)
+        try:
+            account = PaperAccount(INITIAL_EQUITY, INITIAL_EQUITY,
+                                   INITIAL_EQUITY, D("0"), SESSION)
+            book.reserve_buy(
+                "check-buy", account,
+                BuyProposal("SPY", D("100"), D("100"), D("99")),
+                reconciled=True,
+            )
+            book.record_hypothetical_fill("check-buy", "check-fill", 100, D("100"))
+            token = book.begin_reconciliation()
+            self.assertIsNotNone(token)
+            self.assertTrue(book.snapshot().halted)  # temporary BUY veto
+            self.assertEqual(book._meta("halted"), "0")
+            safe = observe_offline_portfolio_mark(
+                book, (q(bid="90.01", ask="90.10"),),
+                as_of=NOW, reconciled=True, session_verified=True,
+            )
+            self.assertTrue(safe.valid)
+            self.assertEqual(safe.mark.account.equity, D("99001"))
+            self.assertFalse(safe.mark.halt_required)
+            self.assertEqual(book._meta("halted"), "0")
+            breach = observe_offline_portfolio_mark(
+                book, (q(bid="90.00", ask="90.10"),),
+                as_of=NOW, reconciled=True, session_verified=True,
+            )
+            self.assertTrue(breach.valid)
+            self.assertEqual(breach.mark.account.equity, D("99000"))
+            self.assertTrue(breach.mark.halt_required)
+            self.assertEqual(book._meta("halted"), "1")
+            self.assertFalse(book.finish_reconciliation(token, fatal=False))
+            self.assertTrue(book.snapshot().halted)
+            book.close()
+            book = OfflineReservations(path, session_id=SESSION, policy=tightened)
+            self.assertEqual(book._meta("halted"), "1")
+            with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+                book.reserve_buy(
+                    "after-clean-loss", account,
+                    BuyProposal("QQQ", D("1"), D("100"), D("99")),
+                    reconciled=True,
+                )
+        finally:
+            book.close()
 
     def test_pending_orders_block_quote_observation(self):
         before = self.buy(fill=False)
