@@ -341,9 +341,15 @@ class PaperOrderManager:
                 # acknowledged/in-flight states before exposing the error.
                 # Keep ledger, receipts and reservations unchanged.
                 self._book.finish_reconciliation(None, fatal=True)
-                if view.status == "SENT":
-                    raise RuntimeError("PAPER_VENUE_RECOVERY_REQUIRED")
-                raise RuntimeError("VENUE_ORDER_MISSING")
+                error = RuntimeError(
+                    "PAPER_VENUE_RECOVERY_REQUIRED" if view.status == "SENT"
+                    else "VENUE_ORDER_MISSING")
+                # Recover only independently verified unfilled terminal holds.
+                # Exclude the missing order even if a repeat lookup changes.
+                for diagnostic in self._settle_quarantined_zero_fill_terminals(
+                        now=now, exclude_order_id=view.client_order_id):
+                    error.add_note(diagnostic)
+                raise error
             if view.status == "SENT":
                 view = self._ledger.mark_acked(view.client_order_id,
                                                venue.broker_order_id, now=now)
@@ -374,20 +380,23 @@ class PaperOrderManager:
                 actions.append(f"EXPIRED:{view.client_order_id}")
         return tuple(actions)
 
-    def _settle_quarantined_zero_fill_terminals(self, *, now):
+    def _settle_quarantined_zero_fill_terminals(self, *, now,
+                                               exclude_order_id=None):
         """Bounded recovery only: no fill application or order dispatch.
 
         Also inspect ledger-terminal orders with a remaining hold, so a crash
         between terminal ledger transition and release can be retried. A
         conflicting or partially filled order is never released by this path.
         Return order-scoped book divergence diagnostics without suppressing
-        unexpected errors; the caller preserves the primary receipt veto.
+        unexpected errors; the caller preserves the primary reconciliation veto.
+        Exclude an order whose lookup already failed in this sync attempt.
         """
         diagnostics = []
         pending = {ident for ident, _sym, _qty, _value
                    in self._book.snapshot().pending}
         for view in self._ledger.orders():
-            if (view.side != "BUY" or view.client_order_id not in pending
+            if (view.client_order_id == exclude_order_id
+                    or view.side != "BUY" or view.client_order_id not in pending
                     or view.filled != 0 or not view.broker_order_id
                     or view.status not in ("ACKED", "CANCEL_PENDING",
                                            "CANCELLED", "EXPIRED")):
