@@ -570,6 +570,51 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.book.snapshot(), settled)
         self.assertEqual(len(self.ledger.fills(KEY)), 1)
 
+    def test_cold_terminal_buy_loss_latches_quarantine(self):
+        """A terminal ledger receipt is not proof of book settlement."""
+        from unittest.mock import patch
+
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        clean = self.recon(at(1))
+        self.assertEqual(clean.status, "CLEAN")
+        before = self.book.snapshot()
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(2))
+        terminal = self.ledger.get(KEY)
+        receipts = self.ledger.fills(KEY)
+        self.assertEqual(terminal.status, "FILLED")
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(self.book.snapshot(), before)
+        self.assertEqual(before.reserved_cash, D("5000"))
+        self.assertEqual(before.cash, D("100000"))
+        self.assertEqual(before.positions, ())
+        self.assertEqual(self.venue.account_snapshot().cash, D("95100"))
+
+        # Lose the entire volatile venue, not just a single lookup.
+        self.venue = PaperBrokerAdapter()
+        self.reopen()
+        for tick in (3, 4):
+            with self.assertRaisesRegex(RuntimeError, "^TERMINAL_BUY_ORDER_DIVERGENCE$"):
+                self.mgr.sync(now=at(tick))
+            self.assertTrue(self.book.reconciliation_guarded())
+            self.assertEqual(self.book.snapshot(), replace(before, halted=True))
+            self.assertEqual(self.ledger.get(KEY), terminal)
+            self.assertEqual(self.ledger.fills(KEY), receipts)
+            # The old CLEAN certificate is still young enough to be reused.
+            # Quarantine must independently prevent a new risk-adding order.
+            with self.assertRaisesRegex(ValueError, "^PAPER_BOOK_HALTED$"):
+                self.mgr.execute_entry(self.entry("d" * 64, symbol="QQQ"),
+                                       self.account(), recon=clean,
+                                       now=at(tick), reconciled=True)
+            self.assertIsNone(self.ledger.get("d" * 64))
+            self.assertEqual(self.venue.open_orders(), ())
+            self.assertEqual(self.venue.account_snapshot().cash, D("100000"))
+            self.reopen()
+            self.assertTrue(self.book.reconciliation_guarded())
+
     def test_terminal_buy_recovery_rejects_conflicting_venue_receipt(self):
         from unittest.mock import patch
 
