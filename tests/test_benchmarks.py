@@ -14,6 +14,24 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(r.excess_vs_capped_buy_hold,D(0))
         self.assertGreater(r.fully_invested_spy_proxy.total_return,
                            r.constrained_spy_proxy.total_return)
+    def test_initial_allocation_buy_hold_can_drift_above_cap(self):
+        # The legacy benchmark is an initial-entry budget, not an ongoing
+        # marked exposure control. Synthetic prices, no fees or dividends.
+        bars = [
+            Bar(date(2025, 1, 2), D("100"), D("100"), D("100"), D("100"), 1000),
+            Bar(date(2025, 1, 3), D("100"), D("100"), D("100"), D("100"), 1000),
+            Bar(date(2025, 1, 6), D("200"), D("200"), D("200"), D("200"), 1000),
+        ]
+        result = compare_with_spy(bars, bars, "buy_hold", cost_bps=D(0))
+        proxy = result.constrained_spy_proxy
+        self.assertEqual(proxy.transactions, 1)
+        self.assertEqual(proxy.equity_curve, (D("100000"), D("100000"), D("110000")))
+        self.assertEqual(proxy.total_return, D("0.1"))
+        # 100 shares bought at $100, now $20k; unchanged $90k cash.
+        marked_value = proxy.final_equity - D("90000")
+        self.assertEqual(marked_value, D("20000"))
+        self.assertGreater(marked_value, D("0.10") * proxy.final_equity)
+
     def test_date_mismatch_rejected(self):
         other=self.bars.copy()
         other[-1]=replace(other[-1],day=other[-1].day+timedelta(days=1))
