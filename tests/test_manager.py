@@ -647,6 +647,81 @@ class ManagerTests(unittest.TestCase):
         self.mgr.sync(now=at(4))
         self.assertEqual(self.book.snapshot(), settled)
 
+    def _assert_terminal_receipt_conflict_isolates_unrelated_terminal(self,
+                                                                   terminal_status):
+        """A conflicting terminal BUY receipt must not strand a verified hold."""
+        from unittest.mock import patch
+
+        other = "b" * 64
+        first = self.mgr.execute_entry(self.entry(), self.account(),
+                                       recon=self.recon(), now=at(),
+                                       reconciled=True)
+        second = self.mgr.execute_entry(self.entry(other, symbol="QQQ"),
+                                        self.account(), recon=self.recon(at(1)),
+                                        now=at(1), reconciled=True)
+        before = self.book.snapshot()
+        self.assertEqual(before.reserved_cash, D("10000"))
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(2))
+        terminal = self.ledger.get(KEY)
+        receipts = self.ledger.fills(KEY)
+        self.assertEqual(terminal.status, "FILLED")
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(self.book.snapshot(), before)
+        if terminal_status == "CANCELLED":
+            self.venue.cancel(second.broker_order_id)
+        else:
+            self.venue.expire_session(at=at(3))
+        self.assertEqual(self.venue.order_status(second.broker_order_id).status,
+                         terminal_status)
+        self.assertEqual(self.venue.fills(second.broker_order_id), ())
+        lookup = self.venue.fills
+        receipt, = lookup(first.broker_order_id)
+
+        def conflicting_first(order_id):
+            if order_id == first.broker_order_id:
+                return (replace(receipt, price=D("48.99")),)
+            return lookup(order_id)
+
+        with patch.object(self.venue, "fills", side_effect=conflicting_first):
+            for tick in (4, 5):
+                with self.assertRaisesRegex(RuntimeError,
+                                            "^TERMINAL_BUY_FILL_DIVERGENCE$"):
+                    self.mgr.sync(now=at(tick))
+                self.assertTrue(self.book.reconciliation_guarded())
+                self.assertEqual(self.ledger.get(KEY), terminal)
+                self.assertEqual(self.ledger.fills(KEY), receipts)
+                self.assertEqual(self.ledger.get(other).status, terminal_status)
+                self.assertEqual(self.ledger.fills(other), ())
+                remaining = self.book.snapshot()
+                self.assertEqual(remaining.reserved_cash, D("5000"))
+                self.assertEqual({row[0] for row in remaining.pending}, {KEY})
+                self.assertEqual(remaining.cash, D("100000"))
+                self.assertEqual(remaining.positions, ())
+                self.reopen()
+                self.assertEqual(self.book.snapshot(), remaining)
+                self.assertTrue(self.book.reconciliation_guarded())
+
+        # Restoring the original evidence may settle only the actual fill.
+        self.mgr.sync(now=at(6))
+        settled = self.book.snapshot()
+        self.assertEqual(settled.cash, D("95100"))
+        self.assertEqual(settled.reserved_cash, D(0))
+        self.assertEqual(settled.positions, (("SPY", 100, D("4900")),))
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.ledger.fills(KEY), receipts)
+        self.reopen()
+        self.mgr.sync(now=at(7))
+        self.assertEqual(self.book.snapshot(), settled)
+
+    def test_terminal_receipt_conflict_isolates_unrelated_cancellation(self):
+        self._assert_terminal_receipt_conflict_isolates_unrelated_terminal("CANCELLED")
+
+    def test_terminal_receipt_conflict_isolates_unrelated_expiration(self):
+        self._assert_terminal_receipt_conflict_isolates_unrelated_terminal("EXPIRED")
+
     def _assert_terminal_buy_reservation_divergence(self, field, value):
         import sqlite3
         from contextlib import closing
