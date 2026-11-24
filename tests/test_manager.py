@@ -565,6 +565,84 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(len(self.ledger.fills(KEY)), 1)
         self.assertEqual(len(self.ledger.orders()), 3)
 
+    def test_quarantined_cancel_isolates_corrupt_reservation(self):
+        import sqlite3
+        from contextlib import closing
+
+        corrupt, valid = "b" * 64, "c" * 64
+        for index, (ident, symbol) in enumerate(
+                ((KEY, "SPY"), (corrupt, "QQQ"), (valid, "IWM"))):
+            self.mgr.execute_entry(
+                self.entry(ident, symbol=symbol), self.account(),
+                recon=self.recon(at(index)), now=at(index), reconciled=True)
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$"):
+            self.mgr.advance({"SPY": D("47")}, at=at(3))
+        with closing(sqlite3.connect(Path(self.tmp.name) / "book.sqlite")) as db:
+            with db:
+                db.execute("UPDATE buy_intents SET symbol=? WHERE id=?",
+                           ("DIA", corrupt))
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$") as err:
+            self.mgr.cancel(corrupt, now=at(4))
+        self.assertIn("TERMINAL_CANCEL_RESERVATION_DIVERGENCE:" + corrupt,
+                      getattr(err.exception, "__notes__", ()))
+        self.assertEqual(self.book.snapshot().reserved_cash, D("15000"))
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$") as err:
+            self.mgr.cancel(valid, now=at(5))
+        self.assertIn("TERMINAL_CANCEL_RESERVATION_DIVERGENCE:" + corrupt,
+                      getattr(err.exception, "__notes__", ()))
+        self.assertEqual(self.ledger.get(corrupt).status, "CANCELLED")
+        self.assertEqual(self.ledger.get(valid).status, "CANCELLED")
+        remaining = self.book.snapshot()
+        self.assertEqual(remaining.cash, D("100000"))
+        self.assertEqual(remaining.positions, ())
+        self.assertEqual(remaining.reserved_cash, D("10000"))
+        self.assertEqual({row[0] for row in remaining.pending}, {KEY, corrupt})
+        self.reopen()
+        self.assertTrue(self.book.reconciliation_guarded())
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$"):
+            self.mgr.sync(now=at(6))
+        self.assertEqual(self.book.snapshot(), remaining)
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+
+    def test_quarantined_expiry_retries_interrupted_hold_release(self):
+        from unittest.mock import patch
+
+        other = "b" * 64
+        for index, (ident, symbol) in enumerate(((KEY, "SPY"), (other, "QQQ"))):
+            self.mgr.execute_entry(
+                self.entry(ident, symbol=symbol), self.account(),
+                recon=self.recon(at(index)), now=at(index), reconciled=True)
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$"):
+            self.mgr.advance({"SPY": D("47")}, at=at(2))
+        # Fail after the terminal ledger commit but before the book write.
+        # An unexpected storage error must not be treated as order divergence.
+        with patch.object(OfflineReservations, "cancel_remaining",
+                          side_effect=RuntimeError("INJECTED_RELEASE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "^INJECTED_RELEASE_FAILURE$"):
+                self.mgr.expire_session(at=at(3))
+        self.assertEqual(self.ledger.get(other).status, "EXPIRED")
+        self.assertTrue(self.book.reconciliation_guarded())
+        interrupted = self.book.snapshot()
+        self.assertEqual(interrupted.reserved_cash, D("10000"))
+        self.assertEqual(interrupted.cash, D("100000"))
+        self.assertEqual(interrupted.positions, ())
+        self.reopen()
+        self.assertEqual(self.book.snapshot(), interrupted)
+        self.assertTrue(self.book.reconciliation_guarded())
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$"):
+            self.mgr.sync(now=at(4))
+        settled = self.book.snapshot()
+        self.assertEqual(settled.reserved_cash, D("5000"))
+        self.assertEqual({row[0] for row in settled.pending}, {KEY})
+        self.assertEqual(settled.cash, interrupted.cash)
+        self.assertEqual(settled.positions, ())
+        self.assertTrue(self.book.reconciliation_guarded())
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$"):
+            self.mgr.sync(now=at(5))
+        self.assertEqual(self.book.snapshot(), settled)
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.assertEqual(len(self.ledger.orders()), 2)
+
     def test_terminal_buy_recovery_retains_loss_halt(self):
         from unittest.mock import patch
 
