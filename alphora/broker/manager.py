@@ -327,7 +327,8 @@ class PaperOrderManager:
             # Keep the original error visible, but permit independently
             # confirmed, unfilled cancellations/expiries to release their holds.
             self._book.finish_reconciliation(None, fatal=True)
-            self._settle_quarantined_zero_fill_terminals(now=now)
+            for diagnostic in self._settle_quarantined_zero_fill_terminals(now=now):
+                exc.add_note(diagnostic)
             raise
         for view in self._ledger.open_orders():
             venue = (self._adapter.order_status(view.broker_order_id)
@@ -380,7 +381,10 @@ class PaperOrderManager:
         Also inspect ledger-terminal orders with a remaining hold, so a crash
         between terminal ledger transition and release can be retried. A
         conflicting or partially filled order is never released by this path.
+        Return order-scoped book divergence diagnostics without suppressing
+        unexpected errors; the caller preserves the primary receipt veto.
         """
+        diagnostics = []
         pending = {ident for ident, _sym, _qty, _value
                    in self._book.snapshot().pending}
         for view in self._ledger.orders():
@@ -407,10 +411,18 @@ class PaperOrderManager:
                 self._ledger.mark_cancelled(view.client_order_id, now=now)
             else:
                 self._ledger.mark_expired(view.client_order_id, now=now)
-            self._book.cancel_remaining(
-                view.client_order_id,
-                expected_unfilled_order=(view.symbol, view.qty,
-                                         view.limit_price, view.stop_price))
+            try:
+                self._book.cancel_remaining(
+                    view.client_order_id,
+                    expected_unfilled_order=(view.symbol, view.qty,
+                                             view.limit_price, view.stop_price))
+            except ValueError as exc:
+                if str(exc) != "TERMINAL_CANCEL_RESERVATION_DIVERGENCE":
+                    raise
+                # The failed book transaction rolled back. Retain this hold,
+                # report its identity, and inspect the next independent order.
+                diagnostics.append(f"{exc}:{view.client_order_id}")
+        return tuple(diagnostics)
 
     def _recover_terminal_buy_fills(self):
         """Replay only ledger-terminal BUYs with outstanding book holds.
