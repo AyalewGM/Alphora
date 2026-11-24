@@ -486,6 +486,59 @@ class ManagerTests(unittest.TestCase):
     def test_cold_cancel_pending_order_loss_latches_quarantine(self):
         self._assert_cold_acknowledged_order_quarantined(cancel_pending=True)
 
+    def _assert_missing_order_isolates_unrelated_terminal(self, terminal_status):
+        """A missing dispatched order must not strand a verified zero-fill hold."""
+        from unittest.mock import patch
+
+        other = "b" * 64
+        first = self.mgr.execute_entry(self.entry(), self.account(),
+                                       recon=self.recon(), now=at(),
+                                       reconciled=True)
+        second = self.mgr.execute_entry(self.entry(other, symbol="QQQ"),
+                                        self.account(), recon=self.recon(at(1)),
+                                        now=at(1), reconciled=True)
+        self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
+        # A fill exists at the venue but has not reached the ledger or book.
+        self.venue.advance({"SPY": D("49")}, at=at(2))
+        self.assertEqual(self.venue.account_snapshot().cash, D("95100"))
+        self.assertEqual(self.ledger.get(KEY), first)
+        if terminal_status == "CANCELLED":
+            self.venue.cancel(second.broker_order_id)
+        else:
+            self.venue.expire_session(at=at(3))
+        self.assertEqual(self.venue.order_status(second.broker_order_id).status,
+                         terminal_status)
+        lookup = self.venue.order_status
+
+        def missing_first(order_id):
+            return None if order_id == first.broker_order_id else lookup(order_id)
+
+        # Inject an order-scoped lookup loss, not a complete cold venue reset:
+        # the unrelated terminal record is still available and verifiable.
+        with patch.object(self.venue, "order_status", side_effect=missing_first):
+            for tick in (4, 5):
+                with self.assertRaisesRegex(RuntimeError, "VENUE_ORDER_MISSING"):
+                    self.mgr.sync(now=at(tick))
+                self.assertTrue(self.book.reconciliation_guarded())
+                self.assertEqual(self.ledger.get(KEY), first)
+                self.assertEqual(self.ledger.fills(KEY), ())
+                self.assertEqual(self.ledger.get(other).status, terminal_status)
+                self.assertEqual(self.ledger.fills(other), ())
+                remaining = self.book.snapshot()
+                self.assertEqual(remaining.reserved_cash, D("5000"))
+                self.assertEqual({row[0] for row in remaining.pending}, {KEY})
+                self.assertEqual(remaining.cash, D("100000"))
+                self.assertEqual(remaining.positions, ())
+                self.reopen()
+                self.assertEqual(self.book.snapshot(), remaining)
+                self.assertTrue(self.book.reconciliation_guarded())
+
+    def test_missing_acked_order_isolates_unrelated_cancellation(self):
+        self._assert_missing_order_isolates_unrelated_terminal("CANCELLED")
+
+    def test_missing_acked_order_isolates_unrelated_expiration(self):
+        self._assert_missing_order_isolates_unrelated_terminal("EXPIRED")
+
     def test_terminal_fill_recovers_after_book_write_failure(self):
         """An ACKed final fill must settle exactly once after a book fault."""
         from unittest.mock import patch
