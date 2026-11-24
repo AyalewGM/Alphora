@@ -632,10 +632,20 @@ class ManagerTests(unittest.TestCase):
                           return_value=(replace(receipt, price=D("48.99")),)):
             with self.assertRaisesRegex(RuntimeError, "TERMINAL_BUY_FILL_DIVERGENCE"):
                 self.mgr.sync(now=at(2))
-        self.assertEqual(self.book.snapshot(), before)
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.book.snapshot(), replace(before, halted=True))
         self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.reopen()
+        self.assertTrue(self.book.reconciliation_guarded())
         self.mgr.sync(now=at(3))
-        self.assertEqual(self.book.snapshot().cash, D("95100"))
+        settled = self.book.snapshot()
+        self.assertEqual(settled.cash, D("95100"))
+        self.assertEqual(settled.reserved_cash, D(0))
+        self.assertEqual(settled.positions, (("SPY", 100, D("4900")),))
+        self.assertTrue(settled.halted)
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.mgr.sync(now=at(4))
+        self.assertEqual(self.book.snapshot(), settled)
 
     def _assert_terminal_buy_reservation_divergence(self, field, value):
         import sqlite3
