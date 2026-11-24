@@ -439,6 +439,53 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.venue.account_snapshot().cash, D("100000"))
         self.assertTrue(self.book.reconciliation_guarded())
 
+    def _assert_cold_acknowledged_order_quarantined(self, *, cancel_pending):
+        view = self.mgr.execute_entry(self.entry(), self.account(),
+                                      recon=self.recon(), now=at(),
+                                      reconciled=True)
+        self.assertEqual(view.status, "ACKED")
+        clean = self.recon(at(1))
+        self.assertEqual(clean.status, "CLEAN")
+        if cancel_pending:
+            self.ledger.request_cancel(KEY, now=at(1))
+        # Venue fills before settlement; cold restart loses that history.
+        self.venue.advance({"SPY": D("49")}, at=at(2))
+        self.assertEqual(self.venue.account_snapshot().cash, D("95100"))
+        expected = self.ledger.get(KEY)
+        self.assertEqual(expected.status,
+                         "CANCEL_PENDING" if cancel_pending else "ACKED")
+        before = self.book.snapshot()
+        self.assertEqual(before.reserved_cash, D("5000"))
+        self.assertEqual(before.cash, D("100000"))
+        self.assertEqual(before.positions, ())
+        self.assertFalse(self.book.reconciliation_guarded())
+        self.venue = PaperBrokerAdapter()
+        self.reopen()
+        for tick in (3, 4):
+            with self.assertRaisesRegex(RuntimeError, "VENUE_ORDER_MISSING"):
+                self.mgr.sync(now=at(tick))
+            self.assertTrue(self.book.reconciliation_guarded())
+            self.assertEqual(self.ledger.get(KEY), expected)
+            self.assertEqual(self.book.snapshot(), replace(before, halted=True))
+            self.assertEqual(self.ledger.fills(KEY), ())
+            self.assertEqual(self.venue.open_orders(), ())
+            # A previously CLEAN certificate may still be within its age
+            # window. The durable guard must independently veto new BUYs.
+            with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+                self.mgr.execute_entry(self.entry("d" * 64, symbol="QQQ"),
+                                       self.account(), recon=clean,
+                                       now=at(tick), reconciled=True)
+            self.assertIsNone(self.ledger.get("d" * 64))
+            self.assertEqual(self.venue.open_orders(), ())
+            self.reopen()
+            self.assertTrue(self.book.reconciliation_guarded())
+
+    def test_cold_acked_order_loss_latches_quarantine(self):
+        self._assert_cold_acknowledged_order_quarantined(cancel_pending=False)
+
+    def test_cold_cancel_pending_order_loss_latches_quarantine(self):
+        self._assert_cold_acknowledged_order_quarantined(cancel_pending=True)
+
     def test_terminal_fill_recovers_after_book_write_failure(self):
         """An ACKed final fill must settle exactly once after a book fault."""
         from unittest.mock import patch
