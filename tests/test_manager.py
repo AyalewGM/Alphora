@@ -475,6 +475,46 @@ class ManagerTests(unittest.TestCase):
     def test_terminal_buy_recovery_rejects_wrong_book_stop(self):
         self._assert_terminal_buy_reservation_divergence("stop_price", "47")
 
+    def test_terminal_buy_veto_does_not_strand_unrelated_cancel(self):
+        """Preserve the receipt veto while settling an unrelated cancellation."""
+        other = "b" * 64
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        second = self.mgr.execute_entry(self.entry(other, symbol="QQQ"),
+                                        self.account(), recon=self.recon(at(1)),
+                                        now=at(1), reconciled=True)
+        self.assertEqual(second.status, "ACKED")
+        self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
+
+        # The local venue accepts a BUY below its protective stop; the book
+        # rejects it after the ledger has recorded the final fill.
+        with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS"):
+            self.mgr.advance({"SPY": D("47")}, at=at(2))
+        self.assertEqual(self.ledger.get(KEY).status, "FILLED")
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.assertEqual(self.book.snapshot().cash, D("100000"))
+        self.assertEqual(self.book.snapshot().positions, ())
+
+        # The unresolved receipt must remain visible as an error, but it
+        # must not strand a separately acknowledged cancellation.
+        with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS"):
+            self.mgr.cancel(other, now=at(3))
+        self.assertEqual(self.venue.order_status(second.broker_order_id).status,
+                         "CANCELLED")
+        self.assertEqual(self.ledger.get(other).status, "CANCELLED")
+        remaining = self.book.snapshot()
+        self.assertEqual(remaining.reserved_cash, D("5000"))
+        self.assertEqual({row[0] for row in remaining.pending}, {KEY})
+        self.assertEqual(remaining.cash, D("100000"))
+        self.assertEqual(remaining.positions, ())
+        self.reopen()
+        with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS|PAPER_BOOK_HALTED"):
+            self.mgr.sync(now=at(4))
+        self.assertEqual(self.ledger.get(other).status, "CANCELLED")
+        self.assertEqual(self.book.snapshot().pending, remaining.pending)
+        self.assertEqual(self.book.snapshot().cash, remaining.cash)
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+
     def test_terminal_buy_recovery_retains_loss_halt(self):
         from unittest.mock import patch
 
