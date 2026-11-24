@@ -106,8 +106,21 @@ class ReconcileTests(unittest.TestCase):
         recon = self.recon()
         self.assertEqual(recon.status, "WARN")
         self.assertIn("LOST_ACK", kinds(recon))
-        self.mgr.sync(now=at(2))  # absent at venue -> confirmed absent
-        self.assertEqual(self.recon().status, "CLEAN")
+        before = self.book.snapshot()
+        with self.assertRaisesRegex(RuntimeError, "PAPER_VENUE_RECOVERY_REQUIRED"):
+            self.mgr.sync(now=at(2))
+        # A warning about a missing ACK cannot become CLEAN merely because
+        # an in-memory venue has no record of the order.
+        self.assertEqual(self.ledger.get(KEY).status, "SENT")
+        after = self.book.snapshot()
+        self.assertEqual(after.cash, before.cash)
+        self.assertEqual(after.positions, before.positions)
+        self.assertEqual(after.pending, before.pending)
+        self.assertEqual(after.reserved_cash, before.reserved_cash)
+        self.assertTrue(after.halted)
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.recon().status, "WARN")
+        self.assertIn("LOST_ACK", kinds(self.recon()))
 
     def test_cancel_pending_warns_in_flight(self):
         self.enter()

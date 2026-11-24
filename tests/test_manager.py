@@ -382,7 +382,7 @@ class ManagerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "PAPER_VENUE_RECOVERY_REQUIRED"):
             self.mgr.sync(now=at(2))
         self.assertEqual(self.ledger.get(KEY).status, "SENT")
-        self.assertEqual(self.book.snapshot(), before)
+        self.assertEqual(self.book.snapshot(), replace(before, halted=True))
         self.assertTrue(self.book.reconciliation_guarded())
         self.assertEqual(self.venue.open_orders(), ())
 
