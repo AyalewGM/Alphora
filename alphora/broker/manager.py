@@ -318,7 +318,17 @@ class PaperOrderManager:
         if not _aware(now):
             raise ValueError("INVALID_TIMESTAMP")
         actions = []
-        self._recover_terminal_buy_fills()
+        try:
+            self._recover_terminal_buy_fills()
+        except ValueError as exc:
+            if str(exc) != "FILL_EXCEEDS_LIMITS":
+                raise
+            # Do not resume general sync or dispatch after a rejected receipt.
+            # Keep the original error visible, but permit independently
+            # confirmed, unfilled cancellations/expiries to release their holds.
+            self._book.finish_reconciliation(None, fatal=True)
+            self._settle_quarantined_zero_fill_terminals(now=now)
+            raise
         for view in self._ledger.open_orders():
             venue = (self._adapter.order_status(view.broker_order_id)
                      if view.broker_order_id else
@@ -363,6 +373,44 @@ class PaperOrderManager:
                 self._release_reservation(view)
                 actions.append(f"EXPIRED:{view.client_order_id}")
         return tuple(actions)
+
+    def _settle_quarantined_zero_fill_terminals(self, *, now):
+        """Bounded recovery only: no fill application or order dispatch.
+
+        Also inspect ledger-terminal orders with a remaining hold, so a crash
+        between terminal ledger transition and release can be retried. A
+        conflicting or partially filled order is never released by this path.
+        """
+        pending = {ident for ident, _sym, _qty, _value
+                   in self._book.snapshot().pending}
+        for view in self._ledger.orders():
+            if (view.side != "BUY" or view.client_order_id not in pending
+                    or view.filled != 0 or not view.broker_order_id
+                    or view.status not in ("ACKED", "CANCEL_PENDING",
+                                           "CANCELLED", "EXPIRED")):
+                continue
+            venue = self._adapter.order_status(view.broker_order_id)
+            if (venue is None or venue.status not in ("CANCELLED", "EXPIRED")
+                    or venue.broker_order_id != view.broker_order_id
+                    or venue.client_order_id != view.client_order_id
+                    or venue.symbol != view.symbol or venue.side != view.side
+                    or venue.qty != view.qty or venue.filled != 0
+                    or venue.limit_price != view.limit_price
+                    or self._ledger.fills(view.client_order_id)
+                    or self._adapter.fills(view.broker_order_id)):
+                continue
+            if view.status in ("CANCELLED", "EXPIRED"):
+                if view.status != venue.status:
+                    continue
+            elif venue.status == "CANCELLED":
+                self._ledger.request_cancel(view.client_order_id, now=now)
+                self._ledger.mark_cancelled(view.client_order_id, now=now)
+            else:
+                self._ledger.mark_expired(view.client_order_id, now=now)
+            self._book.cancel_remaining(
+                view.client_order_id,
+                expected_unfilled_order=(view.symbol, view.qty,
+                                         view.limit_price, view.stop_price))
 
     def _recover_terminal_buy_fills(self):
         """Replay only ledger-terminal BUYs with outstanding book holds.
@@ -430,9 +478,14 @@ class PaperOrderManager:
                                  fill.price, fee=fill.fee,
                                  occurred_at=fill.occurred_at, now=now)
         if view.side == "BUY":
-            self._book.record_hypothetical_fill(view.client_order_id,
-                                                fill.fill_id, fill.qty,
-                                                fill.price, fee=fill.fee)
+            try:
+                self._book.record_hypothetical_fill(view.client_order_id,
+                                                    fill.fill_id, fill.qty,
+                                                    fill.price, fee=fill.fee)
+            except ValueError as exc:
+                if str(exc) == "FILL_EXCEEDS_LIMITS":
+                    self._book.finish_reconciliation(None, fatal=True)
+                raise
         else:
             self._book.record_hypothetical_sell(fill.fill_id, fill.symbol,
                                                 fill.qty, fill.price,
