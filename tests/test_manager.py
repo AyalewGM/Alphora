@@ -434,6 +434,47 @@ class ManagerTests(unittest.TestCase):
         self.mgr.sync(now=at(3))
         self.assertEqual(self.book.snapshot().cash, D("95100"))
 
+    def _assert_terminal_buy_reservation_divergence(self, field, value):
+        import sqlite3
+        from contextlib import closing
+        from unittest.mock import patch
+
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(1))
+        # A structurally valid but contradictory durable reservation.
+        self.assertIn(field, ("symbol", "qty", "limit_price", "stop_price"))
+        with closing(sqlite3.connect(Path(self.tmp.name) / "book.sqlite")) as db:
+            with db:
+                db.execute(f"UPDATE buy_intents SET {field}=? WHERE id=?",
+                           (value, KEY))
+        self.reopen()
+        before = self.book.snapshot()
+        self.assertFalse(before.halted)
+        with self.assertRaisesRegex(ValueError, "TERMINAL_BUY_RESERVATION_DIVERGENCE"):
+            self.mgr.sync(now=at(2))
+        self.assertEqual(self.book.snapshot(), replace(before, halted=True))
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.reopen()
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.book.snapshot(), replace(before, halted=True))
+
+    def test_terminal_buy_recovery_rejects_wrong_book_symbol(self):
+        self._assert_terminal_buy_reservation_divergence("symbol", "QQQ")
+
+    def test_terminal_buy_recovery_rejects_wrong_book_quantity(self):
+        self._assert_terminal_buy_reservation_divergence("qty", 101)
+
+    def test_terminal_buy_recovery_rejects_wrong_book_limit(self):
+        self._assert_terminal_buy_reservation_divergence("limit_price", "51")
+
+    def test_terminal_buy_recovery_rejects_wrong_book_stop(self):
+        self._assert_terminal_buy_reservation_divergence("stop_price", "47")
+
     def test_terminal_buy_recovery_retains_loss_halt(self):
         from unittest.mock import patch
 
