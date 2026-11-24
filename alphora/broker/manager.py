@@ -319,10 +319,15 @@ class PaperOrderManager:
         actions = []
         try:
             self._recover_terminal_buy_fills()
-        except ValueError as exc:
-            if str(exc) != "FILL_EXCEEDS_LIMITS":
+        except (ValueError, RuntimeError) as exc:
+            if not ((isinstance(exc, ValueError)
+                     and str(exc) == "FILL_EXCEEDS_LIMITS")
+                    or (isinstance(exc, RuntimeError) and str(exc) in (
+                        "TERMINAL_BUY_ORDER_DIVERGENCE",
+                        "TERMINAL_BUY_FILL_DIVERGENCE"))):
                 raise
-            # Do not resume general sync or dispatch after a rejected receipt.
+            # Do not resume general sync or dispatch after a rejected receipt
+            # or missing/conflicting terminal execution evidence.
             # Keep the original error visible, but permit independently
             # confirmed, unfilled cancellations/expiries to release their holds.
             self._book.finish_reconciliation(None, fatal=True)
