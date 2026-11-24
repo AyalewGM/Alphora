@@ -4,7 +4,8 @@ from datetime import date, timedelta
 from decimal import Decimal as D, localcontext
 
 from alphora.research.backtest import Bar
-from alphora.research.daily_rebalance import daily_open_reference
+from alphora.research.daily_rebalance import (daily_open_reference,
+                                              compare_with_daily_open_spy)
 
 
 def bars(*prices):
@@ -78,3 +79,32 @@ class DailyReferenceTests(unittest.TestCase):
         self.assertEqual(r.observations[-1].cash, D(100000))
         self.assertEqual(r.metrics.total_return, D(0))
         self.assertEqual(r.total_fees, D(0))
+
+
+    def test_comparison_uses_same_post_warmup_window(self):
+        strategy = bars((100, 100), (100, 110), (110, 120),
+                        (120, 140), (140, 130))
+        spy = bars((10, 10), (20, 20), (100, 100),
+                   (100, 100), (200, 300))
+        result = compare_with_daily_open_spy(
+            strategy, spy, "momentum", lookback=2, cost_bps=D(0))
+        rows = result.daily_open_spy.observations
+        self.assertEqual(result.legacy.evaluation_start, 2)
+        self.assertEqual([row.day for row in rows], [b.day for b in spy[2:]])
+        self.assertEqual([row.shares for row in rows], [0, 100, 55])
+        self.assertEqual(rows[0].close_equity, D(100000))
+        self.assertEqual(rows[-1].close_equity, D(115500))
+        self.assertEqual(result.daily_open_spy.metrics.sessions,
+                         result.legacy.aligned_strategy.sessions)
+        self.assertEqual(result.excess_vs_daily_open_spy,
+                         result.legacy.aligned_strategy.total_return - D(".155"))
+
+    def test_comparison_retains_full_source_integrity_gate(self):
+        source = bars((100, 100), (100, 100), (100, 100),
+                      (100, 100), (100, 100))
+        invalid_spy = [replace(source[0], volume=0), *source[1:]]
+        with self.assertRaisesRegex(ValueError, "ZERO_VOLUME"):
+            compare_with_daily_open_spy(source, invalid_spy, "momentum", lookback=2)
+        shifted = [replace(b, day=b.day + timedelta(days=1)) for b in source]
+        with self.assertRaisesRegex(ValueError, "BENCHMARK_DATE_MISMATCH"):
+            compare_with_daily_open_spy(source, shifted, "momentum", lookback=2)
