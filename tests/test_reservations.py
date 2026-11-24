@@ -76,6 +76,280 @@ class OfflineReservationTests(unittest.TestCase):
         self.reserve("b", self.proposal(qty="80"))
         self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
 
+    def test_legacy_open_entry_spelling_collision_is_quarantined_across_restart(self):
+        # The original ENTRY hash includes raw Decimal/timestamp spelling.
+        # Re-evaluating the same economic decision under another encoding
+        # must not reserve the same virtual cash a second time.
+        original = self.proposal(qty="20", price="50", stop="49")
+        before = self.reserve("legacy-open", original)
+        alternate = self.proposal(qty="20", price="50.00", stop="49.00")
+        for ident in ("replayed-utc", "replayed-decimal"):
+            with self.subTest(ident=ident), self.assertRaisesRegex(
+                    ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+                self.reserve(ident, alternate)
+            self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        with self.assertRaisesRegex(ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+            self.reserve("after-restart", alternate)
+        self.assertEqual(self.book.snapshot(), before)
+        # The exact original legacy identity remains idempotent.
+        self.assertEqual(self.reserve("legacy-open", original), before)
+        # Different intended position sizes may still be considered subject
+        # to the independent instrument, cash and risk ceilings.
+        distinct = self.reserve("new-size", self.proposal(qty="15", stop="49"))
+        self.assertEqual(distinct.reserved_cash, D("1750"))
+
+    def test_legacy_alias_after_partial_fill_does_not_reopen_reservation(self):
+        # An OPEN legacy reservation can be partially filled. The remaining
+        # cash hold and persisted fills must survive an alias replay whose
+        # timestamp/Decimal spelling produced a different historical key.
+        original = self.proposal(qty="20", price="50", stop="49")
+        self.reserve("legacy-partial", original)
+        self.book.record_hypothetical_fill(
+            "legacy-partial", "legacy-fill-one", 5, D("50"))
+        before = self.book.snapshot()
+        self.assertEqual(before.positions, (("SPY", 5, D("250")),))
+        self.assertEqual(before.reserved_cash, D("750"))
+        alias = self.proposal(qty="20", price="50.00", stop="49.00")
+        for restart in (False, True):
+            if restart:
+                self.book.close()
+                self.book = OfflineReservations(self.path, session_id="2026-11-02")
+            with self.subTest(restart=restart), self.assertRaisesRegex(
+                    ValueError, "AMBIGUOUS_LEGACY_ENTRY_INTENT"):
+                self.reserve("legacy-partial-alias", alias)
+            self.assertEqual(self.book.snapshot(), before)
+        # An exact-key retry may observe the original partially filled intent
+        # without producing a new cash hold.
+        self.assertEqual(self.reserve("legacy-partial", original), before)
+
+    def test_concurrent_legacy_aliases_hold_cash_once_below_instrument_cap(self):
+        # Both alias orders fit independently under the 10% cap. Without
+        # the transactional semantic collision veto, both would reserve.
+        attempts = []
+        def attempt(ident, spelling):
+            connection = OfflineReservations(self.path, session_id="2026-11-02")
+            try:
+                proposal = BuyProposal("SPY", D("20"), D(spelling), D("49"))
+                connection.reserve_buy(ident, PaperAccount(
+                    D("100000"), D("100000"), D("100000"), D("0"),
+                    "2026-11-02"), proposal, reconciled=True)
+                attempts.append("reserved")
+            except ValueError as exc:
+                attempts.append(str(exc))
+            finally:
+                connection.close()
+        jobs = [threading.Thread(target=attempt, args=("old", "50")),
+                threading.Thread(target=attempt, args=("new", "50.00"))]
+        for job in jobs:
+            job.start()
+        for job in jobs:
+            job.join()
+        self.assertEqual(attempts.count("reserved"), 1)
+        self.assertEqual(sum("AMBIGUOUS_LEGACY_ENTRY_INTENT" in a
+                             for a in attempts), 1)
+        self.assertEqual(self.book.snapshot().reserved_cash, D("1000"))
+
+    def test_cash_only_book_rejects_forged_equity_with_and_without_pending(self):
+        # With no fills or SELLs, cash is the entire marked portfolio.
+        # An algebraically consistent $120k caller mark cannot turn $100k
+        # durable paper cash into a $12k instrument allocation allowance.
+        # A working BUY reserves cash but does not create P&L.
+        forged = self.account(equity=D("120000"), day_pnl=D("20000"))
+        over_true_cap = self.proposal(qty="240", price="50", stop="49")
+        before = self.book.snapshot()
+        self.assertEqual(before.positions, ())
+        self.assertEqual(before.cash, D("100000"))
+        for intent in ("invented-equity",):
+            with self.assertRaisesRegex(ValueError, "UNBACKED_ACCOUNT_EQUITY"):
+                self.book.reserve_buy(intent, forged, over_true_cap,
+                                      reconciled=True)
+            self.assertEqual(self.book.snapshot(), before)
+
+        self.reserve("existing-pending", self.proposal(qty="20", stop="49"))
+        with_pending = self.book.snapshot()
+        self.assertEqual(with_pending.cash, D("100000"))
+        self.assertEqual(with_pending.positions, ())
+        with self.assertRaisesRegex(ValueError, "UNBACKED_ACCOUNT_EQUITY"):
+            self.book.reserve_buy("pending-forged-equity", forged,
+                                  over_true_cap, reconciled=True)
+        self.assertEqual(self.book.snapshot(), with_pending)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), with_pending)
+
+    def test_exact_cap_after_fill_requires_authentic_mark_even_with_disjoint_pending(self):
+        # Stage both BUY intents while cash-only; new reservations after any
+        # fill require an authenticated holdings mark and are quarantined.
+        self.reserve("held", self.proposal(qty="120", stop="49"))
+        self.reserve("working", self.proposal(qty="60", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 120, D("50"))
+        before = self.book.snapshot()
+        self.assertEqual(before.positions, (("SPY", 120, D("6000")),))
+        self.assertEqual(before.reserved_cash, D("3000"))
+        # $6k marked held + $3k working BUY + $1k new BUY is exactly
+        # 10% of $100k. Old book formula double-counted pending to $13k.
+        planned = BuyProposal("SPY", D("20"), D("50"), D("49"),
+                              D("9000"), D("3000"))
+        # Pending is not double-counted, but authentic holdings valuation
+        # is still unavailable. Fail closed instead of admitting a new BUY.
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy("at-cap", self.account(), planned,
+                                  reconciled=True)
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_stale_pending_witness_after_partial_fill_fails_closed_across_restart(self):
+        # Stage both BUY intents while cash-only; new reservations after any
+        # fill require an authenticated holdings mark and are quarantined.
+        self.reserve("held", self.proposal(qty="120", stop="49"))
+        self.reserve("working", self.proposal(qty="60", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 120, D("50"))
+        self.book.record_hypothetical_fill("working", "partial-working", 10, D("50"))
+        old = self.book.snapshot()
+        self.assertEqual(old.positions, (("SPY", 130, D("6500")),))
+        self.assertEqual(old.pending, (("working", "SPY", 50, D("2500")),))
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), old)
+        stale = BuyProposal("SPY", D("20"), D("50"), D("49"),
+                            D("9000"), D("3000"))
+        with self.assertRaisesRegex(ValueError, "PENDING_RECEIPT_MISMATCH"):
+            self.book.reserve_buy("stale-pending", self.account(), stale,
+                                  reconciled=True)
+        self.assertEqual(self.book.snapshot(), old)
+        # Replanned held=6,500 and outstanding=2,500 fixes the pending
+        # accounting witness, but cannot authenticate the current holding mark.
+        updated = BuyProposal("SPY", D("20"), D("50"), D("49"),
+                              D("9000"), D("2500"))
+        # The corrected pending annotation is necessary but insufficient:
+        # an independently verifiable holdings mark is still missing.
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy("fresh-pending", self.account(), updated,
+                                  reconciled=True)
+        self.assertEqual(self.book.snapshot(), old)
+
+    def test_stale_direct_caller_cannot_understate_appreciated_holdings(self):
+        self.reserve("held", self.proposal(qty="200", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 200, D("50"))
+        before = self.book.snapshot()
+        # Book's $10k acquisition cost is not the marked $16k holding.
+        # Even when direct caller passes zero holdings, book must mark 200
+        # shares at the proposed $80 price before admitting any more risk.
+        stale = BuyProposal("SPY", D("1"), D("80"), D("79"), D("0"))
+        marked = self.account(equity=D("106000"), day_pnl=D("6000"))
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy("stale-caller", marked, stale, reconciled=True)
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_lower_buy_limit_cannot_undervalue_appreciated_holding(self):
+        # Single-symbol portfolio: mark is $80/share (200 * $80 = $16k),
+        # but the new candidate's $50 BUY limit must not revalue holdings.
+        self.reserve("held", self.proposal(qty="200", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 200, D("50"))
+        before = self.book.snapshot()
+        self.assertEqual(before.cash, D("90000"))
+        mark = self.account(equity=D("106000"), day_pnl=D("6000"))
+        stale = self.proposal(qty="1", price="50", stop="49", existing="0")
+        # With $106k equity the instrument ceiling is $10,600. The old
+        # code incorrectly substituted the new limit: 200*$50 + $50
+        # equals $10,050 and therefore admitted this unsafe order.
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy("below-real-mark", mark, stale, reconciled=True)
+        self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_stale_self_consistent_account_cannot_authorize_unmarked_existing_holding(self):
+        # RED acceptance regression for #8/#80: the same-session caller can
+        # provide equity/day P&L that agree algebraically with book cash while
+        # being stale relative to the held security's current market mark.
+        # The final SQLite reservation must demand a trusted, fresh,
+        # session-bound per-symbol mark receipt or fail closed. A mere
+        # reconciled=True caller assertion is not such evidence.
+        self.reserve("held", self.proposal(qty="200", price="40", stop="39"))
+        self.book.record_hypothetical_fill("held", "filled-held", 200, D("40"))
+        before = self.book.snapshot()
+        self.assertEqual(before.cash, D("92000"))
+        self.assertEqual(before.positions, (("SPY", 200, D("8000")),))
+        # Independent current mark is $80, so true SPY exposure is $16,000,
+        # exceeding 10% of true $108,000 equity. The stale, internally
+        # consistent $100,000 account instead makes the book see only $8,040
+        # against a $10,000 cap when the new BUY limit is $40.
+        stale_account = self.account(equity=D("100000"), day_pnl=D("0"))
+        self.assertEqual(stale_account.cash, D("92000"))
+        with self.assertRaisesRegex(
+            ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"
+        ):
+            self.book.reserve_buy(
+                "stale-consistent-mark", stale_account,
+                self.proposal(qty="1", price="40", stop="39", existing="0"),
+                reconciled=True,
+            )
+        self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_unverified_holdings_block_even_a_different_symbol_after_restart(self):
+        # A stale portfolio equity can inflate a different symbol's 10%
+        # allocation cap too. Holding SPY must not allow a QQQ reservation
+        # without a fresh, session-bound full-portfolio valuation receipt.
+        self.reserve("held-spy", self.proposal(qty="100", stop="49"))
+        self.book.record_hypothetical_fill("held-spy", "fill-held-spy", 100, D("50"))
+        before = self.book.snapshot()
+        self.assertEqual(before.positions, (("SPY", 100, D("5000")),))
+        stale = self.account(equity=D("100000"), day_pnl=D("0"))
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy(
+                "new-qqq", stale,
+                self.proposal(symbol="QQQ", qty="1", price="50", stop="49"),
+                reconciled=True,
+            )
+        self.assertEqual(self.book.snapshot(), before)
+        self.book.close()
+        self.book = OfflineReservations(self.path, session_id="2026-11-02")
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_multiple_held_symbols_require_per_symbol_mark_receipt(self):
+        # Aggregate account equity alone cannot assign value between SPY
+        # and QQQ. Do not infer either symbol's mark from a proposed limit.
+        # Reserve both while the book is cash-only, then record the two
+        # synthetic fills. A sequential reserve-after-fill is forbidden.
+        for sym in ("SPY", "QQQ"):
+            self.reserve(sym, self.proposal(symbol=sym, qty="20", stop="49"))
+        for sym in ("SPY", "QQQ"):
+            self.book.record_hypothetical_fill(sym, "fill-" + sym, 20, D("50"))
+        before = self.book.snapshot()
+        self.assertEqual({s for s, _, _ in before.positions}, {"SPY", "QQQ"})
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy(
+                "ambiguous-mark", self.account(),
+                self.proposal(qty="1", price="50", stop="49"),
+                reconciled=True,
+            )
+        self.assertEqual(self.book.snapshot(), before)
+
+    def test_mixed_pending_limit_prices_revalued_before_fee_cap(self):
+        # Stage high/low limit orders first: a $100 quote with 196 already
+        # held would correctly veto the high-limit order on its own. The
+        # $50 seed fill may then coexist with both outstanding limits.
+        self.reserve("high-limit", self.proposal(qty="1", price="100", stop="99"))
+        self.reserve("low-limit", self.proposal(qty="1", price="20", stop="19"))
+        self.reserve("held", self.proposal(qty="196", stop="49"))
+        self.book.record_hypothetical_fill("held", "filled-held", 196, D("50"))
+        before = self.book.snapshot()
+        self.assertEqual(before.reserved_cash, D("120"))
+        # At the new $50 quote: held $9800 + working max($100,$50)
+        # and max($20,$50) = $9950, not $9920. A $50 new BUY
+        # with $30 fee exceeds the $10k instrument cap by $30.
+        proposal = BuyProposal("SPY", D("1"), D("50"), D("49"), D("9800"))
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
+            self.book.reserve_buy("unsafe", self.account(), proposal,
+                                  fee_budget=D("30"), reconciled=True)
+        self.assertEqual(self.book.snapshot(), before)
+
     def test_fee_budget_is_included_in_new_instrument_allocation(self):
         # Base $9,990 notional is below the $10,000 per-symbol cap, but
         # the reserved maximum fee is part of conservative exposure.
@@ -392,8 +666,8 @@ os._exit(24)  # No close or normal interpreter shutdown.
 
     def test_fill_fees_enter_acquisition_cost_and_instrument_cap(self):
         # Actual synthetic buy fees reduce cash AND increase acquisition
-        # cost basis; omitting them lets future same-symbol purchases breach
-        # the conservative 10% cost-based exposure floor.
+        # cost basis; pending a trusted holdings mark, additional BUYs after
+        # any fill must be vetoed rather than rely on historical cost.
         self.reserve("fees", self.proposal(qty="20", stop="48"),
                      fee_budget=D("100"))
         filled = self.book.record_hypothetical_fill(
@@ -401,7 +675,7 @@ os._exit(24)  # No close or normal interpreter shutdown.
         self.assertEqual(filled.cash, D("98960"))
         self.assertEqual(filled.reserved_cash, D("0"))
         self.assertEqual(filled.positions, (("SPY", 20, D("1040")),))
-        with self.assertRaisesRegex(ValueError, "INSTRUMENT_ALLOCATION_EXCEEDED"):
+        with self.assertRaisesRegex(ValueError, "INSTRUMENT_MARK_RECEIPT_REQUIRED"):
             self.reserve("excess-exposure", self.proposal(qty="180", stop="49"))
         self.book.close()
         self.book = OfflineReservations(self.path, session_id="2026-11-02")

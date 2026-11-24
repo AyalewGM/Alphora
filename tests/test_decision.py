@@ -2,6 +2,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
+from zoneinfo import ZoneInfo
 
 from alphora.risk import PaperAccount
 from alphora.decision import (EntryCandidate, FilledPosition, ExitQuote,
@@ -47,6 +48,16 @@ class DecisionTests(unittest.TestCase):
                   pending_instrument_value=D(1000))
         self.assertEqual(self.entry(c).proposal.quantity, D(20))
 
+    def test_entry_plan_retains_disjoint_pending_witness_for_book_recheck(self):
+        candidate = replace(self.candidate,
+                            existing_instrument_value=D("8000"),
+                            pending_instrument_value=D("1000"))
+        plan = self.entry(candidate)
+        self.assertTrue(plan.permitted)
+        self.assertEqual(plan.proposal.existing_instrument_value, D("9000"))
+        self.assertEqual(plan.proposal.pending_included_value, D("1000"))
+        self.assertEqual(plan.proposal.quantity, D("20"))
+
     def test_inexact_cash_reservation_fails_closed(self):
         # Default 28-digit Decimal arithmetic would round a tiny but real
         # reservation away from the $10,000 cash available for a full-cap buy.
@@ -84,6 +95,57 @@ class DecisionTests(unittest.TestCase):
     def test_non_boolean_reconciliation_and_bad_symbol_fail_closed(self):
         self.assertEqual(self.entry(reconciled="true").reason, "UNRECONCILED_STATE")
         self.assertEqual(self.entry(replace(self.candidate, symbol=12)).reason, "INVALID_SYMBOL")
+
+    def test_fall_back_quote_freshness_rejects_stale_and_future_entry(self):
+        # Synthetic DST fold chronology only: this Sunday is not a market-open assertion.
+        eastern = ZoneInfo("America/New_York")
+        stale_mark = datetime(2026, 11, 1, 1, 58, tzinfo=eastern, fold=0)
+        later = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=1)
+        # Wall clock says 1 minute old; absolute age is 61 minutes.
+        self.assertEqual(
+            self.entry(replace(self.candidate, observed_at=stale_mark),
+                       as_of=later).reason,
+            "STALE_OR_FUTURE_DATA",
+        )
+        future_mark = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        earlier = datetime(2026, 11, 1, 1, 1, tzinfo=eastern, fold=0)
+        # Wall clock says 1 minute old; the mark is actually 59 minutes ahead.
+        self.assertEqual(
+            self.entry(replace(self.candidate, observed_at=future_mark),
+                       as_of=earlier).reason,
+            "STALE_OR_FUTURE_DATA",
+        )
+
+    def test_fall_back_quote_freshness_rejects_stale_and_future_exit(self):
+        eastern = ZoneInfo("America/New_York")
+        stale_mark = datetime(2026, 11, 1, 1, 58, tzinfo=eastern, fold=0)
+        later = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=1)
+        future_mark = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        earlier = datetime(2026, 11, 1, 1, 1, tzinfo=eastern, fold=0)
+        self.assertEqual(
+            self.exit(quote=replace(self.quote, observed_at=stale_mark),
+                      as_of=later).reason,
+            "STALE_OR_FUTURE_QUOTE",
+        )
+        self.assertEqual(
+            self.exit(quote=replace(self.quote, observed_at=future_mark),
+                      as_of=earlier).reason,
+            "STALE_OR_FUTURE_QUOTE",
+        )
+
+    def test_fall_back_quote_freshness_accepts_true_one_minute_age(self):
+        eastern = ZoneInfo("America/New_York")
+        observed = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=0)
+        as_of = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        self.assertTrue(
+            self.entry(replace(self.candidate, observed_at=observed),
+                       as_of=as_of).permitted,
+        )
+        self.assertEqual(
+            self.exit(quote=replace(self.quote, observed_at=observed),
+                      as_of=as_of).reason,
+            "TAKE_PROFIT",
+        )
 
     def test_quote_stale_or_future_rejected(self):
         stale=replace(self.candidate, observed_at=self.now-timedelta(minutes=3))

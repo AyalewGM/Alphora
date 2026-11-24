@@ -15,7 +15,7 @@ separate databases; a crash between them leaves the ledger ahead, which the
 next idempotent sync heals — divergence beyond that is reconciliation's job.
 """
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal as D, DecimalException, localcontext
 
 from ..decision import EntryPlan, ExitPlan
@@ -81,8 +81,17 @@ class PaperOrderManager:
             raise ValueError("INVALID_FRESHNESS_POLICY")
         if (not isinstance(recon, Reconciliation)
                 or recon.session_id != self._ledger.session_id
-                or not _aware(recon.checked_at) or recon.checked_at > now
-                or (now - recon.checked_at).total_seconds() > max_age_seconds):
+                or not _aware(now) or not _aware(recon.checked_at)):
+            raise ValueError("STALE_OR_UNCLEAN_RECONCILIATION")
+        # Same-ZoneInfo comparisons ignore fold and use wall time. Reject
+        # stale or future certificates using absolute instants instead.
+        try:
+            now_utc = now.astimezone(timezone.utc)
+            checked_utc = recon.checked_at.astimezone(timezone.utc)
+        except (OverflowError, ValueError) as exc:
+            raise ValueError("STALE_OR_UNCLEAN_RECONCILIATION") from exc
+        if (checked_utc > now_utc
+                or (now_utc - checked_utc).total_seconds() > max_age_seconds):
             raise ValueError("STALE_OR_UNCLEAN_RECONCILIATION")
         if (recon.status == "FATAL" or
                 any(d.kind == "LOST_ACK" for d in recon.diffs)):
@@ -309,6 +318,7 @@ class PaperOrderManager:
         if not _aware(now):
             raise ValueError("INVALID_TIMESTAMP")
         actions = []
+        self._recover_terminal_buy_fills()
         for view in self._ledger.open_orders():
             venue = (self._adapter.order_status(view.broker_order_id)
                      if view.broker_order_id else
@@ -353,6 +363,66 @@ class PaperOrderManager:
                 self._release_reservation(view)
                 actions.append(f"EXPIRED:{view.client_order_id}")
         return tuple(actions)
+
+    def _recover_terminal_buy_fills(self):
+        """Replay only ledger-terminal BUYs with outstanding book holds.
+
+        A final ledger commit can precede a failed book commit. Require the
+        same terminal order and complete immutable receipts from the local
+        simulated venue before touching the book. Keep the existing book
+        vetoes (including daily-loss halt) and receipt deduplication intact.
+        This narrow recovery does not authorize dispatch or resolve SELLs.
+        """
+        pending = {ident for ident, _sym, _qty, _value
+                   in self._book.snapshot().pending}
+        if not pending:
+            return
+        for view in self._ledger.orders():
+            if view.status != "FILLED" or view.side != "BUY":
+                continue
+            if view.client_order_id not in pending:
+                continue
+            venue = (self._adapter.order_status(view.broker_order_id)
+                     if view.broker_order_id else None)
+            if (venue is None or venue.status != "FILLED"
+                    or venue.broker_order_id != view.broker_order_id
+                    or venue.client_order_id != view.client_order_id
+                    or venue.symbol != view.symbol or venue.side != view.side
+                    or venue.qty != view.qty or venue.filled != view.qty
+                    or venue.limit_price != view.limit_price):
+                raise RuntimeError("TERMINAL_BUY_ORDER_DIVERGENCE")
+            recorded = self._ledger.fills(view.client_order_id)
+            asserted = self._adapter.fills(view.broker_order_id)
+            by_id = {fill.fill_id: fill for fill in asserted}
+            if (len(by_id) != len(asserted) or len(by_id) != len(recorded)
+                    or not recorded or sum(f.qty for f in recorded) != view.qty):
+                raise RuntimeError("TERMINAL_BUY_FILL_DIVERGENCE")
+            for receipt in recorded:
+                fill = by_id.get(receipt.fill_id)
+                if (fill is None or fill.client_order_id != view.client_order_id
+                        or fill.broker_order_id != view.broker_order_id
+                        or fill.symbol != view.symbol or fill.side != view.side
+                        or fill.qty != receipt.qty or fill.price != receipt.price
+                        or fill.fee != receipt.fee
+                        or not _aware(fill.occurred_at)
+                        or fill.occurred_at.astimezone(timezone.utc)
+                           != receipt.occurred_at.astimezone(timezone.utc)):
+                    raise RuntimeError("TERMINAL_BUY_FILL_DIVERGENCE")
+            # All receipts were checked before any write. Existing receipts
+            # are harmless replays; an unapplied receipt consumes its hold.
+            for receipt in recorded:
+                try:
+                    self._book.record_hypothetical_fill(
+                        view.client_order_id, receipt.fill_id, receipt.qty,
+                        receipt.price, fee=receipt.fee,
+                        expected_order=(view.symbol, view.qty, view.limit_price,
+                                        view.stop_price))
+                except ValueError as exc:
+                    if str(exc) == "TERMINAL_BUY_RESERVATION_DIVERGENCE":
+                        # The failed book write rolled back. Latch the existing
+                        # reconciliation guard so subsequent dispatch is denied.
+                        self._book.finish_reconciliation(None, fatal=True)
+                    raise
 
     def _record_fill(self, view, fill, now):
         """Record a venue fill in ledger then book; both dedupe by fill id."""

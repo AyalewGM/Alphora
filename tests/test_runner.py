@@ -86,6 +86,111 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("ENTRY:SPY:ACKED",
                       self.runner.run((day(2, "50", {"SPY": WATCH}),)).days[0].actions)
 
+    def test_appreciated_holdings_count_at_current_mark_not_purchase_cost(self):
+        # A $10k cost basis appreciates to a $16k marked exposure.
+        # With $106k equity, the 10% instrument limit is $10,600:
+        # another SPY BUY must not be authorized from the old cost basis.
+        first = self.runner.run((day(2, "50", {"SPY": WATCH}),))
+        self.assertEqual(first.days[0].positions, (("SPY", 200, D("10000")),))
+        original_orders = self.ledger.orders()
+        # Fresh same-session runner may re-evaluate marks, but must not
+        # accidentally trigger a take-profit SELL at 60% appreciation.
+        runner = PaperSessionRunner(
+            book=self.book, ledger=self.ledger, adapter=self.venue,
+            take_profit_pct=D("100"),
+        )
+        later = runner.run((day(2, "80", {"SPY": WATCH}),))
+        self.assertEqual(later.final_equity, D("106000"))
+        self.assertIn("ENTRY_SKIP:SPY:INSTRUMENT_ALLOCATION_EXCEEDED",
+                      later.days[0].actions)
+        self.assertFalse(any(a.startswith("ENTRY:SPY:")
+                             for a in later.days[0].actions))
+        self.assertEqual(self.book.snapshot().positions,
+                         (("SPY", 200, D("10000")),))
+        self.assertEqual(self.ledger.orders(), original_orders)
+        self.assertEqual(self.venue.open_orders(), ())
+
+    def test_instrument_exposure_preserves_pending_reservation_cents(self):
+        # Each working share contributes max(reserved value, marked shares).
+        # At an $80 mark: max(9999.99, 80) + max(0.01, 80)
+        # = $10,079.99. The tiny cent reservation must not hide the
+        # second share's marked exposure, even at low Decimal precision.
+        from alphora.runner import _marked_instrument_exposure
+        snap = PaperBookSnapshot(
+            cash=D("90000"), reserved_cash=D("10000"),
+            available_cash=D("80000"),
+            positions=(("SPY", 200, D("10000")),),
+            pending=(("a", "SPY", 1, D("9999.99")),
+                     ("b", "SPY", 1, D("0.01")),
+                     ("c", "QQQ", 1, D("7.00"))),
+            halted=False, session_id="2026-11-02",
+        )
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                held, pending = _marked_instrument_exposure(
+                    snap, "SPY", D("80.00"))
+                self.assertEqual(held, D("16000.00"))
+                self.assertEqual(pending, D("10079.99"))
+                # Adding held and pending under precision=3 would itself
+                # round the result: assert the exact components separately.
+        with self.assertRaisesRegex(ValueError, "INEXACT_PAPER_EXPOSURE"):
+            _marked_instrument_exposure(snap, "SPY",
+                                        D("0.123456789012345678901234567890123456789012345678901234567890"))
+
+    def test_pending_buy_shares_use_higher_of_mark_and_reserved_limit(self):
+        # Existing holdings alone mark to $8k. A still-working BUY for 25
+        # more shares reserved at $50 has only $1,250 of cash reserved,
+        # but would make $2,000 of marked shares at the new $80 quote.
+        # Counting only reserved cash falsely reports $9,250 total
+        # instrument exposure instead of a conservative $10,000.
+        from alphora.runner import _marked_instrument_exposure
+        snap = PaperBookSnapshot(
+            cash=D("95000"), reserved_cash=D("1250"),
+            available_cash=D("93750"),
+            positions=(("SPY", 100, D("5000")),),
+            pending=(("pending-buy", "SPY", 25, D("1250")),),
+            halted=False, session_id="2026-11-02",
+        )
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                held, pending = _marked_instrument_exposure(
+                    snap, "SPY", D("80.00"))
+                self.assertEqual(held, D("8000.00"))
+                self.assertEqual(pending, D("2000.00"))
+                self.assertEqual(held + pending, D("10000.00"))
+                # When a mark falls below the working limit, its greater
+                # cash reservation remains counted for risk containment.
+                low_held, low_pending = _marked_instrument_exposure(
+                    snap, "SPY", D("40.00"))
+                self.assertEqual(low_held, D("4000.00"))
+                self.assertEqual(low_pending, D("1250.00"))
+
+    def test_mixed_pending_reservations_must_not_net_against_mark(self):
+        # At a $50 mark, one working order reserves $100 for one share,
+        # another reserves $20 for one share. max(sum(reserves), sum(marks))
+        # incorrectly nets these opposing deviations to $120 instead of
+        # max($100, $50) + max($20, $50) = $150.
+        from alphora.runner import _marked_instrument_exposure
+        snap = PaperBookSnapshot(
+            cash=D("100000"), reserved_cash=D("180"),
+            available_cash=D("99820"),
+            positions=(("SPY", 197, D("9850")),),
+            pending=(("higher-limit", "SPY", 1, D("100.00")),
+                     ("lower-limit", "SPY", 1, D("20.00")),
+                     ("different-symbol", "QQQ", 3, D("60.00"))),
+            halted=False, session_id="2026-11-02",
+        )
+        for precision in (3, 6, 28, 80):
+            with self.subTest(precision=precision), localcontext() as ctx:
+                ctx.prec = precision
+                held, pending = _marked_instrument_exposure(
+                    snap, "SPY", D("50.00"))
+                self.assertEqual(held, D("9850.00"))
+                self.assertEqual(pending, D("150.00"))
+                self.assertEqual(held + pending, D("10000.00"))
+
     def test_ineligible_signal_is_skipped_not_dispatched(self):
         report = self.runner.run((day(2, "50", {"SPY": SKIP}),))
         self.assertIn("ENTRY_SKIP:SPY:SCANNER_NOT_ELIGIBLE",

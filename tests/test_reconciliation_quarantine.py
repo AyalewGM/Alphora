@@ -72,6 +72,81 @@ class DurableReconciliationQuarantineTests(unittest.TestCase):
     def _proposal(self):
         return BuyProposal("SPY", D("20"), D("50"), D("48"))
 
+    def test_safe_loss_observation_during_check_does_not_terminally_halt(self):
+        token = self.book.begin_reconciliation()
+        self.assertTrue(self.book.snapshot().halted)  # temporary BUY veto
+        observed = self.book.observe_daily_loss(self._account(), reconciled=True)
+        self.assertTrue(observed.halted)
+        self.assertEqual(self.book._meta("halted"), "0")
+        self.assertFalse(self.book.finish_reconciliation(token, fatal=False))
+        self.assertFalse(self.book.snapshot().halted)
+
+    def test_loss_observed_during_check_survives_clean_and_restart(self):
+        self.book.reserve_buy(
+            "loss-position", self._account(),
+            BuyProposal("SPY", D("100"), D("100"), D("99")),
+            reconciled=True,
+        )
+        self.book.record_hypothetical_fill(
+            "loss-position", "loss-fill", 100, D("100")
+        )
+        self.assertEqual(self.book.snapshot().cash, D("90000"))
+        token = self.book.begin_reconciliation()
+        observed = self.book.observe_daily_loss(
+            PaperAccount(D("97900"), D("100000"), D("90000"),
+                         D("-2100"), SESSION),
+            reconciled=True,
+        )
+        self.assertTrue(observed.halted)
+        self.assertEqual(self.book._meta("halted"), "1")
+        self.assertFalse(self.book.finish_reconciliation(token, fatal=False))
+        self.assertTrue(self.book.snapshot().halted)
+        self._restart()
+        self.assertEqual(self.book._meta("halted"), "1")
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.book.reserve_buy(
+                "after-loss-clean", self._account(),
+                self._proposal(), reconciled=True,
+            )
+
+    def _assert_reservation_loss_survives_check(self, retry):
+        proposal = BuyProposal("SPY", D("100"), D("100"), D("99"))
+        self.book.reserve_buy("existing", self._account(), proposal,
+                              reconciled=True)
+        self.book.record_hypothetical_fill(
+            "existing", "partial-fill", 80, D("100"))
+        prior = self.book.snapshot()
+        self.assertEqual(prior.cash, D("92000"))
+        self.assertEqual(len(prior.pending), 1)
+        token = self.book.begin_reconciliation()
+        # An exact 2% loss with 80 shares marked at 75. This is a
+        # synthetic caller-attested account, not authenticated marks.
+        breached = PaperAccount(D("98000"), D("100000"), prior.cash,
+                                D("-2000"), SESSION)
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.book.reserve_buy(
+                "existing" if retry else "new-during-check",
+                breached, proposal, reconciled=True)
+        self.assertEqual(self.book._meta("halted"), "1")
+        self.assertEqual(replace(self.book.snapshot(), halted=prior.halted),
+                         prior)
+        self.assertFalse(self.book.finish_reconciliation(token, fatal=False))
+        self.assertFalse(self.book.reconciliation_guarded())
+        self.assertTrue(self.book.snapshot().halted)
+        self._restart()
+        self.assertTrue(self.book.snapshot().halted)
+        self.assertEqual(replace(self.book.snapshot(), halted=prior.halted),
+                         prior)
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.book.reserve_buy("after-clean", self._account(),
+                                  self._proposal(), reconciled=True)
+
+    def test_new_reservation_loss_during_check_survives_clean_and_restart(self):
+        self._assert_reservation_loss_survives_check(retry=False)
+
+    def test_idempotent_reservation_loss_during_check_survives_clean_and_restart(self):
+        self._assert_reservation_loss_survives_check(retry=True)
+
     def test_clean_transaction_stays_dispatchable(self):
         token = self.book.begin_reconciliation()
         self.assertEqual(len(token), 32)
@@ -80,6 +155,8 @@ class DurableReconciliationQuarantineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
             self.book.reserve_buy("no-buy-during-check", self._account(),
                                   self._proposal(), reconciled=True)
+        self.assertEqual(self.book._meta("halted"), "0")
+        self.assertEqual(self.book.snapshot().pending, ())
         self.assertFalse(self.book.finish_reconciliation(token, fatal=False))
         self.assertFalse(self.book.reconciliation_guarded())
         self.assertFalse(self.book.snapshot().halted)

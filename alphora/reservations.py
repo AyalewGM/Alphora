@@ -387,7 +387,11 @@ class OfflineReservations:
             raise ValueError("INVALID_OR_UNRECONCILED_ACCOUNT")
         with self._write():
             snapshot = self._snapshot()
-            if snapshot.halted:
+            # The public snapshot is also halted while reconciliation is
+            # CHECKING/FATAL. Only an already-persisted terminal halt may
+            # skip the loss observer: the guard must not swallow a real
+            # breached mark that needs a permanent book_meta write.
+            if self._meta("halted") == "1":
                 return snapshot
             if (account.session_id != snapshot.session_id
                     or account.session_open_equity != INITIAL_EQUITY
@@ -443,6 +447,11 @@ class OfflineReservations:
         # Preserve the established already-halted rejection contract while
         # recording new loss observations even on idempotent retries.
         if self.snapshot().halted:
+            # A temporary reconciliation quarantine must still reject BUYs,
+            # but must not swallow a reconciled breach on this entry path.
+            # The observer skips an already-persisted terminal halt and
+            # commits any new one before we raise outside its transaction.
+            self.observe_daily_loss(account, reconciled=reconciled)
             raise ValueError("PAPER_BOOK_HALTED")
         observed = self.observe_daily_loss(account, reconciled=reconciled)
         if observed.halted:
@@ -475,19 +484,69 @@ class OfflineReservations:
                 if existing[5] == "CANCELLED":
                     raise ValueError("CANCELLED_INTENT_ID")
                 return self._snapshot()  # stable dedupe, no second reservation
-            if not _money(proposal.existing_instrument_value):
+            # Pre-canonical ENTRY keys hashed raw timezone and Decimal
+            # spellings. A semantically identical OPEN reservation might
+            # therefore have a different legacy ID after a restart/replay.
+            # Quarantine the ambiguity INSIDE the SQLite write transaction,
+            # before another cash hold can be created by concurrent callers.
+            # Preserve old IDs and their ledger/venue links unchanged.
+            # Cancelled/settled intents remain subject to their existing
+            # lifecycle rules; this is containment, not canonical migration.
+            for prior_id, prior_qty, prior_limit, prior_stop in self._db.execute(
+                    "SELECT id,qty,limit_price,stop_price FROM buy_intents "
+                    "WHERE symbol=? AND status='OPEN'", (proposal.symbol,)):
+                if (prior_id != intent_id
+                        and D(prior_qty) == proposal.quantity
+                        and D(prior_limit) == proposal.price
+                        and D(prior_stop) == proposal.stop_price):
+                    raise ValueError("RISK_VETO:AMBIGUOUS_LEGACY_ENTRY_INTENT")
+            if (not _money(proposal.existing_instrument_value)
+                    or not _money(proposal.pending_included_value)
+                    or not _money(proposal.price, positive=True)
+                    or proposal.pending_included_value > proposal.existing_instrument_value):
                 raise ValueError("INVALID_POSITION_VALUE")
-            # Never round away a tiny positive fee when existing pending
-            # exposure is near the 10% instrument cap.
+            # Without filled positions, the offline book is entirely cash.
+            # Outstanding BUYs reserve (but do not spend) that cash; they
+            # cannot create investment gains. Refuse a caller-attested
+            # equity increase/decrease that would invent a higher 10% cap
+            # or alter the planned-loss budget. Settled SELL history cannot
+            # bypass this check because new BUYs after SELLs are forbidden.
+            # This is a narrow cash-only integrity invariant, NOT a trusted
+            # mark receipt for a book that already holds any instruments.
+            if not snapshot.positions and account.equity != snapshot.cash:
+                raise ValueError("RISK_VETO:UNBACKED_ACCOUNT_EQUITY")
+            # A runner proposal includes its already-counted pending exposure.
+            # Direct callers may instead supply holdings only (pending=0).
+            # Reconstruct the independent, marked book components under the
+            # SQLite transaction. Never subtract pending from an unversioned
+            # caller aggregate without independently accounting for it.
             try:
                 with localcontext() as context:
                     context.traps[Inexact] = True
                     pending_symbol = sum(
-                        (row[3] for row in snapshot.pending if row[1] == proposal.symbol), D(0)
+                        (max(row[3], D(row[2]) * proposal.price)
+                         for row in snapshot.pending if row[1] == proposal.symbol), D(0)
                     )
-                    filled_cost = next((cost for sym, _, cost in snapshot.positions
-                                        if sym == proposal.symbol), D(0))
-                    exposure = max(proposal.existing_instrument_value, filled_cost) + pending_symbol
+                    if proposal.pending_included_value > pending_symbol:
+                        # Book pending orders changed or the caller presented
+                        # a non-reconcilable pending witness. Require replan.
+                        raise ValueError("RISK_VETO:PENDING_RECEIPT_MISMATCH")
+                    # Until a per-symbol, session-bound market mark is
+                    # authenticated and checked inside this SQLite transaction,
+                    # neither the caller's account equity nor the new BUY's
+                    # limit can certify existing holdings. Do not create any
+                    # NEW BUY reservation while even one position exists.
+                    # This is temporary containment, not an implemented
+                    # valuation-receipt protocol; it deliberately limits
+                    # further paper allocation/diversification after fills.
+                    if snapshot.positions:
+                        raise ValueError("RISK_VETO:INSTRUMENT_MARK_RECEIPT_REQUIRED")
+                    # A cash-only book needs no holdings valuation. Still
+                    # count pending BUYs from SQLite and never accept a
+                    # caller's lower pending exposure as an allocation credit.
+                    caller_held = (proposal.existing_instrument_value -
+                                   proposal.pending_included_value)
+                    exposure = max(caller_held, D(0)) + pending_symbol
                     exposure_with_fees = exposure + fee_budget
             except DecimalException as exc:
                 raise ValueError("RISK_VETO:UNREPRESENTABLE_LEDGER_ARITHMETIC") from exc
@@ -542,14 +601,29 @@ class OfflineReservations:
         raise ValueError("RISK_VETO:DAILY_LOSS_HALT")
 
     def record_hypothetical_fill(self, intent_id: str, fill_id: str,
-                                 qty: int, price: D, *, fee: D = D(0)):
-        """Record an *invented offline simulation fill*, not a broker event."""
+                                 qty: int, price: D, *, fee: D = D(0),
+                                 expected_order=None):
+        """Record an *invented offline simulation fill*, not a broker event.
+
+        Terminal recovery supplies the ledger's immutable order identity.
+        Validate it under the same write lock as the receipt, even on replay.
+        This additional check never bypasses the halt or other book vetoes.
+        """
         if (not isinstance(intent_id, str) or not _ID.fullmatch(intent_id)
                 or not isinstance(fill_id, str) or not _ID.fullmatch(fill_id)
                 or not _integer_shares(qty) or not _money(price, positive=True)
                 or not _money(fee)):
             raise ValueError("INVALID_SYNTHETIC_FILL")
         with self._write():
+            if expected_order is not None:
+                identity = self._db.execute(
+                    "SELECT symbol,qty,limit_price,stop_price FROM buy_intents WHERE id=?",
+                    (intent_id,),
+                ).fetchone()
+                if (identity is None or
+                        (identity[0], identity[1], _decimal(identity[2]),
+                         _decimal(identity[3])) != expected_order):
+                    raise ValueError("TERMINAL_BUY_RESERVATION_DIVERGENCE")
             existing = self._db.execute(
                 "SELECT intent_id,qty,price,fee FROM hypothetical_fills WHERE id=?",
                 (fill_id,),

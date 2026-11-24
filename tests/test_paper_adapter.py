@@ -2,6 +2,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D, localcontext
+from zoneinfo import ZoneInfo
 
 from alphora.broker.base import BrokerPosition, DispatchRequest
 from alphora.broker.paper import PaperBrokerAdapter
@@ -243,6 +244,81 @@ class PaperAdapterTests(unittest.TestCase):
                          "FILLED")
         self.assertEqual(self.venue.account_snapshot().reserved_cash, D(0))
         self.assertEqual(self.venue.expire_session(at=at(11)), ())
+
+    def test_fall_back_mark_freshness_uses_absolute_instants(self):
+        # Pure synthetic DST chronology, not an exchange-open claim.
+        eastern = ZoneInfo("America/New_York")
+        stale = datetime(2026, 11, 1, 1, 58, tzinfo=eastern, fold=0)
+        late = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=1)
+        self.venue.advance({"SPY": D("50")}, at=stale)
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            self.venue.require_fresh_mark("SPY", at=late)
+        future = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        earlier = datetime(2026, 11, 1, 1, 1, tzinfo=eastern, fold=0)
+        venue = PaperBrokerAdapter()
+        venue.advance({"SPY": D("50")}, at=future)
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            venue.require_fresh_mark("SPY", at=earlier)
+        venue = PaperBrokerAdapter()
+        observed = datetime(2026, 11, 1, 1, 59, 59, tzinfo=eastern, fold=0)
+        one_second_later = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        venue.advance({"SPY": D("50")}, at=observed)
+        self.assertEqual(venue.require_fresh_mark("SPY", at=one_second_later),
+                         D("50"))
+
+    def test_fall_back_snapshot_rejects_old_fold_held_mark(self):
+        # Synthetic chronology only; November 1 is not a stock session.
+        eastern = ZoneInfo("America/New_York")
+        first = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=0)
+        second = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        self.dispatch_buy(qty=100, limit="50")
+        self.venue.advance({"SPY": D("50")}, at=first)
+        self.assertEqual(self.venue.account_snapshot().equity, D("100000"))
+        self.venue.advance({"QQQ": D("100")}, at=second)
+        # The previous SPY mark is an hour old despite equal local clocks.
+        # Reject risk-facing equity and P&L rather than assume held cost.
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            self.venue.account_snapshot()
+        # An explicit SPY mark from the current absolute-time batch recovers.
+        self.venue.advance({"SPY": D("30"), "QQQ": D("100")}, at=second)
+        snap = self.venue.account_snapshot()
+        self.assertEqual((snap.cash, snap.equity, snap.day_pnl),
+                         (D("95000"), D("98000"), D("-2000")))
+
+    def test_snapshot_accepts_same_instant_with_different_utc_offset(self):
+        eastern = ZoneInfo("America/New_York")
+        first = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=0)
+        self.dispatch_buy(qty=100, limit="50")
+        self.venue.advance({"SPY": D("50")}, at=first)
+        # A differently encoded timestamp for the SAME instant must not
+        # produce a false stale risk snapshot.
+        self.venue.advance({"QQQ": D("100")}, at=first.astimezone(timezone.utc))
+        snap = self.venue.account_snapshot()
+        self.assertEqual((snap.equity, snap.day_pnl),
+                         (D("100000"), D("0")))
+
+    def test_fall_back_same_wall_time_is_not_same_mark_batch(self):
+        # SPY was last marked in the first 1:00 hour; a QQQ-only batch in
+        # the second 1:00 hour must invalidate SPY for latest-batch exits.
+        eastern = ZoneInfo("America/New_York")
+        first = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=0)
+        second = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        self.venue.advance({"SPY": D("50")}, at=first)
+        self.venue.advance({"QQQ": D("100")}, at=second)
+        with self.assertRaisesRegex(ValueError, "UNVERIFIED_OR_STALE_MARK"):
+            self.venue.require_fresh_mark("SPY", at=first)
+        self.assertEqual(self.venue.require_fresh_mark("QQQ", at=second),
+                         D("100"))
+
+    def test_fall_back_mark_batches_must_be_monotonic_in_utc(self):
+        eastern = ZoneInfo("America/New_York")
+        later = datetime(2026, 11, 1, 1, 0, tzinfo=eastern, fold=1)
+        earlier = datetime(2026, 11, 1, 1, 59, tzinfo=eastern, fold=0)
+        self.venue.advance({"SPY": D("50")}, at=later)
+        with self.assertRaisesRegex(ValueError, "NON_MONOTONIC_MARK_TIME"):
+            self.venue.advance({"SPY": D("30")}, at=earlier)
+        self.assertEqual(self.venue.require_fresh_mark("SPY", at=later),
+                         D("50"))
 
     def test_advance_validation_and_unmarked_symbols(self):
         self.dispatch_buy("a")
