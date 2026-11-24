@@ -369,17 +369,175 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual((view.status, view.broker_order_id),
                          ("ACKED", "paper-00000001"))
 
-    def test_never_sent_order_confirmed_absent_and_released(self):
-        # Crash between mark_sent and dispatch: venue never saw it.
+    def test_sent_without_venue_evidence_retains_hold(self):
+        # Crash between mark_sent and dispatch: the manager cannot prove that
+        # this is the same complete venue history. Fail closed until continuity
+        # evidence is implemented.
         proposal = BuyProposal("SPY", D("100"), D("50"), D("48"))
         self.book.reserve_buy(KEY, self.account(), proposal, reconciled=True)
         self.ledger.create(KEY, symbol="SPY", side="BUY", qty=100,
                            limit_price=D("50"), stop_price=D("48"), now=at())
         self.ledger.mark_sent(KEY, now=at(1))
-        actions = self.mgr.sync(now=at(2))
-        self.assertIn(f"ABSENT:{KEY}", actions)
-        self.assertEqual(self.ledger.get(KEY).status, "CANCELLED")
-        self.assertEqual(self.book.snapshot().reserved_cash, D(0))
+        before = self.book.snapshot()
+        with self.assertRaisesRegex(RuntimeError, "PAPER_VENUE_RECOVERY_REQUIRED"):
+            self.mgr.sync(now=at(2))
+        self.assertEqual(self.ledger.get(KEY).status, "SENT")
+        self.assertEqual(self.book.snapshot(), replace(before, halted=True))
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.venue.open_orders(), ())
+
+    def test_cold_venue_restart_cannot_confirm_lost_ack_absent(self):
+        """Losing volatile venue state is not evidence of non-dispatch."""
+        proposal = BuyProposal("SPY", D("100"), D("50"), D("48"))
+        self.book.reserve_buy(KEY, self.account(), proposal, reconciled=True)
+        self.ledger.create(KEY, symbol="SPY", side="BUY", qty=100,
+                           limit_price=D("50"), stop_price=D("48"), now=at())
+        self.ledger.mark_sent(KEY, now=at(1))
+        ack = self.venue.dispatch(
+            DispatchRequest("SPY", "BUY", 100, D("50")),
+            client_order_id=KEY)
+        self.assertTrue(ack.accepted)
+        # The venue fills before the acknowledgement reaches the ledger.
+        # Both the acknowledgement and receipt are lost with volatile venue state.
+        self.venue.advance({"SPY": D("49")}, at=at(2))
+        self.assertEqual(self.venue.account_snapshot().cash, D("95100"))
+        self.assertEqual(self.ledger.get(KEY).status, "SENT")
+        before = self.book.snapshot()
+        self.assertEqual(before.reserved_cash, D("5000"))
+        self.assertEqual(before.cash, D("100000"))
+        self.assertEqual(before.positions, ())
+        self.assertEqual(len(self.ledger.fills(KEY)), 0)
+
+        self.venue = PaperBrokerAdapter()
+        self.reopen()
+        # A new empty venue must not be treated as authoritative proof that
+        # an old SENT order never reached the prior venue.
+        with self.assertRaisesRegex(RuntimeError, "PAPER_VENUE_RECOVERY_REQUIRED"):
+            self.mgr.sync(now=at(3))
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.ledger.get(KEY).status, "SENT")
+        after = self.book.snapshot()
+        self.assertEqual(after.reserved_cash, before.reserved_cash)
+        self.assertEqual(after.cash, before.cash)
+        self.assertEqual(after.positions, before.positions)
+        self.assertEqual(after.pending, before.pending)
+        self.assertEqual(len(self.ledger.fills(KEY)), 0)
+        self.assertEqual(self.venue.open_orders(), ())
+        # The quarantine survives a second database reopen. An attempted
+        # resend of the prior SENT view must not create a fresh venue order.
+        self.reopen()
+        self.assertTrue(self.book.reconciliation_guarded())
+        for recover in (
+                lambda: self.mgr.sync(now=at(4)),
+                lambda: self.mgr._send(self.ledger.get(KEY), now=at(4))):
+            with self.assertRaisesRegex(RuntimeError, "PAPER_VENUE_RECOVERY_REQUIRED"):
+                recover()
+            self.assertEqual(self.ledger.get(KEY).status, "SENT")
+            self.assertEqual(self.book.snapshot(), after)
+            self.assertEqual(self.ledger.fills(KEY), ())
+            self.assertEqual(self.venue.open_orders(), ())
+        self.assertEqual(self.venue.account_snapshot().cash, D("100000"))
+        self.assertTrue(self.book.reconciliation_guarded())
+
+    def _assert_cold_acknowledged_order_quarantined(self, *, cancel_pending):
+        view = self.mgr.execute_entry(self.entry(), self.account(),
+                                      recon=self.recon(), now=at(),
+                                      reconciled=True)
+        self.assertEqual(view.status, "ACKED")
+        clean = self.recon(at(1))
+        self.assertEqual(clean.status, "CLEAN")
+        if cancel_pending:
+            self.ledger.request_cancel(KEY, now=at(1))
+        # Venue fills before settlement; cold restart loses that history.
+        self.venue.advance({"SPY": D("49")}, at=at(2))
+        self.assertEqual(self.venue.account_snapshot().cash, D("95100"))
+        expected = self.ledger.get(KEY)
+        self.assertEqual(expected.status,
+                         "CANCEL_PENDING" if cancel_pending else "ACKED")
+        before = self.book.snapshot()
+        self.assertEqual(before.reserved_cash, D("5000"))
+        self.assertEqual(before.cash, D("100000"))
+        self.assertEqual(before.positions, ())
+        self.assertFalse(self.book.reconciliation_guarded())
+        self.venue = PaperBrokerAdapter()
+        self.reopen()
+        for tick in (3, 4):
+            with self.assertRaisesRegex(RuntimeError, "VENUE_ORDER_MISSING"):
+                self.mgr.sync(now=at(tick))
+            self.assertTrue(self.book.reconciliation_guarded())
+            self.assertEqual(self.ledger.get(KEY), expected)
+            self.assertEqual(self.book.snapshot(), replace(before, halted=True))
+            self.assertEqual(self.ledger.fills(KEY), ())
+            self.assertEqual(self.venue.open_orders(), ())
+            # A previously CLEAN certificate may still be within its age
+            # window. The durable guard must independently veto new BUYs.
+            with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+                self.mgr.execute_entry(self.entry("d" * 64, symbol="QQQ"),
+                                       self.account(), recon=clean,
+                                       now=at(tick), reconciled=True)
+            self.assertIsNone(self.ledger.get("d" * 64))
+            self.assertEqual(self.venue.open_orders(), ())
+            self.reopen()
+            self.assertTrue(self.book.reconciliation_guarded())
+
+    def test_cold_acked_order_loss_latches_quarantine(self):
+        self._assert_cold_acknowledged_order_quarantined(cancel_pending=False)
+
+    def test_cold_cancel_pending_order_loss_latches_quarantine(self):
+        self._assert_cold_acknowledged_order_quarantined(cancel_pending=True)
+
+    def _assert_missing_order_isolates_unrelated_terminal(self, terminal_status):
+        """A missing dispatched order must not strand a verified zero-fill hold."""
+        from unittest.mock import patch
+
+        other = "b" * 64
+        first = self.mgr.execute_entry(self.entry(), self.account(),
+                                       recon=self.recon(), now=at(),
+                                       reconciled=True)
+        second = self.mgr.execute_entry(self.entry(other, symbol="QQQ"),
+                                        self.account(), recon=self.recon(at(1)),
+                                        now=at(1), reconciled=True)
+        self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
+        # A fill exists at the venue but has not reached the ledger or book.
+        self.venue.advance({"SPY": D("49")}, at=at(2))
+        self.assertEqual(self.venue.account_snapshot().cash, D("95100"))
+        self.assertEqual(self.ledger.get(KEY), first)
+        if terminal_status == "CANCELLED":
+            self.venue.cancel(second.broker_order_id)
+        else:
+            self.venue.expire_session(at=at(3))
+        self.assertEqual(self.venue.order_status(second.broker_order_id).status,
+                         terminal_status)
+        lookup = self.venue.order_status
+
+        def missing_first(order_id):
+            return None if order_id == first.broker_order_id else lookup(order_id)
+
+        # Inject an order-scoped lookup loss, not a complete cold venue reset:
+        # the unrelated terminal record is still available and verifiable.
+        with patch.object(self.venue, "order_status", side_effect=missing_first):
+            for tick in (4, 5):
+                with self.assertRaisesRegex(RuntimeError, "VENUE_ORDER_MISSING"):
+                    self.mgr.sync(now=at(tick))
+                self.assertTrue(self.book.reconciliation_guarded())
+                self.assertEqual(self.ledger.get(KEY), first)
+                self.assertEqual(self.ledger.fills(KEY), ())
+                self.assertEqual(self.ledger.get(other).status, terminal_status)
+                self.assertEqual(self.ledger.fills(other), ())
+                remaining = self.book.snapshot()
+                self.assertEqual(remaining.reserved_cash, D("5000"))
+                self.assertEqual({row[0] for row in remaining.pending}, {KEY})
+                self.assertEqual(remaining.cash, D("100000"))
+                self.assertEqual(remaining.positions, ())
+                self.reopen()
+                self.assertEqual(self.book.snapshot(), remaining)
+                self.assertTrue(self.book.reconciliation_guarded())
+
+    def test_missing_acked_order_isolates_unrelated_cancellation(self):
+        self._assert_missing_order_isolates_unrelated_terminal("CANCELLED")
+
+    def test_missing_acked_order_isolates_unrelated_expiration(self):
+        self._assert_missing_order_isolates_unrelated_terminal("EXPIRED")
 
     def test_terminal_fill_recovers_after_book_write_failure(self):
         """An ACKed final fill must settle exactly once after a book fault."""
@@ -410,6 +568,387 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(len(self.ledger.fills(KEY)), 1)
         self.mgr.sync(now=at(3))
         self.assertEqual(self.book.snapshot(), settled)
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+
+    def test_cold_terminal_buy_loss_latches_quarantine(self):
+        """A terminal ledger receipt is not proof of book settlement."""
+        from unittest.mock import patch
+
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        clean = self.recon(at(1))
+        self.assertEqual(clean.status, "CLEAN")
+        before = self.book.snapshot()
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(2))
+        terminal = self.ledger.get(KEY)
+        receipts = self.ledger.fills(KEY)
+        self.assertEqual(terminal.status, "FILLED")
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(self.book.snapshot(), before)
+        self.assertEqual(before.reserved_cash, D("5000"))
+        self.assertEqual(before.cash, D("100000"))
+        self.assertEqual(before.positions, ())
+        self.assertEqual(self.venue.account_snapshot().cash, D("95100"))
+
+        # Lose the entire volatile venue, not just a single lookup.
+        self.venue = PaperBrokerAdapter()
+        self.reopen()
+        for tick in (3, 4):
+            with self.assertRaisesRegex(RuntimeError, "^TERMINAL_BUY_ORDER_DIVERGENCE$"):
+                self.mgr.sync(now=at(tick))
+            self.assertTrue(self.book.reconciliation_guarded())
+            self.assertEqual(self.book.snapshot(), replace(before, halted=True))
+            self.assertEqual(self.ledger.get(KEY), terminal)
+            self.assertEqual(self.ledger.fills(KEY), receipts)
+            # The old CLEAN certificate is still young enough to be reused.
+            # Quarantine must independently prevent a new risk-adding order.
+            with self.assertRaisesRegex(ValueError, "^PAPER_BOOK_HALTED$"):
+                self.mgr.execute_entry(self.entry("d" * 64, symbol="QQQ"),
+                                       self.account(), recon=clean,
+                                       now=at(tick), reconciled=True)
+            self.assertIsNone(self.ledger.get("d" * 64))
+            self.assertEqual(self.venue.open_orders(), ())
+            self.assertEqual(self.venue.account_snapshot().cash, D("100000"))
+            self.reopen()
+            self.assertTrue(self.book.reconciliation_guarded())
+
+    def test_terminal_buy_recovery_rejects_conflicting_venue_receipt(self):
+        from unittest.mock import patch
+
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        before = self.book.snapshot()
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(1))
+        view = self.ledger.get(KEY)
+        receipt, = self.venue.fills(view.broker_order_id)
+        self.reopen()
+        with patch.object(self.venue, "fills",
+                          return_value=(replace(receipt, price=D("48.99")),)):
+            with self.assertRaisesRegex(RuntimeError, "TERMINAL_BUY_FILL_DIVERGENCE"):
+                self.mgr.sync(now=at(2))
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.book.snapshot(), replace(before, halted=True))
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.reopen()
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.mgr.sync(now=at(3))
+        settled = self.book.snapshot()
+        self.assertEqual(settled.cash, D("95100"))
+        self.assertEqual(settled.reserved_cash, D(0))
+        self.assertEqual(settled.positions, (("SPY", 100, D("4900")),))
+        self.assertTrue(settled.halted)
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.mgr.sync(now=at(4))
+        self.assertEqual(self.book.snapshot(), settled)
+
+    def _assert_terminal_receipt_conflict_isolates_unrelated_terminal(self,
+                                                                   terminal_status):
+        """A conflicting terminal BUY receipt must not strand a verified hold."""
+        from unittest.mock import patch
+
+        other = "b" * 64
+        first = self.mgr.execute_entry(self.entry(), self.account(),
+                                       recon=self.recon(), now=at(),
+                                       reconciled=True)
+        second = self.mgr.execute_entry(self.entry(other, symbol="QQQ"),
+                                        self.account(), recon=self.recon(at(1)),
+                                        now=at(1), reconciled=True)
+        before = self.book.snapshot()
+        self.assertEqual(before.reserved_cash, D("10000"))
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(2))
+        terminal = self.ledger.get(KEY)
+        receipts = self.ledger.fills(KEY)
+        self.assertEqual(terminal.status, "FILLED")
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(self.book.snapshot(), before)
+        if terminal_status == "CANCELLED":
+            self.venue.cancel(second.broker_order_id)
+        else:
+            self.venue.expire_session(at=at(3))
+        self.assertEqual(self.venue.order_status(second.broker_order_id).status,
+                         terminal_status)
+        self.assertEqual(self.venue.fills(second.broker_order_id), ())
+        lookup = self.venue.fills
+        receipt, = lookup(first.broker_order_id)
+
+        def conflicting_first(order_id):
+            if order_id == first.broker_order_id:
+                return (replace(receipt, price=D("48.99")),)
+            return lookup(order_id)
+
+        with patch.object(self.venue, "fills", side_effect=conflicting_first):
+            for tick in (4, 5):
+                with self.assertRaisesRegex(RuntimeError,
+                                            "^TERMINAL_BUY_FILL_DIVERGENCE$"):
+                    self.mgr.sync(now=at(tick))
+                self.assertTrue(self.book.reconciliation_guarded())
+                self.assertEqual(self.ledger.get(KEY), terminal)
+                self.assertEqual(self.ledger.fills(KEY), receipts)
+                self.assertEqual(self.ledger.get(other).status, terminal_status)
+                self.assertEqual(self.ledger.fills(other), ())
+                remaining = self.book.snapshot()
+                self.assertEqual(remaining.reserved_cash, D("5000"))
+                self.assertEqual({row[0] for row in remaining.pending}, {KEY})
+                self.assertEqual(remaining.cash, D("100000"))
+                self.assertEqual(remaining.positions, ())
+                self.reopen()
+                self.assertEqual(self.book.snapshot(), remaining)
+                self.assertTrue(self.book.reconciliation_guarded())
+
+        # Restoring the original evidence may settle only the actual fill.
+        self.mgr.sync(now=at(6))
+        settled = self.book.snapshot()
+        self.assertEqual(settled.cash, D("95100"))
+        self.assertEqual(settled.reserved_cash, D(0))
+        self.assertEqual(settled.positions, (("SPY", 100, D("4900")),))
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.ledger.fills(KEY), receipts)
+        self.reopen()
+        self.mgr.sync(now=at(7))
+        self.assertEqual(self.book.snapshot(), settled)
+
+    def test_terminal_receipt_conflict_isolates_unrelated_cancellation(self):
+        self._assert_terminal_receipt_conflict_isolates_unrelated_terminal("CANCELLED")
+
+    def test_terminal_receipt_conflict_isolates_unrelated_expiration(self):
+        self._assert_terminal_receipt_conflict_isolates_unrelated_terminal("EXPIRED")
+
+    def _assert_terminal_buy_reservation_divergence(self, field, value):
+        import sqlite3
+        from contextlib import closing
+        from unittest.mock import patch
+
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(1))
+        # A structurally valid but contradictory durable reservation.
+        self.assertIn(field, ("symbol", "qty", "limit_price", "stop_price"))
+        with closing(sqlite3.connect(Path(self.tmp.name) / "book.sqlite")) as db:
+            with db:
+                db.execute(f"UPDATE buy_intents SET {field}=? WHERE id=?",
+                           (value, KEY))
+        self.reopen()
+        before = self.book.snapshot()
+        self.assertFalse(before.halted)
+        with self.assertRaisesRegex(ValueError, "TERMINAL_BUY_RESERVATION_DIVERGENCE"):
+            self.mgr.sync(now=at(2))
+        self.assertEqual(self.book.snapshot(), replace(before, halted=True))
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.reopen()
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.book.snapshot(), replace(before, halted=True))
+
+    def test_terminal_buy_recovery_rejects_wrong_book_symbol(self):
+        self._assert_terminal_buy_reservation_divergence("symbol", "QQQ")
+
+    def test_terminal_buy_recovery_rejects_wrong_book_quantity(self):
+        self._assert_terminal_buy_reservation_divergence("qty", 101)
+
+    def test_terminal_buy_recovery_rejects_wrong_book_limit(self):
+        self._assert_terminal_buy_reservation_divergence("limit_price", "51")
+
+    def test_terminal_buy_recovery_rejects_wrong_book_stop(self):
+        self._assert_terminal_buy_reservation_divergence("stop_price", "47")
+
+    def test_terminal_buy_veto_does_not_strand_unrelated_cancel(self):
+        self._assert_terminal_buy_veto_unrelated_terminal("CANCELLED")
+
+    def test_terminal_buy_veto_does_not_strand_unrelated_expiry(self):
+        self._assert_terminal_buy_veto_unrelated_terminal("EXPIRED")
+
+    def _assert_terminal_buy_veto_unrelated_terminal(self, terminal_status):
+        """Preserve the receipt veto and quarantine while releasing a zero-fill hold."""
+        other = "b" * 64
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        second = self.mgr.execute_entry(self.entry(other, symbol="QQQ"),
+                                        self.account(), recon=self.recon(at(1)),
+                                        now=at(1), reconciled=True)
+        self.assertEqual(second.status, "ACKED")
+        self.assertEqual(self.book.snapshot().reserved_cash, D("10000"))
+
+        # The local venue accepts a BUY below its protective stop; the book
+        # rejects it after the ledger has recorded the final fill.
+        with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS"):
+            self.mgr.advance({"SPY": D("47")}, at=at(2))
+        self.assertEqual(self.ledger.get(KEY).status, "FILLED")
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.assertEqual(self.book.snapshot().cash, D("100000"))
+        self.assertEqual(self.book.snapshot().positions, ())
+
+        self.assertTrue(self.book.reconciliation_guarded())
+        # The unresolved receipt must remain visible as an error, but it
+        # must not strand a separately acknowledged terminal order.
+        with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS"):
+            if terminal_status == "CANCELLED":
+                self.mgr.cancel(other, now=at(3))
+            else:
+                self.mgr.expire_session(at=at(3))
+        self.assertEqual(self.venue.order_status(second.broker_order_id).status,
+                         terminal_status)
+        self.assertEqual(self.ledger.get(other).status, terminal_status)
+        remaining = self.book.snapshot()
+        self.assertEqual(remaining.reserved_cash, D("5000"))
+        self.assertEqual({row[0] for row in remaining.pending}, {KEY})
+        self.assertEqual(remaining.cash, D("100000"))
+        self.assertEqual(remaining.positions, ())
+        self.reopen()
+        with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS|PAPER_BOOK_HALTED"):
+            self.mgr.sync(now=at(4))
+        self.assertEqual(self.ledger.get(other).status, terminal_status)
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.book.snapshot().pending, remaining.pending)
+        self.assertEqual(self.book.snapshot().cash, remaining.cash)
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+
+    def test_quarantined_expiry_isolates_corrupt_reservation(self):
+        import sqlite3
+        from contextlib import closing
+
+        corrupt, valid = "b" * 64, "c" * 64
+        for index, (ident, symbol) in enumerate(
+                ((KEY, "SPY"), (corrupt, "QQQ"), (valid, "IWM"))):
+            self.mgr.execute_entry(
+                self.entry(ident, symbol=symbol), self.account(),
+                recon=self.recon(at(index)), now=at(index), reconciled=True)
+        self.assertEqual(self.book.snapshot().reserved_cash, D("15000"))
+        with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS"):
+            self.mgr.advance({"SPY": D("47")}, at=at(3))
+        with closing(sqlite3.connect(Path(self.tmp.name) / "book.sqlite")) as db:
+            with db:
+                db.execute("UPDATE buy_intents SET symbol=? WHERE id=?",
+                           ("DIA", corrupt))
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$") as err:
+            self.mgr.expire_session(at=at(4))
+        self.assertIn("TERMINAL_CANCEL_RESERVATION_DIVERGENCE:" + corrupt,
+                      getattr(err.exception, "__notes__", ()))
+        self.assertEqual(self.ledger.get(valid).status, "EXPIRED")
+        self.assertEqual(self.ledger.get(corrupt).status, "EXPIRED")
+        remaining = self.book.snapshot()
+        self.assertEqual(remaining.cash, D("100000"))
+        self.assertEqual(remaining.positions, ())
+        self.assertEqual(remaining.reserved_cash, D("10000"))
+        self.assertEqual({row[0] for row in remaining.pending}, {KEY, corrupt})
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.reopen()
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$") as err:
+            self.mgr.sync(now=at(5))
+        self.assertIn("TERMINAL_CANCEL_RESERVATION_DIVERGENCE:" + corrupt,
+                      getattr(err.exception, "__notes__", ()))
+        self.assertEqual(self.book.snapshot(), remaining)
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.assertEqual(len(self.ledger.orders()), 3)
+
+    def test_quarantined_cancel_isolates_corrupt_reservation(self):
+        import sqlite3
+        from contextlib import closing
+
+        corrupt, valid = "b" * 64, "c" * 64
+        for index, (ident, symbol) in enumerate(
+                ((KEY, "SPY"), (corrupt, "QQQ"), (valid, "IWM"))):
+            self.mgr.execute_entry(
+                self.entry(ident, symbol=symbol), self.account(),
+                recon=self.recon(at(index)), now=at(index), reconciled=True)
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$"):
+            self.mgr.advance({"SPY": D("47")}, at=at(3))
+        with closing(sqlite3.connect(Path(self.tmp.name) / "book.sqlite")) as db:
+            with db:
+                db.execute("UPDATE buy_intents SET symbol=? WHERE id=?",
+                           ("DIA", corrupt))
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$") as err:
+            self.mgr.cancel(corrupt, now=at(4))
+        self.assertIn("TERMINAL_CANCEL_RESERVATION_DIVERGENCE:" + corrupt,
+                      getattr(err.exception, "__notes__", ()))
+        self.assertEqual(self.book.snapshot().reserved_cash, D("15000"))
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$") as err:
+            self.mgr.cancel(valid, now=at(5))
+        self.assertIn("TERMINAL_CANCEL_RESERVATION_DIVERGENCE:" + corrupt,
+                      getattr(err.exception, "__notes__", ()))
+        self.assertEqual(self.ledger.get(corrupt).status, "CANCELLED")
+        self.assertEqual(self.ledger.get(valid).status, "CANCELLED")
+        remaining = self.book.snapshot()
+        self.assertEqual(remaining.cash, D("100000"))
+        self.assertEqual(remaining.positions, ())
+        self.assertEqual(remaining.reserved_cash, D("10000"))
+        self.assertEqual({row[0] for row in remaining.pending}, {KEY, corrupt})
+        self.reopen()
+        self.assertTrue(self.book.reconciliation_guarded())
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$"):
+            self.mgr.sync(now=at(6))
+        self.assertEqual(self.book.snapshot(), remaining)
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+
+    def test_quarantined_expiry_retries_interrupted_hold_release(self):
+        from unittest.mock import patch
+
+        other = "b" * 64
+        for index, (ident, symbol) in enumerate(((KEY, "SPY"), (other, "QQQ"))):
+            self.mgr.execute_entry(
+                self.entry(ident, symbol=symbol), self.account(),
+                recon=self.recon(at(index)), now=at(index), reconciled=True)
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$"):
+            self.mgr.advance({"SPY": D("47")}, at=at(2))
+        # Fail after the terminal ledger commit but before the book write.
+        # An unexpected storage error must not be treated as order divergence.
+        with patch.object(OfflineReservations, "cancel_remaining",
+                          side_effect=RuntimeError("INJECTED_RELEASE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "^INJECTED_RELEASE_FAILURE$"):
+                self.mgr.expire_session(at=at(3))
+        self.assertEqual(self.ledger.get(other).status, "EXPIRED")
+        self.assertTrue(self.book.reconciliation_guarded())
+        interrupted = self.book.snapshot()
+        self.assertEqual(interrupted.reserved_cash, D("10000"))
+        self.assertEqual(interrupted.cash, D("100000"))
+        self.assertEqual(interrupted.positions, ())
+        self.reopen()
+        self.assertEqual(self.book.snapshot(), interrupted)
+        self.assertTrue(self.book.reconciliation_guarded())
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$"):
+            self.mgr.sync(now=at(4))
+        settled = self.book.snapshot()
+        self.assertEqual(settled.reserved_cash, D("5000"))
+        self.assertEqual({row[0] for row in settled.pending}, {KEY})
+        self.assertEqual(settled.cash, interrupted.cash)
+        self.assertEqual(settled.positions, ())
+        self.assertTrue(self.book.reconciliation_guarded())
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$"):
+            self.mgr.sync(now=at(5))
+        self.assertEqual(self.book.snapshot(), settled)
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.assertEqual(len(self.ledger.orders()), 2)
+
+    def test_terminal_buy_recovery_retains_loss_halt(self):
+        from unittest.mock import patch
+
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(1))
+        self.book.halt()
+        self.reopen()
+        before = self.book.snapshot()
+        self.assertTrue(before.halted)
+        # Deliberately retains the existing fail-closed bookkeeping veto.
+        # Post-halt settlement needs its own reviewed receipt capability.
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.mgr.sync(now=at(2))
+        self.assertEqual(self.book.snapshot(), before)
         self.assertEqual(len(self.ledger.fills(KEY)), 1)
 
     def test_restart_reopens_book_and_ledger_then_syncs(self):

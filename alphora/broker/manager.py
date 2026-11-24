@@ -9,8 +9,8 @@ order path.
 
 Paper-only: construction rejects any adapter whose mode is not "paper".
 Crash recovery is `sync()`: it is idempotent and safe to re-run after any
-interruption, resolving lost acknowledgments against venue truth (which, for
-the paper adapter, is complete). Ledger and book fills are recorded in two
+interruption within a retained venue history. A missing SENT order is not
+proof of non-dispatch because the paper adapter is volatile. Ledger and book fills are recorded in two
 separate databases; a crash between them leaves the ledger ahead, which the
 next idempotent sync heals — divergence beyond that is reconciliation's job.
 """
@@ -231,16 +231,14 @@ class PaperOrderManager:
     def _send(self, view, *, now):
         """mark_sent -> adapter.dispatch -> ack/reject, crash-safe.
 
-        CREATED orders are marked SENT immediately before dispatch; a crash
-        anywhere in here is healed by sync() (lost ack) or by an idempotent
-        retry of execute_entry/execute_exit (never-sent CREATED).
+        Only a CREATED order may enter dispatch. A previously SENT order
+        has an uncertain outcome and must be reconciled, never resent into
+        a potentially fresh, empty paper venue.
         """
-        if view.status == "CREATED":
-            view = self._ledger.mark_sent(view.client_order_id, now=now)
-        if view.status != "SENT":
-            # Already dispatched (or terminal) on an earlier attempt.
+        if view.status != "CREATED":
             self.sync(now=now)
             return self._ledger.get(view.client_order_id)
+        view = self._ledger.mark_sent(view.client_order_id, now=now)
         # The halt file is checked immediately before venue exposure too —
         # it may have appeared between the entry checks and this dispatch.
         self._assert_dispatchable(reduce_only=(view.side == "SELL"))
@@ -310,29 +308,53 @@ class PaperOrderManager:
     def sync(self, *, now):
         """Idempotently reconcile ledger orders against asserted venue truth.
 
-        Applies fills to ledger then book, resolves SENT lost-acks (for the
-        paper venue, absence is confirmed absence), and releases reservations
-        on venue-terminal orders. Safe to re-run after any crash; any residual
-        divergence is for the reconcile layer, not silent repair.
+        Applies fills to ledger then book and resolves SENT lost-acks only
+        when a venue record exists. A missing dispatched order is ambiguous:
+        no durable venue continuity exists yet. Preserve the order and hold,
+        persist quarantine, and require recovery evidence. Never infer a
+        cancellation from absence alone.
         """
         if not _aware(now):
             raise ValueError("INVALID_TIMESTAMP")
         actions = []
+        try:
+            self._recover_terminal_buy_fills()
+        except (ValueError, RuntimeError) as exc:
+            if not ((isinstance(exc, ValueError)
+                     and str(exc) == "FILL_EXCEEDS_LIMITS")
+                    or (isinstance(exc, RuntimeError) and str(exc) in (
+                        "TERMINAL_BUY_ORDER_DIVERGENCE",
+                        "TERMINAL_BUY_FILL_DIVERGENCE"))):
+                raise
+            # Do not resume general sync or dispatch after a rejected receipt
+            # or missing/conflicting terminal execution evidence.
+            # Keep the original error visible, but permit independently
+            # confirmed, unfilled cancellations/expiries to release their holds.
+            self._book.finish_reconciliation(None, fatal=True)
+            for diagnostic in self._settle_quarantined_zero_fill_terminals(now=now):
+                exc.add_note(diagnostic)
+            raise
         for view in self._ledger.open_orders():
             venue = (self._adapter.order_status(view.broker_order_id)
                      if view.broker_order_id else
                      self._adapter.order_by_client(view.client_order_id))
             if venue is None:
-                if view.status == "SENT":
-                    self._ledger.mark_cancelled(view.client_order_id, now=now,
-                                                confirmed_absent=True)
-                    self._release_reservation(view)
-                    actions.append(f"ABSENT:{view.client_order_id}")
-                elif view.status == "CREATED":
+                if view.status == "CREATED":
                     continue  # reserved but never sent; caller may retry
-                else:
-                    raise RuntimeError("VENUE_ORDER_MISSING")
-                continue
+                # Absence of a dispatched order is not proof of non-dispatch
+                # or settlement. Persist the same fatal guard for SENT and
+                # acknowledged/in-flight states before exposing the error.
+                # Keep ledger, receipts and reservations unchanged.
+                self._book.finish_reconciliation(None, fatal=True)
+                error = RuntimeError(
+                    "PAPER_VENUE_RECOVERY_REQUIRED" if view.status == "SENT"
+                    else "VENUE_ORDER_MISSING")
+                # Recover only independently verified unfilled terminal holds.
+                # Exclude the missing order even if a repeat lookup changes.
+                for diagnostic in self._settle_quarantined_zero_fill_terminals(
+                        now=now, exclude_order_id=view.client_order_id):
+                    error.add_note(diagnostic)
+                raise error
             if view.status == "SENT":
                 view = self._ledger.mark_acked(view.client_order_id,
                                                venue.broker_order_id, now=now)
@@ -363,15 +385,132 @@ class PaperOrderManager:
                 actions.append(f"EXPIRED:{view.client_order_id}")
         return tuple(actions)
 
+    def _settle_quarantined_zero_fill_terminals(self, *, now,
+                                               exclude_order_id=None):
+        """Bounded recovery only: no fill application or order dispatch.
+
+        Also inspect ledger-terminal orders with a remaining hold, so a crash
+        between terminal ledger transition and release can be retried. A
+        conflicting or partially filled order is never released by this path.
+        Return order-scoped book divergence diagnostics without suppressing
+        unexpected errors; the caller preserves the primary reconciliation veto.
+        Exclude an order whose lookup already failed in this sync attempt.
+        """
+        diagnostics = []
+        pending = {ident for ident, _sym, _qty, _value
+                   in self._book.snapshot().pending}
+        for view in self._ledger.orders():
+            if (view.client_order_id == exclude_order_id
+                    or view.side != "BUY" or view.client_order_id not in pending
+                    or view.filled != 0 or not view.broker_order_id
+                    or view.status not in ("ACKED", "CANCEL_PENDING",
+                                           "CANCELLED", "EXPIRED")):
+                continue
+            venue = self._adapter.order_status(view.broker_order_id)
+            if (venue is None or venue.status not in ("CANCELLED", "EXPIRED")
+                    or venue.broker_order_id != view.broker_order_id
+                    or venue.client_order_id != view.client_order_id
+                    or venue.symbol != view.symbol or venue.side != view.side
+                    or venue.qty != view.qty or venue.filled != 0
+                    or venue.limit_price != view.limit_price
+                    or self._ledger.fills(view.client_order_id)
+                    or self._adapter.fills(view.broker_order_id)):
+                continue
+            if view.status in ("CANCELLED", "EXPIRED"):
+                if view.status != venue.status:
+                    continue
+            elif venue.status == "CANCELLED":
+                self._ledger.request_cancel(view.client_order_id, now=now)
+                self._ledger.mark_cancelled(view.client_order_id, now=now)
+            else:
+                self._ledger.mark_expired(view.client_order_id, now=now)
+            try:
+                self._book.cancel_remaining(
+                    view.client_order_id,
+                    expected_unfilled_order=(view.symbol, view.qty,
+                                             view.limit_price, view.stop_price))
+            except ValueError as exc:
+                if str(exc) != "TERMINAL_CANCEL_RESERVATION_DIVERGENCE":
+                    raise
+                # The failed book transaction rolled back. Retain this hold,
+                # report its identity, and inspect the next independent order.
+                diagnostics.append(f"{exc}:{view.client_order_id}")
+        return tuple(diagnostics)
+
+    def _recover_terminal_buy_fills(self):
+        """Replay only ledger-terminal BUYs with outstanding book holds.
+
+        A final ledger commit can precede a failed book commit. Require the
+        same terminal order and complete immutable receipts from the local
+        simulated venue before touching the book. Keep the existing book
+        vetoes (including daily-loss halt) and receipt deduplication intact.
+        This narrow recovery does not authorize dispatch or resolve SELLs.
+        """
+        pending = {ident for ident, _sym, _qty, _value
+                   in self._book.snapshot().pending}
+        if not pending:
+            return
+        for view in self._ledger.orders():
+            if view.status != "FILLED" or view.side != "BUY":
+                continue
+            if view.client_order_id not in pending:
+                continue
+            venue = (self._adapter.order_status(view.broker_order_id)
+                     if view.broker_order_id else None)
+            if (venue is None or venue.status != "FILLED"
+                    or venue.broker_order_id != view.broker_order_id
+                    or venue.client_order_id != view.client_order_id
+                    or venue.symbol != view.symbol or venue.side != view.side
+                    or venue.qty != view.qty or venue.filled != view.qty
+                    or venue.limit_price != view.limit_price):
+                raise RuntimeError("TERMINAL_BUY_ORDER_DIVERGENCE")
+            recorded = self._ledger.fills(view.client_order_id)
+            asserted = self._adapter.fills(view.broker_order_id)
+            by_id = {fill.fill_id: fill for fill in asserted}
+            if (len(by_id) != len(asserted) or len(by_id) != len(recorded)
+                    or not recorded or sum(f.qty for f in recorded) != view.qty):
+                raise RuntimeError("TERMINAL_BUY_FILL_DIVERGENCE")
+            for receipt in recorded:
+                fill = by_id.get(receipt.fill_id)
+                if (fill is None or fill.client_order_id != view.client_order_id
+                        or fill.broker_order_id != view.broker_order_id
+                        or fill.symbol != view.symbol or fill.side != view.side
+                        or fill.qty != receipt.qty or fill.price != receipt.price
+                        or fill.fee != receipt.fee
+                        or not _aware(fill.occurred_at)
+                        or fill.occurred_at.astimezone(timezone.utc)
+                           != receipt.occurred_at.astimezone(timezone.utc)):
+                    raise RuntimeError("TERMINAL_BUY_FILL_DIVERGENCE")
+            # All receipts were checked before any write. Existing receipts
+            # are harmless replays; an unapplied receipt consumes its hold.
+            for receipt in recorded:
+                try:
+                    self._book.record_hypothetical_fill(
+                        view.client_order_id, receipt.fill_id, receipt.qty,
+                        receipt.price, fee=receipt.fee,
+                        expected_order=(view.symbol, view.qty, view.limit_price,
+                                        view.stop_price))
+                except ValueError as exc:
+                    if str(exc) == "TERMINAL_BUY_RESERVATION_DIVERGENCE":
+                        # The failed book write rolled back. Latch the existing
+                        # reconciliation guard so subsequent dispatch is denied.
+                        self._book.finish_reconciliation(None, fatal=True)
+                    raise
+
     def _record_fill(self, view, fill, now):
         """Record a venue fill in ledger then book; both dedupe by fill id."""
         self._ledger.record_fill(view.client_order_id, fill.fill_id, fill.qty,
                                  fill.price, fee=fill.fee,
                                  occurred_at=fill.occurred_at, now=now)
         if view.side == "BUY":
-            self._book.record_hypothetical_fill(view.client_order_id,
-                                                fill.fill_id, fill.qty,
-                                                fill.price, fee=fill.fee)
+            try:
+                self._book.record_hypothetical_fill(view.client_order_id,
+                                                    fill.fill_id, fill.qty,
+                                                    fill.price, fee=fill.fee)
+            except ValueError as exc:
+                if str(exc) == "FILL_EXCEEDS_LIMITS":
+                    self._book.finish_reconciliation(None, fatal=True)
+                raise
         else:
             self._book.record_hypothetical_sell(fill.fill_id, fill.symbol,
                                                 fill.qty, fill.price,

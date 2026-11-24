@@ -601,14 +601,29 @@ class OfflineReservations:
         raise ValueError("RISK_VETO:DAILY_LOSS_HALT")
 
     def record_hypothetical_fill(self, intent_id: str, fill_id: str,
-                                 qty: int, price: D, *, fee: D = D(0)):
-        """Record an *invented offline simulation fill*, not a broker event."""
+                                 qty: int, price: D, *, fee: D = D(0),
+                                 expected_order=None):
+        """Record an *invented offline simulation fill*, not a broker event.
+
+        Terminal recovery supplies the ledger's immutable order identity.
+        Validate it under the same write lock as the receipt, even on replay.
+        This additional check never bypasses the halt or other book vetoes.
+        """
         if (not isinstance(intent_id, str) or not _ID.fullmatch(intent_id)
                 or not isinstance(fill_id, str) or not _ID.fullmatch(fill_id)
                 or not _integer_shares(qty) or not _money(price, positive=True)
                 or not _money(fee)):
             raise ValueError("INVALID_SYNTHETIC_FILL")
         with self._write():
+            if expected_order is not None:
+                identity = self._db.execute(
+                    "SELECT symbol,qty,limit_price,stop_price FROM buy_intents WHERE id=?",
+                    (intent_id,),
+                ).fetchone()
+                if (identity is None or
+                        (identity[0], identity[1], _decimal(identity[2]),
+                         _decimal(identity[3])) != expected_order):
+                    raise ValueError("TERMINAL_BUY_RESERVATION_DIVERGENCE")
             existing = self._db.execute(
                 "SELECT intent_id,qty,price,fee FROM hypothetical_fills WHERE id=?",
                 (fill_id,),
@@ -738,7 +753,7 @@ class OfflineReservations:
                 (str(new_cash),))
             return self._snapshot()
 
-    def cancel_remaining(self, intent_id: str):
+    def cancel_remaining(self, intent_id: str, *, expected_unfilled_order=None):
         if not isinstance(intent_id, str) or not _ID.fullmatch(intent_id):
             raise ValueError("INVALID_INTENT_ID")
         with self._write():
@@ -746,6 +761,21 @@ class OfflineReservations:
                                    (intent_id,)).fetchone()
             if row is None:
                 raise ValueError("UNKNOWN_INTENT")
+            # The quarantined recovery path may release only an independently
+            # confirmed zero-fill terminal BUY with matching durable identity.
+            if expected_unfilled_order is not None:
+                identity = self._db.execute(
+                    "SELECT symbol,qty,limit_price,stop_price,filled "
+                    "FROM buy_intents WHERE id=?", (intent_id,),
+                ).fetchone()
+                if (row[0] not in ("OPEN", "CANCELLED")
+                        or identity is None or identity[4] != 0
+                        or (identity[0], identity[1], _decimal(identity[2]),
+                            _decimal(identity[3])) != expected_unfilled_order
+                        or self._db.execute(
+                            "SELECT 1 FROM hypothetical_fills WHERE intent_id=?",
+                            (intent_id,)).fetchone() is not None):
+                    raise ValueError("TERMINAL_CANCEL_RESERVATION_DIVERGENCE")
             if row[0] == "OPEN":
                 self._db.execute("UPDATE buy_intents SET status='CANCELLED' WHERE id=?", (intent_id,))
             return self._snapshot()
