@@ -9,7 +9,8 @@ from datetime import date
 from decimal import Context, Decimal as D, localcontext
 
 from .backtest import _exact_ledger, validate
-from .benchmarks import AlignedWindowMetrics, _aligned_metrics
+from .benchmarks import (AlignedWindowMetrics, BenchmarkComparison,
+                         _aligned_metrics, compare_with_spy)
 
 
 @dataclass(frozen=True)
@@ -102,3 +103,30 @@ def daily_open_reference(bars, *, initial=D("100000"),
         _exact_ledger(lambda: sum((row.fee for row in observations), D(0))),
         _exact_ledger(lambda: sum((row.traded_notional for row in observations), D(0))),
     )
+
+
+@dataclass(frozen=True)
+class AlignedDailyOpenComparison:
+    legacy: BenchmarkComparison
+    daily_open_spy: DailyRebalancedReference
+    excess_vs_daily_open_spy: D
+
+
+def compare_with_daily_open_spy(strategy_bars, spy_bars, strategy_name, *,
+                                initial=D("100000"), cost_bps=D("5"),
+                                max_allocation=D("0.10"), lookback=20):
+    """Synthetic-only comparison on the existing post-warm-up window.
+
+    The daily-open reference is an idealized same-open allocation, unlike
+    the strategy's next-open execution. This comparison is descriptive,
+    not an executable strategy, matched-exposure alpha or total return.
+    """
+    legacy = compare_with_spy(
+        strategy_bars, spy_bars, strategy_name, initial=initial,
+        cost_bps=cost_bps, max_allocation=max_allocation, lookback=lookback)
+    window = spy_bars[legacy.evaluation_start:]
+    daily = daily_open_reference(
+        window, initial=initial, target=max_allocation, cost_bps=cost_bps)
+    with localcontext(Context(prec=28)):
+        excess = legacy.aligned_strategy.total_return - daily.metrics.total_return
+    return AlignedDailyOpenComparison(legacy, daily, excess)
