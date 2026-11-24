@@ -309,7 +309,7 @@ class PaperOrderManager:
         """Idempotently reconcile ledger orders against asserted venue truth.
 
         Applies fills to ledger then book and resolves SENT lost-acks only
-        when a venue record exists. A missing SENT record is ambiguous:
+        when a venue record exists. A missing dispatched order is ambiguous:
         no durable venue continuity exists yet. Preserve the order and hold,
         persist quarantine, and require recovery evidence. Never infer a
         cancellation from absence alone.
@@ -334,17 +334,16 @@ class PaperOrderManager:
                      if view.broker_order_id else
                      self._adapter.order_by_client(view.client_order_id))
             if venue is None:
-                if view.status == "SENT":
-                    # No persistent venue-generation or non-dispatch receipt
-                    # exists. Even a same-process empty lookup is insufficient
-                    # to prove that this durable SENT order was never accepted.
-                    self._book.finish_reconciliation(None, fatal=True)
-                    raise RuntimeError("PAPER_VENUE_RECOVERY_REQUIRED")
-                elif view.status == "CREATED":
+                if view.status == "CREATED":
                     continue  # reserved but never sent; caller may retry
-                else:
-                    raise RuntimeError("VENUE_ORDER_MISSING")
-                continue
+                # Absence of a dispatched order is not proof of non-dispatch
+                # or settlement. Persist the same fatal guard for SENT and
+                # acknowledged/in-flight states before exposing the error.
+                # Keep ledger, receipts and reservations unchanged.
+                self._book.finish_reconciliation(None, fatal=True)
+                if view.status == "SENT":
+                    raise RuntimeError("PAPER_VENUE_RECOVERY_REQUIRED")
+                raise RuntimeError("VENUE_ORDER_MISSING")
             if view.status == "SENT":
                 view = self._ledger.mark_acked(view.client_order_id,
                                                venue.broker_order_id, now=now)
