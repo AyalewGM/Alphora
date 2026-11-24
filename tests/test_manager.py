@@ -526,6 +526,45 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.book.snapshot().cash, remaining.cash)
         self.assertEqual(len(self.ledger.fills(KEY)), 1)
 
+    def test_quarantined_expiry_isolates_corrupt_reservation(self):
+        import sqlite3
+        from contextlib import closing
+
+        corrupt, valid = "b" * 64, "c" * 64
+        for index, (ident, symbol) in enumerate(
+                ((KEY, "SPY"), (corrupt, "QQQ"), (valid, "IWM"))):
+            self.mgr.execute_entry(
+                self.entry(ident, symbol=symbol), self.account(),
+                recon=self.recon(at(index)), now=at(index), reconciled=True)
+        self.assertEqual(self.book.snapshot().reserved_cash, D("15000"))
+        with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS"):
+            self.mgr.advance({"SPY": D("47")}, at=at(3))
+        with closing(sqlite3.connect(Path(self.tmp.name) / "book.sqlite")) as db:
+            with db:
+                db.execute("UPDATE buy_intents SET symbol=? WHERE id=?",
+                           ("DIA", corrupt))
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$") as err:
+            self.mgr.expire_session(at=at(4))
+        self.assertIn("TERMINAL_CANCEL_RESERVATION_DIVERGENCE:" + corrupt,
+                      getattr(err.exception, "__notes__", ()))
+        self.assertEqual(self.ledger.get(valid).status, "EXPIRED")
+        self.assertEqual(self.ledger.get(corrupt).status, "EXPIRED")
+        remaining = self.book.snapshot()
+        self.assertEqual(remaining.cash, D("100000"))
+        self.assertEqual(remaining.positions, ())
+        self.assertEqual(remaining.reserved_cash, D("10000"))
+        self.assertEqual({row[0] for row in remaining.pending}, {KEY, corrupt})
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.reopen()
+        with self.assertRaisesRegex(ValueError, "^FILL_EXCEEDS_LIMITS$") as err:
+            self.mgr.sync(now=at(5))
+        self.assertIn("TERMINAL_CANCEL_RESERVATION_DIVERGENCE:" + corrupt,
+                      getattr(err.exception, "__notes__", ()))
+        self.assertEqual(self.book.snapshot(), remaining)
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.assertEqual(len(self.ledger.orders()), 3)
+
     def test_terminal_buy_recovery_retains_loss_halt(self):
         from unittest.mock import patch
 
