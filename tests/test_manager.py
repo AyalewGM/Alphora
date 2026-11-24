@@ -381,6 +381,43 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.ledger.get(KEY).status, "CANCELLED")
         self.assertEqual(self.book.snapshot().reserved_cash, D(0))
 
+    def test_cold_venue_restart_cannot_confirm_lost_ack_absent(self):
+        """Losing volatile venue state is not evidence of non-dispatch."""
+        proposal = BuyProposal("SPY", D("100"), D("50"), D("48"))
+        self.book.reserve_buy(KEY, self.account(), proposal, reconciled=True)
+        self.ledger.create(KEY, symbol="SPY", side="BUY", qty=100,
+                           limit_price=D("50"), stop_price=D("48"), now=at())
+        self.ledger.mark_sent(KEY, now=at(1))
+        ack = self.venue.dispatch(
+            DispatchRequest("SPY", "BUY", 100, D("50")),
+            client_order_id=KEY)
+        self.assertTrue(ack.accepted)
+        # The venue fills before the acknowledgement reaches the ledger.
+        # Both the acknowledgement and receipt are lost with volatile venue state.
+        self.venue.advance({"SPY": D("49")}, at=at(2))
+        self.assertEqual(self.venue.account_snapshot().cash, D("95100"))
+        self.assertEqual(self.ledger.get(KEY).status, "SENT")
+        before = self.book.snapshot()
+        self.assertEqual(before.reserved_cash, D("5000"))
+        self.assertEqual(before.cash, D("100000"))
+        self.assertEqual(before.positions, ())
+        self.assertEqual(len(self.ledger.fills(KEY)), 0)
+
+        self.venue = PaperBrokerAdapter()
+        self.reopen()
+        # A new empty venue must not be treated as authoritative proof that
+        # an old SENT order never reached the prior venue.
+        with self.assertRaises((RuntimeError, ValueError)):
+            self.mgr.sync(now=at(3))
+        self.assertEqual(self.ledger.get(KEY).status, "SENT")
+        after = self.book.snapshot()
+        self.assertEqual(after.reserved_cash, before.reserved_cash)
+        self.assertEqual(after.cash, before.cash)
+        self.assertEqual(after.positions, before.positions)
+        self.assertEqual(after.pending, before.pending)
+        self.assertEqual(len(self.ledger.fills(KEY)), 0)
+        self.assertEqual(self.venue.open_orders(), ())
+
     def test_terminal_fill_recovers_after_book_write_failure(self):
         """An ACKed final fill must settle exactly once after a book fault."""
         from unittest.mock import patch
