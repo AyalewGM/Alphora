@@ -381,6 +381,37 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.ledger.get(KEY).status, "CANCELLED")
         self.assertEqual(self.book.snapshot().reserved_cash, D(0))
 
+    def test_terminal_fill_recovers_after_book_write_failure(self):
+        """An ACKed final fill must settle exactly once after a book fault."""
+        from unittest.mock import patch
+
+        view = self.mgr.execute_entry(self.entry(), self.account(),
+                                      recon=self.recon(), now=at(),
+                                      reconciled=True)
+        self.assertEqual(view.status, "ACKED")
+        before = self.book.snapshot()
+        # Inject the failure at the second persistence boundary only.
+        # Keep the simulated venue alive, as in the existing reopen fixture.
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(1))
+        self.assertEqual(self.ledger.get(KEY).status, "FILLED")
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.assertEqual(self.book.snapshot(), before)
+        self.assertEqual(self.venue.account_snapshot().cash, D("95100"))
+
+        self.reopen()
+        self.mgr.sync(now=at(2))
+        settled = self.book.snapshot()
+        self.assertEqual(settled.cash, D("95100"))
+        self.assertEqual(settled.reserved_cash, D(0))
+        self.assertEqual(settled.positions, (("SPY", 100, D("4900")),))
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.mgr.sync(now=at(3))
+        self.assertEqual(self.book.snapshot(), settled)
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+
     def test_restart_reopens_book_and_ledger_then_syncs(self):
         self.mgr.execute_entry(self.entry(), self.account(),
                                recon=self.recon(), now=at(),
