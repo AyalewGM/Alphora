@@ -411,9 +411,18 @@ class PaperOrderManager:
             # All receipts were checked before any write. Existing receipts
             # are harmless replays; an unapplied receipt consumes its hold.
             for receipt in recorded:
-                self._book.record_hypothetical_fill(
-                    view.client_order_id, receipt.fill_id, receipt.qty,
-                    receipt.price, fee=receipt.fee)
+                try:
+                    self._book.record_hypothetical_fill(
+                        view.client_order_id, receipt.fill_id, receipt.qty,
+                        receipt.price, fee=receipt.fee,
+                        expected_order=(view.symbol, view.qty, view.limit_price,
+                                        view.stop_price))
+                except ValueError as exc:
+                    if str(exc) == "TERMINAL_BUY_RESERVATION_DIVERGENCE":
+                        # The failed book write rolled back. Latch the existing
+                        # reconciliation guard so subsequent dispatch is denied.
+                        self._book.finish_reconciliation(None, fatal=True)
+                    raise
 
     def _record_fill(self, view, fill, now):
         """Record a venue fill in ledger then book; both dedupe by fill id."""
