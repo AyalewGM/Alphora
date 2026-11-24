@@ -412,6 +412,48 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.book.snapshot(), settled)
         self.assertEqual(len(self.ledger.fills(KEY)), 1)
 
+    def test_terminal_buy_recovery_rejects_conflicting_venue_receipt(self):
+        from unittest.mock import patch
+
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        before = self.book.snapshot()
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(1))
+        view = self.ledger.get(KEY)
+        receipt, = self.venue.fills(view.broker_order_id)
+        self.reopen()
+        with patch.object(self.venue, "fills",
+                          return_value=(replace(receipt, price=D("48.99")),)):
+            with self.assertRaisesRegex(RuntimeError, "TERMINAL_BUY_FILL_DIVERGENCE"):
+                self.mgr.sync(now=at(2))
+        self.assertEqual(self.book.snapshot(), before)
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+        self.mgr.sync(now=at(3))
+        self.assertEqual(self.book.snapshot().cash, D("95100"))
+
+    def test_terminal_buy_recovery_retains_loss_halt(self):
+        from unittest.mock import patch
+
+        self.mgr.execute_entry(self.entry(), self.account(),
+                               recon=self.recon(), now=at(), reconciled=True)
+        with patch.object(OfflineReservations, "record_hypothetical_fill",
+                          side_effect=RuntimeError("INJECTED_BOOK_WRITE_FAILURE")):
+            with self.assertRaisesRegex(RuntimeError, "INJECTED_BOOK_WRITE_FAILURE"):
+                self.mgr.advance({"SPY": D("49")}, at=at(1))
+        self.book.halt()
+        self.reopen()
+        before = self.book.snapshot()
+        self.assertTrue(before.halted)
+        # Deliberately retains the existing fail-closed bookkeeping veto.
+        # Post-halt settlement needs its own reviewed receipt capability.
+        with self.assertRaisesRegex(ValueError, "PAPER_BOOK_HALTED"):
+            self.mgr.sync(now=at(2))
+        self.assertEqual(self.book.snapshot(), before)
+        self.assertEqual(len(self.ledger.fills(KEY)), 1)
+
     def test_restart_reopens_book_and_ledger_then_syncs(self):
         self.mgr.execute_entry(self.entry(), self.account(),
                                recon=self.recon(), now=at(),
