@@ -9,8 +9,8 @@ order path.
 
 Paper-only: construction rejects any adapter whose mode is not "paper".
 Crash recovery is `sync()`: it is idempotent and safe to re-run after any
-interruption, resolving lost acknowledgments against venue truth (which, for
-the paper adapter, is complete). Ledger and book fills are recorded in two
+interruption within a retained venue history. A missing SENT order is not
+proof of non-dispatch because the paper adapter is volatile. Ledger and book fills are recorded in two
 separate databases; a crash between them leaves the ledger ahead, which the
 next idempotent sync heals — divergence beyond that is reconciliation's job.
 """
@@ -231,16 +231,14 @@ class PaperOrderManager:
     def _send(self, view, *, now):
         """mark_sent -> adapter.dispatch -> ack/reject, crash-safe.
 
-        CREATED orders are marked SENT immediately before dispatch; a crash
-        anywhere in here is healed by sync() (lost ack) or by an idempotent
-        retry of execute_entry/execute_exit (never-sent CREATED).
+        Only a CREATED order may enter dispatch. A previously SENT order
+        has an uncertain outcome and must be reconciled, never resent into
+        a potentially fresh, empty paper venue.
         """
-        if view.status == "CREATED":
-            view = self._ledger.mark_sent(view.client_order_id, now=now)
-        if view.status != "SENT":
-            # Already dispatched (or terminal) on an earlier attempt.
+        if view.status != "CREATED":
             self.sync(now=now)
             return self._ledger.get(view.client_order_id)
+        view = self._ledger.mark_sent(view.client_order_id, now=now)
         # The halt file is checked immediately before venue exposure too —
         # it may have appeared between the entry checks and this dispatch.
         self._assert_dispatchable(reduce_only=(view.side == "SELL"))
@@ -310,10 +308,11 @@ class PaperOrderManager:
     def sync(self, *, now):
         """Idempotently reconcile ledger orders against asserted venue truth.
 
-        Applies fills to ledger then book, resolves SENT lost-acks (for the
-        paper venue, absence is confirmed absence), and releases reservations
-        on venue-terminal orders. Safe to re-run after any crash; any residual
-        divergence is for the reconcile layer, not silent repair.
+        Applies fills to ledger then book and resolves SENT lost-acks only
+        when a venue record exists. A missing SENT record is ambiguous:
+        no durable venue continuity exists yet. Preserve the order and hold,
+        persist quarantine, and require recovery evidence. Never infer a
+        cancellation from absence alone.
         """
         if not _aware(now):
             raise ValueError("INVALID_TIMESTAMP")
@@ -336,10 +335,11 @@ class PaperOrderManager:
                      self._adapter.order_by_client(view.client_order_id))
             if venue is None:
                 if view.status == "SENT":
-                    self._ledger.mark_cancelled(view.client_order_id, now=now,
-                                                confirmed_absent=True)
-                    self._release_reservation(view)
-                    actions.append(f"ABSENT:{view.client_order_id}")
+                    # No persistent venue-generation or non-dispatch receipt
+                    # exists. Even a same-process empty lookup is insufficient
+                    # to prove that this durable SENT order was never accepted.
+                    self._book.finish_reconciliation(None, fatal=True)
+                    raise RuntimeError("PAPER_VENUE_RECOVERY_REQUIRED")
                 elif view.status == "CREATED":
                     continue  # reserved but never sent; caller may retry
                 else:

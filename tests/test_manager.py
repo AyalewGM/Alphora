@@ -369,17 +369,22 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual((view.status, view.broker_order_id),
                          ("ACKED", "paper-00000001"))
 
-    def test_never_sent_order_confirmed_absent_and_released(self):
-        # Crash between mark_sent and dispatch: venue never saw it.
+    def test_sent_without_venue_evidence_retains_hold(self):
+        # Crash between mark_sent and dispatch: the manager cannot prove that
+        # this is the same complete venue history. Fail closed until continuity
+        # evidence is implemented.
         proposal = BuyProposal("SPY", D("100"), D("50"), D("48"))
         self.book.reserve_buy(KEY, self.account(), proposal, reconciled=True)
         self.ledger.create(KEY, symbol="SPY", side="BUY", qty=100,
                            limit_price=D("50"), stop_price=D("48"), now=at())
         self.ledger.mark_sent(KEY, now=at(1))
-        actions = self.mgr.sync(now=at(2))
-        self.assertIn(f"ABSENT:{KEY}", actions)
-        self.assertEqual(self.ledger.get(KEY).status, "CANCELLED")
-        self.assertEqual(self.book.snapshot().reserved_cash, D(0))
+        before = self.book.snapshot()
+        with self.assertRaisesRegex(RuntimeError, "PAPER_VENUE_RECOVERY_REQUIRED"):
+            self.mgr.sync(now=at(2))
+        self.assertEqual(self.ledger.get(KEY).status, "SENT")
+        self.assertEqual(self.book.snapshot(), before)
+        self.assertTrue(self.book.reconciliation_guarded())
+        self.assertEqual(self.venue.open_orders(), ())
 
     def test_cold_venue_restart_cannot_confirm_lost_ack_absent(self):
         """Losing volatile venue state is not evidence of non-dispatch."""
@@ -407,8 +412,9 @@ class ManagerTests(unittest.TestCase):
         self.reopen()
         # A new empty venue must not be treated as authoritative proof that
         # an old SENT order never reached the prior venue.
-        with self.assertRaises((RuntimeError, ValueError)):
+        with self.assertRaisesRegex(RuntimeError, "PAPER_VENUE_RECOVERY_REQUIRED"):
             self.mgr.sync(now=at(3))
+        self.assertTrue(self.book.reconciliation_guarded())
         self.assertEqual(self.ledger.get(KEY).status, "SENT")
         after = self.book.snapshot()
         self.assertEqual(after.reserved_cash, before.reserved_cash)
@@ -417,6 +423,21 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(after.pending, before.pending)
         self.assertEqual(len(self.ledger.fills(KEY)), 0)
         self.assertEqual(self.venue.open_orders(), ())
+        # The quarantine survives a second database reopen. An attempted
+        # resend of the prior SENT view must not create a fresh venue order.
+        self.reopen()
+        self.assertTrue(self.book.reconciliation_guarded())
+        for recover in (
+                lambda: self.mgr.sync(now=at(4)),
+                lambda: self.mgr._send(self.ledger.get(KEY), now=at(4))):
+            with self.assertRaisesRegex(RuntimeError, "PAPER_VENUE_RECOVERY_REQUIRED"):
+                recover()
+            self.assertEqual(self.ledger.get(KEY).status, "SENT")
+            self.assertEqual(self.book.snapshot(), after)
+            self.assertEqual(self.ledger.fills(KEY), ())
+            self.assertEqual(self.venue.open_orders(), ())
+        self.assertEqual(self.venue.account_snapshot().cash, D("100000"))
+        self.assertTrue(self.book.reconciliation_guarded())
 
     def test_terminal_fill_recovers_after_book_write_failure(self):
         """An ACKed final fill must settle exactly once after a book fault."""
