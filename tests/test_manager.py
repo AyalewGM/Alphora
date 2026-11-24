@@ -476,7 +476,13 @@ class ManagerTests(unittest.TestCase):
         self._assert_terminal_buy_reservation_divergence("stop_price", "47")
 
     def test_terminal_buy_veto_does_not_strand_unrelated_cancel(self):
-        """Preserve the receipt veto while settling an unrelated cancellation."""
+        self._assert_terminal_buy_veto_unrelated_terminal("CANCELLED")
+
+    def test_terminal_buy_veto_does_not_strand_unrelated_expiry(self):
+        self._assert_terminal_buy_veto_unrelated_terminal("EXPIRED")
+
+    def _assert_terminal_buy_veto_unrelated_terminal(self, terminal_status):
+        """Preserve the receipt veto and quarantine while releasing a zero-fill hold."""
         other = "b" * 64
         self.mgr.execute_entry(self.entry(), self.account(),
                                recon=self.recon(), now=at(), reconciled=True)
@@ -495,13 +501,17 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.book.snapshot().cash, D("100000"))
         self.assertEqual(self.book.snapshot().positions, ())
 
+        self.assertTrue(self.book.reconciliation_guarded())
         # The unresolved receipt must remain visible as an error, but it
-        # must not strand a separately acknowledged cancellation.
+        # must not strand a separately acknowledged terminal order.
         with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS"):
-            self.mgr.cancel(other, now=at(3))
+            if terminal_status == "CANCELLED":
+                self.mgr.cancel(other, now=at(3))
+            else:
+                self.mgr.expire_session(at=at(3))
         self.assertEqual(self.venue.order_status(second.broker_order_id).status,
-                         "CANCELLED")
-        self.assertEqual(self.ledger.get(other).status, "CANCELLED")
+                         terminal_status)
+        self.assertEqual(self.ledger.get(other).status, terminal_status)
         remaining = self.book.snapshot()
         self.assertEqual(remaining.reserved_cash, D("5000"))
         self.assertEqual({row[0] for row in remaining.pending}, {KEY})
@@ -510,7 +520,8 @@ class ManagerTests(unittest.TestCase):
         self.reopen()
         with self.assertRaisesRegex(ValueError, "FILL_EXCEEDS_LIMITS|PAPER_BOOK_HALTED"):
             self.mgr.sync(now=at(4))
-        self.assertEqual(self.ledger.get(other).status, "CANCELLED")
+        self.assertEqual(self.ledger.get(other).status, terminal_status)
+        self.assertTrue(self.book.reconciliation_guarded())
         self.assertEqual(self.book.snapshot().pending, remaining.pending)
         self.assertEqual(self.book.snapshot().cash, remaining.cash)
         self.assertEqual(len(self.ledger.fills(KEY)), 1)
