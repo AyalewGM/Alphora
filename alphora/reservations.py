@@ -447,6 +447,11 @@ class OfflineReservations:
         # Preserve the established already-halted rejection contract while
         # recording new loss observations even on idempotent retries.
         if self.snapshot().halted:
+            # A temporary reconciliation quarantine must still reject BUYs,
+            # but must not swallow a reconciled breach on this entry path.
+            # The observer skips an already-persisted terminal halt and
+            # commits any new one before we raise outside its transaction.
+            self.observe_daily_loss(account, reconciled=reconciled)
             raise ValueError("PAPER_BOOK_HALTED")
         observed = self.observe_daily_loss(account, reconciled=reconciled)
         if observed.halted:
