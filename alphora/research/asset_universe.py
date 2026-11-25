@@ -88,7 +88,7 @@ def inspect_universe(assets, *, as_of, source, revision, license_claim,
                     (not _date(asset.delisting_date)
                      or asset.delisting_date < asset.listing_date))
                 or not _aware(asset.membership_available_at)
-                or asset.membership_available_at > as_of
+                or asset.membership_available_at.astimezone(timezone.utc) > as_of.astimezone(timezone.utc)
                 or type(asset.included) is not bool
                 or (asset.included and asset.exclusion_reason is not None)
                 or (not asset.included and asset.exclusion_reason not in _REASONS)
