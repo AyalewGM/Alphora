@@ -4,22 +4,38 @@ The compare_with_spy() helper compares a strategy with two SPY **buy-and-hold
 references**, not exposure-matched counterfactuals:
 
 1. Capped SPY buy-and-hold: the same initial cash, transaction cost and
-   *maximum instrument allocation* as the strategy, **but continuously
-   invested after entry**, regardless of strategy's time in market.
+   initial-entry allocation budget as the strategy, **but continuously
+   invested after entry**, regardless of strategy's time in market. It is
+   not a continuously enforced maximum instrument allocation.
 2. Fully invested SPY buy-and-hold: 100% simulated exposure, for research
    context **only**, not compliant with Alphora's 10% per-ticker paper policy.
 
-All series must have identical date indexes. Non-buy_hold strategies require
-a lookback+1 prior-close signal before a next-session-open fill; SPY baselines
-therefore begin at the aligned first eligible trade bar. The result includes
-evaluation_start, the index where the price-only benchmark window begins,
-and excess_vs_capped_buy_hold instead of the misleading
-comparable_excess_return label.
+All series must have identical date indexes. For non-buy_hold strategies,
+`evaluation_start = lookback` (zero-based), the initial cash observation at
+the close of the last warm-up bar. The first eligible signal uses the first
+`lookback + 1` closes; its earliest possible fill is the next bar's open,
+index `lookback + 1`. Both SPY references start with cash at the evaluation
+boundary and first buy at that next open. For example, lookback 20 means
+index 20 is the cash observation and index 21 is the earliest fill; index
+20 is not a trade. Buy-and-hold uses index 0 as the cash observation and
+index 1 as the earliest fill. `sessions` counts equity observations, not
+return intervals: N observations give N-1 close-to-close returns. These
+are synthetic bar indexes, not proof of an authenticated exchange calendar.
+The result includes `evaluation_start` and `excess_vs_capped_buy_hold`
+instead of the misleading `comparable_excess_return` label.
 
-**This excess measures returns relative to a constant capped SPY allocation,
-not skill, pure alpha or matched exposure.** A strategy that exits often has
+**This excess measures returns relative to an initially sized SPY
+buy-and-hold allocation, not skill, pure alpha or matched exposure.** A strategy that exits often has
 less time in market. This comparison does not control for volatility, sector
 betas, portfolio exposures or intraday differences.
+
+For example, with $100,000 starting cash, no costs, a $100 entry and a
+later $200 mark, the 100 shares initially cost $10,000. Their $20,000 marked
+value is 18.18% of $110,000 equity, not 10%. No rebalance occurs in this
+legacy proxy. The separately required daily-rebalanced 10%-SPY/cash
+benchmark (#20) must report its actual marked exposure, rebalance timing,
+transaction costs and corporate-action treatment; it is not implemented by
+this helper. This illustrative arithmetic is synthetic, not a return claim.
 
 Results are not dividend-adjusted total returns; share splits, corporate
 actions and survivorship biases remain unaddressed. Open positions are
