@@ -64,6 +64,22 @@ class UniverseContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "INVALID_ASSET_RECORD"):
             inspect((asset(membership_available_at=AS_OF + timedelta(seconds=1)),))
 
+    def test_dst_fold_rejects_future_membership_by_instant(self):
+        et = ZoneInfo("America/New_York")
+        early = datetime(2026, 11, 1, 1, 45, tzinfo=et, fold=0)
+        late = datetime(2026, 11, 1, 1, 15, tzinfo=et, fold=1)
+        options = dict(source="synthetic", revision="v1", license_claim="synthetic-only")
+        for future in (late, early.replace(fold=1)):
+            with self.subTest(future=future), self.assertRaisesRegex(
+                    ValueError, "INVALID_ASSET_RECORD"):
+                inspect_universe((asset(membership_available_at=future),),
+                                 as_of=early, **options)
+        valid = asset(membership_available_at=early)
+        receipt = inspect_universe((valid,), as_of=late, **options)
+        self.assertEqual(receipt.sha256, inspect_universe(
+            (replace(valid, membership_available_at=early.astimezone(UTC)),),
+            as_of=late.astimezone(UTC), **options).sha256)
+
     def test_duplicate_asset_and_active_ticker_rejected(self):
         with self.assertRaisesRegex(ValueError, "INVALID_ASSET_RECORD"):
             inspect((asset(), asset()))
