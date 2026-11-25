@@ -103,6 +103,32 @@ class PointInTimeReceiptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "UNAVAILABLE_BAR_VERSION"):
             inspect(poisoned, b)
 
+    def test_dst_fold_uses_instants_for_version_availability(self):
+        # A Friday bar can be revised over the DST fall-back weekend.
+        a, b = self.bars
+        first_close = datetime(2026, 10, 29, 16, 0, tzinfo=ET)
+        a = replace(a, bar=replace(a.bar, day=first_close.date()),
+                    first_seen_at=first_close + timedelta(minutes=5),
+                    version_available_at=first_close + timedelta(minutes=10))
+        b = replace(b, bar=replace(b.bar, day=date(2026, 10, 30)),
+                    first_seen_at=datetime(2026, 10, 30, 16, 5, tzinfo=ET))
+        early = datetime(2026, 11, 1, 1, 45, tzinfo=ET, fold=0)
+        late = datetime(2026, 11, 1, 1, 15, tzinfo=ET, fold=1)
+        with self.assertRaisesRegex(ValueError, "UNAVAILABLE_BAR_VERSION"):
+            inspect(a, replace(b, version_available_at=late), as_of=early)
+        with self.assertRaisesRegex(ValueError, "UNAVAILABLE_BAR_VERSION"):
+            inspect(a, replace(b, first_seen_at=late, version_available_at=early),
+                    as_of=late)
+        valid = replace(b, first_seen_at=early, version_available_at=late)
+        receipt = inspect(a, valid, as_of=late)
+        utc_valid = replace(valid, first_seen_at=early.astimezone(timezone.utc),
+                            version_available_at=late.astimezone(timezone.utc))
+        self.assertEqual(receipt.sha256,
+                         inspect(a, utc_valid, as_of=late.astimezone(timezone.utc)).sha256)
+        same_wall_later = early.replace(fold=1)
+        with self.assertRaisesRegex(ValueError, "UNAVAILABLE_BAR_VERSION"):
+            inspect(a, replace(b, version_available_at=same_wall_later), as_of=early)
+
     def test_revision_after_next_regular_open_is_lookahead(self):
         a, b = self.bars
         correction = replace(a, version_available_at=datetime(2026, 11, 3, 9, 31, tzinfo=ET))
