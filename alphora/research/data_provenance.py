@@ -31,6 +31,11 @@ def _utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _instant(value: datetime) -> datetime:
+    """Order timestamps by UTC instant, including repeated DST wall times."""
+    return value.astimezone(timezone.utc)
+
+
 def _end_of_regular_session(day):
     # Conservative 16:00 ET gate; vendor/exchange calendars must still validate
     # early closes, holidays and suspended symbols.
@@ -107,12 +112,13 @@ def inspect_daily_snapshot(
     for i, record in enumerate(records):
         if (not _aware(record.first_seen_at)
                 or not _aware(record.version_available_at)
-                or record.first_seen_at < _end_of_regular_session(record.bar.day)
-                or record.version_available_at < record.first_seen_at
-                or record.version_available_at > as_of):
+                or _instant(record.first_seen_at) < _instant(_end_of_regular_session(record.bar.day))
+                or _instant(record.version_available_at) < _instant(record.first_seen_at)
+                or _instant(record.version_available_at) > _instant(as_of)):
             raise ValueError("UNAVAILABLE_BAR_VERSION")
         if (i + 1 < len(records) and
-                record.version_available_at >= _next_regular_open(records[i + 1].bar.day)):
+                _instant(record.version_available_at) >=
+                _instant(_next_regular_open(records[i + 1].bar.day))):
             raise ValueError("NEXT_OPEN_LOOKAHEAD")
 
     def decimal_string(value):
