@@ -1,0 +1,240 @@
+"""Synthetic-only feature chronology tests; zero market or broker access."""
+import unittest
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+
+from alphora.research.feature_availability import (
+    MAX_FEATURE_INPUTS, FeatureEvidence, ResearchFeatureDecision,
+    audit_feature_availability,
+)
+
+UTC = timezone.utc
+T = datetime(2026, 1, 5, 16, tzinfo=UTC)
+H1, H2 = "1" * 64, "2" * 64
+
+
+def fixture():
+    price = FeatureEvidence("price.1", "asset.SPY", "PRICE", T, T + timedelta(seconds=1),
+                            T + timedelta(seconds=2), H1)
+    news = FeatureEvidence("news.1", "asset.SPY", "NEWS", T, T + timedelta(seconds=2),
+                           T + timedelta(seconds=3), H2)
+    return ResearchFeatureDecision("asset.SPY", T + timedelta(seconds=10),
+                                   (price, news))
+
+
+class FeatureAvailabilityTests(unittest.TestCase):
+    def test_valid_order_and_timezone_equivalence_are_deterministic(self):
+        d = fixture()
+        receipt = audit_feature_availability(
+            d, expected_artifact_sha256={"price.1": H1, "news.1": H2})
+        self.assertEqual((receipt.feature_count, receipt.news_feature_count), (2, 1))
+        self.assertEqual(receipt.provenance, "CALLER_ATTESTED_ONLY")
+        reordered = replace(d, inputs=tuple(reversed(d.inputs)))
+        self.assertEqual(receipt, audit_feature_availability(
+            reordered, expected_artifact_sha256={"news.1": H2, "price.1": H1}))
+        later_timezone = timezone(timedelta(hours=-5))
+        self.assertEqual(receipt, audit_feature_availability(
+            replace(d, decision_at=d.decision_at.astimezone(later_timezone)),
+            expected_artifact_sha256={"news.1": H2, "price.1": H1},
+            expected_receipt_sha256=receipt.sha256))
+
+    def test_rejects_future_measurement_and_first_receipt(self):
+        d = fixture()
+        for mutation in ("measured_through_at", "first_seen_at", "version_available_at"):
+            with self.subTest(mutation=mutation):
+                replacement = replace(d.inputs[0], **{mutation: d.decision_at + timedelta(seconds=1)})
+                with self.assertRaisesRegex(ValueError, "FEATURE_NOT_AVAILABLE_AT_DECISION"):
+                    audit_feature_availability(replace(d, inputs=(replacement, d.inputs[1])),
+                                               expected_artifact_sha256={"price.1": H1, "news.1": H2})
+
+    def test_strict_decision_time_boundary_and_chronology(self):
+        d = fixture()
+        cases = [replace(d.inputs[0], version_available_at=d.decision_at),
+                 replace(d.inputs[0], first_seen_at=d.inputs[0].version_available_at + timedelta(seconds=1)),
+                 replace(d.inputs[0], measured_through_at=d.inputs[0].first_seen_at + timedelta(seconds=1))]
+        for changed in cases:
+            with self.subTest(changed=changed):
+                with self.assertRaisesRegex(ValueError, "FEATURE_NOT_AVAILABLE_AT_DECISION"):
+                    audit_feature_availability(replace(d, inputs=(changed, d.inputs[1])),
+                                               expected_artifact_sha256={"price.1": H1, "news.1": H2})
+
+    def test_missing_mismatched_and_extra_pins_are_rejected(self):
+        d = fixture()
+        for pins in ({}, {"price.1": H1, "news.1": H1},
+                     {"price.1": H1, "news.1": H2, "extra": H1},
+                     {"price.1": H1, "other": H2}):
+            with self.subTest(pins=pins):
+                with self.assertRaisesRegex(ValueError, "INVALID_FEATURE_PINS|FEATURE_PIN_MISMATCH"):
+                    audit_feature_availability(d, expected_artifact_sha256=pins)
+
+    def test_replay_receipt_pin_rejects_changed_revision_or_timestamp(self):
+        d = fixture()
+        pins = {"price.1": H1, "news.1": H2}
+        receipt = audit_feature_availability(d, expected_artifact_sha256=pins)
+        altered = replace(d.inputs[0], first_seen_at=d.inputs[0].first_seen_at + timedelta(milliseconds=1))
+        with self.assertRaisesRegex(ValueError, "FEATURE_RECEIPT_MISMATCH"):
+            audit_feature_availability(replace(d, inputs=(altered, d.inputs[1])),
+                                       expected_artifact_sha256=pins,
+                                       expected_receipt_sha256=receipt.sha256)
+        changed = replace(d.inputs[0], artifact_sha256=H2)
+        with self.assertRaisesRegex(ValueError, "FEATURE_PIN_MISMATCH"):
+            audit_feature_availability(replace(d, inputs=(changed, d.inputs[1])),
+                                       expected_artifact_sha256=pins)
+
+    def test_duplicate_and_invalid_kind_fail_closed(self):
+        d = fixture()
+        for inputs in ((d.inputs[0], d.inputs[0]),
+                       (replace(d.inputs[0], kind="FAKE_NEWS"), d.inputs[1])):
+            with self.assertRaisesRegex(ValueError, "INVALID_FEATURE_EVIDENCE"):
+                audit_feature_availability(replace(d, inputs=inputs),
+                                           expected_artifact_sha256={"price.1": H1, "news.1": H2})
+
+    def test_invalid_decision_types_and_timezones(self):
+        d = fixture()
+        for x in (replace(d, decision_at=d.decision_at.replace(tzinfo=None)),
+                  replace(d, asset_id="bad asset"),
+                  replace(d, inputs=list(d.inputs)),
+                  replace(d, inputs=()),
+                  replace(d, inputs=(d.inputs[0],) * (MAX_FEATURE_INPUTS + 1))):
+            with self.subTest(x=repr(x)[:80]):
+                with self.assertRaisesRegex(ValueError, "INVALID_RESEARCH_DECISION"):
+                    audit_feature_availability(x, expected_artifact_sha256={})
+
+    def test_naive_feature_timestamp_and_invalid_hash(self):
+        d = fixture()
+        for changed in (replace(d.inputs[0], first_seen_at=T.replace(tzinfo=None)),
+                        replace(d.inputs[0], artifact_sha256="not-a-hash"),
+                        replace(d.inputs[0], input_id="unsafe id"),
+                        replace(d.inputs[0], asset_id="unsafe asset")):
+            with self.assertRaisesRegex(ValueError, "INVALID_FEATURE_EVIDENCE"):
+                audit_feature_availability(replace(d, inputs=(changed, d.inputs[1])),
+                                           expected_artifact_sha256={"price.1": H1, "news.1": H2})
+
+    def test_invalid_receipt_pin_and_external_pin_type(self):
+        d = fixture()
+        with self.assertRaisesRegex(ValueError, "INVALID_FEATURE_PINS"):
+            audit_feature_availability(d, expected_artifact_sha256={"price.1": H1, "news.1": H2},
+                                       expected_receipt_sha256="invalid")
+        with self.assertRaisesRegex(ValueError, "INVALID_FEATURE_PINS"):
+            audit_feature_availability(d, expected_artifact_sha256=[H1, H2])
+
+    def test_rejects_unmodified_cross_asset_price_or_news_evidence(self):
+        d = fixture()
+        pins = {"price.1": H1, "news.1": H2}
+        other = replace(d, asset_id="asset.QQQ")
+        with self.assertRaisesRegex(ValueError, "FEATURE_ASSET_MISMATCH"):
+            audit_feature_availability(other, expected_artifact_sha256=pins)
+        for i in (0, 1):
+            items = list(d.inputs)
+            items[i] = replace(items[i], asset_id="asset.QQQ")
+            with self.subTest(input_index=i):
+                with self.assertRaisesRegex(ValueError, "FEATURE_ASSET_MISMATCH"):
+                    audit_feature_availability(replace(d, inputs=tuple(items)), expected_artifact_sha256=pins)
+
+    def test_relabelled_asset_claim_is_not_authenticated(self):
+        d = fixture()
+        pins = {"price.1": H1, "news.1": H2}
+        r1 = audit_feature_availability(d, expected_artifact_sha256=pins)
+        moved = replace(d, asset_id="asset.QQQ", inputs=tuple(
+            replace(i, asset_id="asset.QQQ") for i in d.inputs))
+        r2 = audit_feature_availability(moved, expected_artifact_sha256=pins)
+        self.assertNotEqual(r1.sha256, r2.sha256)
+        with self.assertRaisesRegex(ValueError, "FEATURE_RECEIPT_MISMATCH"):
+            audit_feature_availability(moved, expected_artifact_sha256=pins,
+                                       expected_receipt_sha256=r1.sha256)
+        self.assertEqual(r2.provenance, "CALLER_ATTESTED_ONLY")
+
+
+    def test_dst_fold_future_revision_cannot_precede_decision(self):
+        # 2026-11-01 New York fall-back: the repeated 01:00 hour has
+        # different UTC instants even though all four values use one tzinfo.
+        from zoneinfo import ZoneInfo
+        eastern = ZoneInfo("America/New_York")
+
+        def at(hour, minute, fold):
+            return datetime(2026, 11, 1, hour, minute,
+                            tzinfo=eastern, fold=fold)
+
+        d = fixture()
+        # Feature collected at 06:05--06:20Z, but decision was at 05:50Z.
+        # Comparing Python wall time with identical tzinfo erroneously
+        # accepted 01:05 <= 01:10 <= 01:20 < 01:50.
+        changed = replace(d.inputs[0],
+                          measured_through_at=at(1, 5, 1),
+                          first_seen_at=at(1, 10, 1),
+                          version_available_at=at(1, 20, 1))
+        candidate = replace(d, decision_at=at(1, 50, 0),
+                            inputs=(changed, d.inputs[1]))
+        with self.assertRaisesRegex(ValueError,
+                                    "FEATURE_NOT_AVAILABLE_AT_DECISION"):
+            audit_feature_availability(candidate,
+                                       expected_artifact_sha256={
+                                           "price.1": H1, "news.1": H2})
+
+    def test_dst_fold_valid_absolute_order_is_allowed(self):
+        from zoneinfo import ZoneInfo
+        eastern = ZoneInfo("America/New_York")
+
+        def at(hour, minute, fold):
+            return datetime(2026, 11, 1, hour, minute,
+                            tzinfo=eastern, fold=fold)
+
+        d = fixture()
+        # 05:45Z <= 06:15Z <= 06:20Z < 06:30Z is valid, though
+        # same-tzinfo wall clock comparisons would reject 01:45 <= 01:15.
+        changed = replace(d.inputs[0],
+                          measured_through_at=at(1, 45, 0),
+                          first_seen_at=at(1, 15, 1),
+                          version_available_at=at(1, 20, 1))
+        candidate = replace(d, decision_at=at(1, 30, 1),
+                            inputs=(changed, d.inputs[1]))
+        receipt = audit_feature_availability(
+            candidate, expected_artifact_sha256={
+                "price.1": H1, "news.1": H2})
+        utc_candidate = replace(
+            candidate, decision_at=candidate.decision_at.astimezone(UTC),
+            inputs=tuple(replace(
+                item,
+                measured_through_at=item.measured_through_at.astimezone(UTC),
+                first_seen_at=item.first_seen_at.astimezone(UTC),
+                version_available_at=item.version_available_at.astimezone(UTC))
+                for item in candidate.inputs))
+        self.assertEqual(receipt, audit_feature_availability(
+            utc_candidate, expected_artifact_sha256={
+                "price.1": H1, "news.1": H2}))
+
+
+    def test_dst_cutoff_same_instant_and_previous_microsecond(self):
+        # Repeated-hour decision at 01:30 EST is 06:30 UTC.
+        # Equal absolute instants are unavailable, regardless of offset.
+        from zoneinfo import ZoneInfo
+        eastern = ZoneInfo("America/New_York")
+        decision_at = datetime(2026, 11, 1, 1, 30,
+                               tzinfo=eastern, fold=1)
+        cutoff = decision_at.astimezone(UTC)
+        d = fixture()
+        pins = {"price.1": H1, "news.1": H2}
+        price = replace(d.inputs[0],
+                        measured_through_at=cutoff - timedelta(seconds=2),
+                        first_seen_at=cutoff - timedelta(seconds=1))
+        candidate = replace(d, decision_at=decision_at,
+                            inputs=(replace(price, version_available_at=cutoff),
+                                    d.inputs[1]))
+        with self.assertRaisesRegex(ValueError,
+                                    "FEATURE_NOT_AVAILABLE_AT_DECISION"):
+            audit_feature_availability(candidate, expected_artifact_sha256=pins)
+        previous = replace(price, version_available_at=
+                           cutoff - timedelta(microseconds=1))
+        earlier = replace(candidate, inputs=(previous, d.inputs[1]))
+        receipt = audit_feature_availability(earlier,
+                                             expected_artifact_sha256=pins)
+        local = replace(previous, version_available_at=
+                        previous.version_available_at.astimezone(eastern))
+        self.assertEqual(receipt, audit_feature_availability(
+            replace(earlier, inputs=(local, d.inputs[1])),
+            expected_artifact_sha256=pins,
+            expected_receipt_sha256=receipt.sha256))
+
+
+if __name__ == "__main__":
+    unittest.main()
