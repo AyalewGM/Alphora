@@ -204,5 +204,37 @@ class FeatureAvailabilityTests(unittest.TestCase):
                 "price.1": H1, "news.1": H2}))
 
 
+    def test_dst_cutoff_same_instant_and_previous_microsecond(self):
+        # Repeated-hour decision at 01:30 EST is 06:30 UTC.
+        # Equal absolute instants are unavailable, regardless of offset.
+        from zoneinfo import ZoneInfo
+        eastern = ZoneInfo("America/New_York")
+        decision_at = datetime(2026, 11, 1, 1, 30,
+                               tzinfo=eastern, fold=1)
+        cutoff = decision_at.astimezone(UTC)
+        d = fixture()
+        pins = {"price.1": H1, "news.1": H2}
+        price = replace(d.inputs[0],
+                        measured_through_at=cutoff - timedelta(seconds=2),
+                        first_seen_at=cutoff - timedelta(seconds=1))
+        candidate = replace(d, decision_at=decision_at,
+                            inputs=(replace(price, version_available_at=cutoff),
+                                    d.inputs[1]))
+        with self.assertRaisesRegex(ValueError,
+                                    "FEATURE_NOT_AVAILABLE_AT_DECISION"):
+            audit_feature_availability(candidate, expected_artifact_sha256=pins)
+        previous = replace(price, version_available_at=
+                           cutoff - timedelta(microseconds=1))
+        earlier = replace(candidate, inputs=(previous, d.inputs[1]))
+        receipt = audit_feature_availability(earlier,
+                                             expected_artifact_sha256=pins)
+        local = replace(previous, version_available_at=
+                        previous.version_available_at.astimezone(eastern))
+        self.assertEqual(receipt, audit_feature_availability(
+            replace(earlier, inputs=(local, d.inputs[1])),
+            expected_artifact_sha256=pins,
+            expected_receipt_sha256=receipt.sha256))
+
+
 if __name__ == "__main__":
     unittest.main()
