@@ -155,7 +155,8 @@ class PaperOrderManager:
         # Atomic cash hold with the book's own risk recheck; vetoes propagate
         # before any ledger record exists. Idempotent retry is a no-op.
         self._book.reserve_buy(plan.intent_key, account, proposal,
-                               fee_budget=fee_budget, reconciled=True)
+                               fee_budget=fee_budget, reconciled=True,
+                               observed_at=plan.observed_at)
         view = self._ledger.create(
             plan.intent_key, symbol=proposal.symbol, side="BUY",
             qty=int(proposal.quantity), limit_price=proposal.price,
