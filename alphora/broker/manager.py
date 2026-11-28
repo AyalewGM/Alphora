@@ -18,7 +18,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal as D, DecimalException, localcontext
 
-from ..decision import EntryPlan, ExitPlan
+from ..decision import EntryPlan, ExitPlan, verified_entry_observation
 from ..orders import OrderLedger
 from ..reconcile import Reconciliation
 from ..reservations import OfflineReservations
@@ -145,6 +145,10 @@ class PaperOrderManager:
             raise ValueError("INEXACT_PAPER_STOP")
         if not proposal.quantity == proposal.quantity.to_integral_value():
             raise ValueError("INVALID_QUANTITY")
+        # Before any durable intent, reject a supplied observation that is
+        # inconsistent with the historical raw key. Legacy plans stay on
+        # the conservative path; this step does not loosen book deduplication.
+        verified_entry_observation(plan, expected_session_id=self._ledger.session_id)
         snap0 = self._book.snapshot()
         if snap0.halted:
             raise ValueError("PAPER_BOOK_HALTED")
