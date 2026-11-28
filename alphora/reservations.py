@@ -5,12 +5,15 @@ External reconciliation and independently verified market marks remain mandatory
 """
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime
+import json
 from decimal import Decimal as D, DecimalException, Inexact, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 import re
 import sqlite3
 from uuid import uuid4
 
+from .decision import EntryPlan, verified_entry_observation
 from .risk import (BuyProposal, PaperAccount, RiskPolicy, DEFAULT_RISK_POLICY,
                    INITIAL_EQUITY, validate_buy)
 
@@ -30,6 +33,39 @@ def _decimal(value):
     try:
         return D(value)
     except (ValueError, TypeError, ArithmeticError) as exc:
+        raise ValueError("BOOK_STATE_CORRUPT") from exc
+
+
+def _entry_receipt(intent_id, session_id, proposal, observed_at):
+    """Locally consistent witness only; not an authenticated market receipt."""
+    if observed_at is None:
+        return None
+    canonical = verified_entry_observation(
+        EntryPlan(True, "PAPER_BUY_ALLOWED", proposal, intent_id, observed_at),
+        expected_session_id=session_id)
+    return json.dumps([observed_at.isoformat(), str(proposal.quantity),
+                       canonical.isoformat()], separators=(",", ":"))
+
+
+def _check_entry_receipt(receipt, ident, session_id, symbol, qty, limit, stop):
+    if receipt is None:
+        return
+    try:
+        if type(receipt) is not str or len(receipt) > 512:
+            raise ValueError("invalid receipt")
+        fields = json.loads(receipt)
+        if (type(fields) is not list or len(fields) != 3
+                or not all(type(item) is str for item in fields)):
+            raise ValueError("invalid receipt")
+        raw_time, raw_qty, _canonical = fields
+        observed_at = datetime.fromisoformat(raw_time)
+        quantity = D(raw_qty)
+        if not quantity.is_finite() or quantity != qty:
+            raise ValueError("invalid receipt quantity")
+        proposal = BuyProposal(symbol, quantity, D(limit), D(stop))
+        if _entry_receipt(ident, session_id, proposal, observed_at) != receipt:
+            raise ValueError("invalid receipt identity")
+    except (ValueError, TypeError, ArithmeticError, OverflowError) as exc:
         raise ValueError("BOOK_STATE_CORRUPT") from exc
 
 
@@ -141,7 +177,20 @@ class OfflineReservations:
                         "INSERT INTO reconciliation_guard(id,state,token) "
                         "VALUES(1,?,NULL)", (state,))
                     self._db.execute("PRAGMA user_version=1")
-                elif schema_version != 1:
+                elif schema_version not in (1, 2):
+                    raise ValueError("BOOK_STATE_CORRUPT")
+                # Preserve the existing guard (including CHECKING/FATAL)
+                # before any migration. Never synthesize a missing guard.
+                self._guard_state()
+                columns = {row[1] for row in self._db.execute(
+                    "PRAGMA table_info(buy_intents)")}
+                if schema_version in (0, 1):
+                    if "entry_receipt" not in columns:
+                        self._db.execute(
+                            "ALTER TABLE buy_intents ADD COLUMN entry_receipt TEXT")
+                    # All old rows remain unknown; do not guess or backfill.
+                    self._db.execute("PRAGMA user_version=2")
+                elif "entry_receipt" not in columns:
                     raise ValueError("BOOK_STATE_CORRUPT")
                 # Reopening a corrupted persisted book must fail before any
                 # new reservations or hypothetical fills can be recorded.
@@ -247,10 +296,12 @@ class OfflineReservations:
         active = []
         reserved = D(0)
         intents = {}
-        for ident, symbol, qty, limit, stop, budget, filled, paid, status in self._db.execute(
-            "SELECT id,symbol,qty,limit_price,stop_price,fee_budget,filled,fees_paid,status "
+        for ident, symbol, qty, limit, stop, budget, filled, paid, status, receipt in self._db.execute(
+            "SELECT id,symbol,qty,limit_price,stop_price,fee_budget,filled,fees_paid,status,entry_receipt "
             "FROM buy_intents ORDER BY id"
         ):
+            _check_entry_receipt(receipt, ident, self._meta("session_id"),
+                                 symbol, qty, limit, stop)
             limit, stop, budget, paid = map(_decimal, (limit, stop, budget, paid))
             if (not isinstance(ident, str) or not _ID.fullmatch(ident)
                     or not isinstance(symbol, str) or not _SYMBOL.fullmatch(symbol)
@@ -436,7 +487,7 @@ class OfflineReservations:
 
     def reserve_buy(self, intent_id: str, account: PaperAccount,
                     proposal: BuyProposal, *, fee_budget: D = D(0),
-                    reconciled: bool = False):
+                    reconciled: bool = False, observed_at=None):
         """Reserve virtual cash; NEVER communicate this intent to any venue."""
         if (not isinstance(intent_id, str) or not _ID.fullmatch(intent_id)
                 or not isinstance(account, PaperAccount)
@@ -468,8 +519,9 @@ class OfflineReservations:
                 raise ValueError("UNRECONCILED_CASH_OR_SESSION")
             if not isinstance(proposal.symbol, str) or not _SYMBOL.fullmatch(proposal.symbol):
                 raise ValueError("INVALID_SYMBOL")
+            receipt = _entry_receipt(intent_id, snapshot.session_id, proposal, observed_at)
             existing = self._db.execute(
-                "SELECT symbol,qty,limit_price,stop_price,fee_budget,status FROM buy_intents WHERE id=?",
+                "SELECT symbol,qty,limit_price,stop_price,fee_budget,status,entry_receipt FROM buy_intents WHERE id=?",
                 (intent_id,)).fetchone()
             fields = (proposal.symbol, proposal.quantity, proposal.price,
                       proposal.stop_price, fee_budget)
@@ -478,6 +530,9 @@ class OfflineReservations:
                        D(existing[3]), D(existing[4]))
                 if old != fields:
                     raise ValueError("CONFLICTING_INTENT_ID")
+                if existing[6] is not None and existing[6] != receipt:
+                    raise ValueError("CONFLICTING_ENTRY_OBSERVATION")
+                # An unknown legacy row stays unknown, even on exact retry.
                 # A cancelled intent must never appear to have been reserved
                 # again: cancellation permanently releases its pending cash.
                 # Reuse a NEW id to request any subsequent virtual exposure.
@@ -591,9 +646,10 @@ class OfflineReservations:
                 if reserve > snapshot.available_cash:
                     raise ValueError("INSUFFICIENT_UNRESERVED_CASH")
                 self._db.execute(
-                    "INSERT INTO buy_intents(id,symbol,qty,limit_price,stop_price,fee_budget) VALUES(?,?,?,?,?,?)",
+                    "INSERT INTO buy_intents(id,symbol,qty,limit_price,stop_price,fee_budget,entry_receipt) "
+                    "VALUES(?,?,?,?,?,?,?)",
                     (intent_id, proposal.symbol, quantity, str(proposal.price),
-                     str(proposal.stop_price), str(fee_budget)),
+                     str(proposal.stop_price), str(fee_budget), receipt),
                 )
                 return self._snapshot()
         # The only successful transaction without a reservation is the
