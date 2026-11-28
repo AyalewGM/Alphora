@@ -142,6 +142,55 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.ledger.orders(), before_ledger)
         self.assertEqual(self.venue.open_orders(), before_venue)
 
+    def test_distinct_buy_observations_with_equal_terms_survive_restart(self):
+        # Distinct, fresh observations may have identical economic terms.
+        # Unlike alternate timestamp encodings of one observation, these
+        # must not be rejected as aliases when combined risk fits the cap.
+        source = EntryCandidate(
+            "SPY", D("50"), D("40"), at(), "WATCHLIST", "VERIFIED",
+            D("50"), "SPY", True)
+        first = propose_entry(
+            self.account(), source, as_of=at(),
+            expected_session_id="2026-11-02", reserved_cash=D(0),
+            reconciled=True)
+        self.assertTrue(first.permitted)
+        self.assertEqual(first.proposal.quantity, D("50"))
+        first_order = self.mgr.execute_entry(
+            first, self.account(), recon=self.recon(), now=at(),
+            reconciled=True)
+        self.assertEqual(first_order.status, "ACKED")
+        self.assertEqual(self.book.snapshot().reserved_cash, D("2500"))
+
+        self.reopen()
+        second = propose_entry(
+            self.account(), replace(source, observed_at=at(60),
+                                    pending_instrument_value=D("2500")),
+            as_of=at(60), expected_session_id="2026-11-02",
+            reserved_cash=self.book.snapshot().reserved_cash,
+            reconciled=True)
+        self.assertTrue(second.permitted)
+        self.assertEqual(second.proposal.quantity, D("50"))
+        self.assertNotEqual(first.intent_key, second.intent_key)
+        second_order = self.mgr.execute_entry(
+            second, self.account(), recon=self.recon(at(60)), now=at(60),
+            reconciled=True)
+        self.assertEqual(second_order.status, "ACKED")
+        self.assertNotEqual(first_order.broker_order_id,
+                            second_order.broker_order_id)
+        self.assertEqual(self.book.snapshot().reserved_cash, D("5000"))
+        self.assertEqual(len(self.ledger.orders()), 2)
+        self.assertEqual(len(self.venue.open_orders()), 2)
+
+        # Retrying the exact second observation must not reserve again.
+        self.reopen()
+        retry = self.mgr.execute_entry(
+            second, self.account(), recon=self.recon(at(61)), now=at(61),
+            reconciled=True)
+        self.assertEqual(second_order, retry)
+        self.assertEqual(self.book.snapshot().reserved_cash, D("5000"))
+        self.assertEqual(len(self.ledger.orders()), 2)
+        self.assertEqual(len(self.venue.open_orders()), 2)
+
     def test_generated_quote_aliases_do_not_duplicate_paper_dispatch(self):
         # The historical entry hash uses raw timestamp/Decimal spellings.
         # Plan all three encodings against the SAME pre-reservation snapshot:
