@@ -67,6 +67,39 @@ class EntryPlan:
     reason: str
     proposal: BuyProposal | None = None
     intent_key: str | None = None
+    # Raw aware observation used by the historical ENTRY key. Optional for
+    # manual/legacy plans, which have no verified observation witness.
+    observed_at: datetime | None = None
+
+
+def entry_intent_key(session_id, proposal, observed_at):
+    """Preserve the existing raw key encoding; do not rekey durable orders."""
+    return sha256((f"PAPER|ENTRY|{session_id}|{proposal.symbol}|"
+                  f"{observed_at.isoformat()}|{proposal.price}|"
+                  f"{proposal.stop_price}|{proposal.quantity}").encode("utf-8")).hexdigest()
+
+
+def verified_entry_observation(plan: EntryPlan, *, expected_session_id: str):
+    """Return canonical UTC observation, or None for a legacy/manual plan.
+
+    This verifies local key consistency, not market-data authenticity or
+    permission to dispatch. An arbitrary caller can generate a new key;
+    existing transactional risk and replay checks remain mandatory.
+    """
+    if not isinstance(plan, EntryPlan):
+        raise ValueError("INVALID_ENTRY_OBSERVATION")
+    if plan.observed_at is None:
+        return None
+    try:
+        if (not _aware(plan.observed_at)
+                or not isinstance(plan.proposal, BuyProposal)
+                or not isinstance(plan.intent_key, str)
+                or plan.intent_key != entry_intent_key(
+                    expected_session_id, plan.proposal, plan.observed_at)):
+            raise ValueError("INVALID_ENTRY_OBSERVATION")
+        return plan.observed_at.astimezone(timezone.utc)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError("INVALID_ENTRY_OBSERVATION") from exc
 
 
 def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
@@ -159,10 +192,8 @@ def propose_entry(account: PaperAccount, candidate: EntryCandidate, *,
                             expected_session_id=expected_session_id, policy=policy)
     if not checked.permitted:
         return EntryPlan(False, checked.reason)
-    key = sha256((f"PAPER|ENTRY|{expected_session_id}|{candidate.symbol}|"
-                  f"{candidate.observed_at.isoformat()}|{candidate.ask}|"
-                  f"{candidate.stop_price}|{quantity}").encode("utf-8")).hexdigest()
-    return EntryPlan(True, checked.reason, proposal, key)
+    key = entry_intent_key(expected_session_id, proposal, candidate.observed_at)
+    return EntryPlan(True, checked.reason, proposal, key, candidate.observed_at)
 
 
 @dataclass(frozen=True)

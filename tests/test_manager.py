@@ -10,7 +10,8 @@ from zoneinfo import ZoneInfo
 from alphora.broker.base import DispatchAck, DispatchRequest
 from alphora.broker.manager import PaperOrderManager
 from alphora.broker.paper import PaperBrokerAdapter
-from alphora.decision import EntryCandidate, EntryPlan, ExitPlan, propose_entry
+from alphora.decision import (EntryCandidate, EntryPlan, ExitPlan, propose_entry,
+                              verified_entry_observation)
 from alphora.orders import OrderLedger
 from alphora.reconcile import reconcile
 from alphora.reservations import OfflineReservations
@@ -141,6 +142,41 @@ class ManagerTests(unittest.TestCase):
         self.assertEqual(self.book.snapshot(), before_book)
         self.assertEqual(self.ledger.orders(), before_ledger)
         self.assertEqual(self.venue.open_orders(), before_venue)
+
+    def test_entry_observation_witness_is_bound_to_existing_key(self):
+        source = EntryCandidate(
+            "SPY", D("50"), D("40"), at(), "WATCHLIST", "VERIFIED",
+            D("50"), "SPY", True)
+        def plan(candidate, now):
+            return propose_entry(
+                self.account(), candidate, as_of=now,
+                expected_session_id="2026-11-02", reserved_cash=D(0),
+                reconciled=True)
+        original = plan(source, at())
+        alias = plan(replace(source, observed_at=at().astimezone(
+            ZoneInfo("America/New_York"))), at())
+        later = plan(replace(source, observed_at=at(60)), at(60))
+        for p in (original, alias, later):
+            self.assertTrue(p.permitted)
+        witness = lambda p: verified_entry_observation(
+            p, expected_session_id="2026-11-02")
+        self.assertNotEqual(original.intent_key, alias.intent_key)
+        self.assertEqual(witness(original), witness(alias))
+        self.assertEqual(witness(original), at())
+        self.assertEqual(witness(later), at(60))
+        self.assertIsNone(witness(self.entry()))
+        before = (self.book.snapshot(), self.ledger.orders(),
+                  self.venue.open_orders())
+        for forged in (replace(original, observed_at=at(60)),
+                       replace(original, observed_at=at().replace(tzinfo=None)),
+                       replace(original, intent_key="b" * 64)):
+            with self.subTest(forged=forged):
+                with self.assertRaisesRegex(ValueError, "INVALID_ENTRY_OBSERVATION"):
+                    self.mgr.execute_entry(
+                        forged, self.account(), recon=self.recon(), now=at(),
+                        reconciled=True)
+                self.assertEqual((self.book.snapshot(), self.ledger.orders(),
+                                  self.venue.open_orders()), before)
 
     def test_generated_quote_aliases_do_not_duplicate_paper_dispatch(self):
         # The historical entry hash uses raw timestamp/Decimal spellings.
